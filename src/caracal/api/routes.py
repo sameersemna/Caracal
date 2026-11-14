@@ -154,6 +154,21 @@ async def get_job(job_id: uuid.UUID, request: Request) -> dict[str, object]:
     return status.model_dump(mode="json")
 
 
+@router.get("/jobs/{job_id}/report")
+async def get_report(
+    job_id: uuid.UUID,
+    request: Request,
+    format: Literal["json", "md"] = Query(default="json"),
+) -> Response:
+    """The finished report as JSON or Markdown (docs/03 §2)."""
+    service = _service(request)
+    if format == "md":
+        markdown = await service.report_markdown(job_id)
+        return Response(content=markdown, media_type="text/markdown; charset=utf-8")
+    report = await service.report(job_id)
+    return JSONResponse(content=report.model_dump(mode="json"))
+
+
 @router.get("/jobs/{job_id}/transcript")
 async def get_transcript(
     job_id: uuid.UUID,

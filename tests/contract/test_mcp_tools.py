@@ -23,6 +23,7 @@ from caracal.queue import publish_event
 from caracal.services import JobService
 from caracal.storage import JobFiles
 from tests.contract.conftest import AUTH, Harness
+from tests.contract.test_api_report import _report
 
 URL = "https://example.com/talk"
 
@@ -158,6 +159,7 @@ async def test_every_registered_tool_declares_an_object_output_schema(
         "get_job",
         "list_jobs",
         "get_transcript",
+        "get_report",
         "list_speakers",
         "enroll_speaker",
         "delete_speaker",
@@ -167,6 +169,90 @@ async def test_every_registered_tool_declares_an_object_output_schema(
         schema = tool.output_schema
         assert isinstance(schema, dict), tool.name
         assert schema.get("type") == "object", (tool.name, schema)
+
+
+async def _store_report(h: Harness, job_id: uuid.UUID) -> None:
+    await h.repos.reports.put(job_id, _report(job_id).model_dump(mode="json"), "1.0")
+
+
+async def test_get_report_returns_the_full_report(make_harness: Callable[..., Harness]) -> None:
+    h = make_harness()
+    job_id = await _job(h, status="done")
+    await _store_report(h, job_id)
+
+    async with Client(build_mcp(_service(h), h.settings)) as client:
+        result = await client.call_tool("get_report", {"job_id": str(job_id)})
+
+    assert result.is_error is False
+    assert result.structured_content == _report(job_id).model_dump(mode="json")
+
+
+async def test_get_report_filters_top_level_sections(
+    make_harness: Callable[..., Harness],
+) -> None:
+    h = make_harness()
+    job_id = await _job(h, status="done")
+    await _store_report(h, job_id)
+
+    async with Client(build_mcp(_service(h), h.settings)) as client:
+        result = await client.call_tool(
+            "get_report",
+            {"job_id": str(job_id), "sections": ["summary", "context"]},
+        )
+
+    assert result.is_error is False
+    assert set(result.structured_content or {}) == {"summary", "context"}
+    assert result.structured_content["summary"]["one_line"] == "A short talk."
+
+
+async def test_get_report_markdown_returns_format_and_content(
+    make_harness: Callable[..., Harness],
+) -> None:
+    h = make_harness()
+    job_id = await _job(h, status="done")
+    await _store_report(h, job_id)
+
+    async with Client(build_mcp(_service(h), h.settings)) as client:
+        result = await client.call_tool(
+            "get_report",
+            {"job_id": str(job_id), "format": "markdown"},
+        )
+
+    assert result.is_error is False
+    assert result.structured_content is not None
+    assert result.structured_content["format"] == "markdown"
+    assert result.structured_content["content"].startswith("# A talk")
+
+
+async def test_get_report_rejects_an_unknown_section(
+    make_harness: Callable[..., Harness],
+) -> None:
+    h = make_harness()
+    job_id = await _job(h, status="done")
+    await _store_report(h, job_id)
+
+    async with Client(build_mcp(_service(h), h.settings)) as client:
+        result = await client.call_tool(
+            "get_report",
+            {"job_id": str(job_id), "sections": ["not_a_section"]},
+        )
+
+    assert result.is_error is True
+    assert "invalid_input" in _text(result)
+    assert "not_a_section" in _text(result)
+
+
+async def test_get_report_before_assembly_is_job_not_ready(
+    make_harness: Callable[..., Harness],
+) -> None:
+    h = make_harness()
+    job_id = await _job(h, status="running")
+
+    async with Client(build_mcp(_service(h), h.settings)) as client:
+        result = await client.call_tool("get_report", {"job_id": str(job_id)})
+
+    assert result.is_error is True
+    assert "job_not_ready" in _text(result)
 
 
 async def test_get_transcript_all_formats(make_harness: Callable[..., Harness]) -> None:
@@ -313,6 +399,7 @@ async def test_analyze_audio_waits_reports_progress_and_returns_done(
                 )
                 _write_artifacts(h, job.id)
                 await h.repos.jobs.set_title(job.id, "A talk")
+                await h.repos.reports.put(job.id, _report(job.id).model_dump(mode="json"), "1.0")
                 await h.repos.jobs.set_status(job.id, "done")
                 await publish_event(h.redis, h.keys, job.id, {"type": "end"})
                 return
@@ -339,6 +426,9 @@ async def test_analyze_audio_waits_reports_progress_and_returns_done(
     assert payload["summary"]["title"] == "A talk"
     assert payload["summary"]["duration_s"] == 12.5
     assert payload["summary"]["transcript_preview"].startswith("[00:00] my fellow americans")
+    assert payload["report_summary"]["title"] == "A talk"
+    assert payload["report_summary"]["languages"] == ["en"]
+    assert payload["report_summary"]["summary"] == "A short talk."
     assert payload["links"]["report"].endswith("/report")
     assert seen == [(50.0, 100.0, "half way")]
 

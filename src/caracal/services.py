@@ -22,6 +22,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from pydantic import ValidationError
 from redis.asyncio import Redis
 
 from caracal.api.schemas import (
@@ -50,6 +51,8 @@ from caracal.ingest.upload import UploadInfo, save_upload
 from caracal.log import get_logger
 from caracal.pipeline.stages import JobOptions, Repos, Stage
 from caracal.queue import JobQueue, Keys, rate_limit, set_cancel
+from caracal.report.model import Report, ReportSummary
+from caracal.report.render_md import render_markdown
 from caracal.speakers.voiceprint import EnrollmentDeps
 from caracal.speakers.voiceprint import enroll as enroll_voiceprint
 from caracal.storage import JobFiles, UploadFiles
@@ -499,6 +502,44 @@ class JobService:
             raise self._missing_artifact(job)
         media_type = "application/x-subrip" if ext == "srt" else "text/vtt; charset=utf-8"
         return path.read_bytes(), media_type
+
+    # -- report -----------------------------------------------------------
+
+    async def report(self, job_id: uuid.UUID) -> Report:
+        """The finished report from the shared store (docs/03 §2-§3).
+
+        Unknown jobs are ``not_found``; a job whose report does not exist yet (still running,
+        or never assembled) is ``job_not_ready`` (409); a failed job without a report is
+        ``not_found`` (404), exactly as the contract specifies.
+        """
+        job = await self.repos.jobs.get(job_id)
+        if job is None:
+            raise _not_found(job_id)
+        stored = await self.repos.reports.get(job_id)
+        if stored is None:
+            raise self._missing_artifact(job)
+        try:
+            return Report.model_validate(stored)
+        except ValidationError as exc:
+            raise CaracalError(
+                ErrorCode.INTERNAL,
+                "stored report is invalid",
+                {"job_id": str(job_id)},
+            ) from exc
+
+    async def report_markdown(self, job_id: uuid.UUID) -> str:
+        """The report rendered as escaped Markdown (docs/03 §2 ``format=md``)."""
+        return render_markdown(await self.report(job_id))
+
+    async def report_summary(self, job_id: uuid.UUID) -> ReportSummary | None:
+        """The compact report view for MCP ``analyze_audio``, or ``None`` without a report."""
+        try:
+            report = await self.report(job_id)
+        except CaracalError as exc:
+            if exc.code in {ErrorCode.NOT_FOUND, ErrorCode.JOB_NOT_READY}:
+                return None
+            raise
+        return report.summary_view()
 
     # -- speakers ---------------------------------------------------------
 
