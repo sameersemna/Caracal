@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -13,6 +13,10 @@ from typing import Any
 from pydantic import ValidationError
 from redis.asyncio import Redis
 
+from caracal.analysis.translate import (
+    TRANSLATE_REQUEST_FILENAME,
+    resolve_target_langs,
+)
 from caracal.asr.whisper import WhisperClient
 from caracal.config import Settings
 from caracal.db.tables import JOB_TERMINAL_STATUSES
@@ -120,20 +124,31 @@ async def run_pipeline(
     job_id: uuid.UUID,
     deps: RunnerDeps,
     registry: Mapping[Stage, StageFn] | None = None,
+    *,
+    stages: Sequence[Stage] | None = None,
+    force: frozenset[Stage] = frozenset(),
+    translate_targets: Sequence[str] | None = None,
 ) -> str:
     """Execute the registry's stages in canonical order, checkpointing and resuming.
+
+    ``stages`` restricts the run to a subset (the on-demand translate delivery re-runs only
+    translate, subtitles and assemble); ``force`` makes those stages ignore existing
+    checkpoints. ``translate_targets`` is passed to the translate stage for an on-demand
+    run. A terminal job is only resumed when ``stages`` is given, so a finished job can gain
+    translations without leaving its ``done`` state.
 
     Returns the job's final status: ``done``, ``failed``, ``cancelled``, ``lost`` when another
     worker took the queue entry over (nothing is written after that point), or the existing
     terminal status when the job was already finished.
     """
     active = dict(registry) if registry is not None else default_registry()
-    scheduled = [stage for stage in Stage if stage in active]
+    scheduled = [stage for stage in Stage if stage in active and (stages is None or stage in stages)]
 
     job = await deps.repos.jobs.get(job_id)
     if job is None:
         raise CaracalError(ErrorCode.NOT_FOUND, "job not found", {"job_id": str(job_id)})
-    if job.status in JOB_TERMINAL_STATUSES:
+    terminal = job.status in JOB_TERMINAL_STATUSES
+    if terminal and stages is None:
         return job.status
     if not await deps.still_owner():
         return "lost"
@@ -201,22 +216,25 @@ async def run_pipeline(
         keys=deps.keys,
         search=deps.search,
         cancelled=cancelled,
+        translate_targets=list(translate_targets) if translate_targets is not None else None,
     )
 
     try:
         async with asyncio.timeout(float(deps.settings.CARACAL_JOB_TIMEOUT_S)):
             if job.status == "queued":
                 await deps.repos.jobs.set_status(job_id, "running")
-            await deps.queue_events(
-                job_id,
-                _event({"type": "status", "status": "running"}, finished=finished, total=total),
-            )
+            if not terminal:
+                await deps.queue_events(
+                    job_id,
+                    _event({"type": "status", "status": "running"}, finished=finished, total=total),
+                )
             for stage in scheduled:
                 current = stage
                 if not await deps.still_owner():
                     return "lost"
                 if await deps.cancel_check(job_id):
-                    await deps.repos.jobs.set_status(job_id, "cancelled")
+                    if not terminal:
+                        await deps.repos.jobs.set_status(job_id, "cancelled")
                     await deps.queue_events(
                         job_id,
                         _event({"type": "end", "status": "cancelled"}, finished=finished, total=total),
@@ -224,7 +242,12 @@ async def run_pipeline(
                     return "cancelled"
 
                 row = rows.get(stage.value)
-                if files.stage(stage).exists() and row is not None and row.status in _CHECKPOINT_TERMINAL:
+                if (
+                    stage not in force
+                    and files.stage(stage).exists()
+                    and row is not None
+                    and row.status in _CHECKPOINT_TERMINAL
+                ):
                     finished += 1
                     continue
 
@@ -337,7 +360,8 @@ async def run_pipeline(
         timeout_error: dict[str, Any] = {"code": ErrorCode.INTERNAL.value, "message": "job timeout"}
         if current is not None:
             timeout_error["stage"] = current.value
-        await deps.repos.jobs.set_status(job_id, "failed", error=timeout_error)
+        if not terminal:
+            await deps.repos.jobs.set_status(job_id, "failed", error=timeout_error)
         await deps.queue_events(
             job_id,
             _event({"type": "end", "status": "failed"}, finished=finished, total=total),
@@ -346,9 +370,82 @@ async def run_pipeline(
 
     if not await deps.still_owner():
         return "lost"
-    await deps.repos.jobs.set_status(job_id, "done")
+    if not terminal:
+        await deps.repos.jobs.set_status(job_id, "done")
     await deps.queue_events(
         job_id,
         _event({"type": "end", "status": "done"}, finished=finished, total=total),
     )
     return "done"
+
+
+_TRANSLATE_STAGES: tuple[Stage, ...] = (Stage.TRANSLATE, Stage.SUBTITLES, Stage.ASSEMBLE)
+
+
+def _read_translate_request(files: JobFiles) -> list[str] | None:
+    """The languages an on-demand ``translate`` delivery asked for, if it left a request."""
+    payload = files.read_json(files.root / TRANSLATE_REQUEST_FILENAME)
+    if not isinstance(payload, dict):
+        return None
+    raw = payload.get("target_langs")
+    if not isinstance(raw, list):
+        return None
+    languages = [item for item in raw if isinstance(item, str) and item]
+    return languages or None
+
+
+def _transcript_language(files: JobFiles) -> str | None:
+    payload = files.read_json(files.transcript_json)
+    if not isinstance(payload, dict):
+        return None
+    code = payload.get("language_code")
+    return code if isinstance(code, str) and code else None
+
+
+async def run_translate(
+    job_id: uuid.UUID,
+    deps: RunnerDeps,
+    registry: Mapping[Stage, StageFn] | None = None,
+) -> str:
+    """Re-run translate, subtitles and assemble for a finished job (docs/03 §2).
+
+    The service writes ``translate-request.json`` before enqueueing the ``translate``
+    delivery; when it is absent (a manually enqueued delivery) the job's own target-language
+    option is resolved instead. The job keeps its ``done`` status: only translations,
+    subtitle files and the report change.
+    """
+    job = await deps.repos.jobs.get(job_id)
+    if job is None:
+        raise CaracalError(ErrorCode.NOT_FOUND, "job not found", {"job_id": str(job_id)})
+    files = JobFiles(deps.settings.CARACAL_DATA_DIR, job_id)
+    targets = _read_translate_request(files)
+    if targets is None:
+        try:
+            options = JobOptions.model_validate(job.options)
+        except ValidationError as exc:
+            raise CaracalError(
+                ErrorCode.INVALID_INPUT,
+                "stored job options are invalid",
+                {"job_id": str(job_id)},
+            ) from exc
+        targets = resolve_target_langs(
+            options.target_langs,
+            deps.settings.CARACAL_DEFAULT_TARGET_LANGS,
+            [],
+            _transcript_language(files),
+        )
+    if not targets:
+        (files.root / TRANSLATE_REQUEST_FILENAME).unlink(missing_ok=True)
+        return "done"
+
+    status = await run_pipeline(
+        job_id,
+        deps,
+        registry,
+        stages=_TRANSLATE_STAGES,
+        force=frozenset(_TRANSLATE_STAGES),
+        translate_targets=targets,
+    )
+    if status == "done":
+        (files.root / TRANSLATE_REQUEST_FILENAME).unlink(missing_ok=True)
+    return status

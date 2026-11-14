@@ -26,6 +26,7 @@ REQUIRED_TOOLS = frozenset(
         "list_jobs",
         "get_job",
         "get_report",
+        "translate_job",
         "list_speakers",
         "enroll_speaker",
         "delete_speaker",
@@ -159,6 +160,16 @@ async def test_every_tool_returns_a_json_rpc_result_over_streamable_http(
             called.add("get_report")
             assert report["summary"]["one_line"] == "A short talk."
             assert report["quality"]["stages"] == {"assemble": "done"}
+
+            translated = await _call(
+                client,
+                32,
+                "translate_job",
+                {"job_id": str(done_id), "target_langs": ["de"]},
+            )
+            called.add("translate_job")
+            assert translated["job_id"] == str(done_id)
+            assert translated["status"] == "queued"
 
             empty = await _call(client, 4, "list_speakers", {})
             called.add("list_speakers")

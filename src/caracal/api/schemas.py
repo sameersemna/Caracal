@@ -12,10 +12,12 @@ from pydantic import (
     ConfigDict,
     Field,
     SerializerFunctionWrapHandler,
+    field_validator,
     model_serializer,
     model_validator,
 )
 
+from caracal.analysis.translate import is_valid_target_lang
 from caracal.pipeline.stages import JobOptions
 
 JobStatusValue = Literal["queued", "running", "done", "failed", "cancelled"]
@@ -56,6 +58,25 @@ class JobCreate(BaseModel):
 
     source: JobSourceIn
     options: JobOptions = Field(default_factory=JobOptions)
+
+
+class TranslateIn(BaseModel):
+    """The ``POST /v1/jobs/{id}/translate`` body (docs/03 §2)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    target_langs: list[str] = Field(min_length=1)
+
+    @field_validator("target_langs")
+    @classmethod
+    def _valid_target_langs(cls, value: list[str]) -> list[str]:
+        ordered: list[str] = []
+        for code in value:
+            if not is_valid_target_lang(code):
+                raise ValueError(f"invalid target language code: {code!r}")
+            if code not in ordered:
+                ordered.append(code)
+        return ordered
 
 
 class UploadCreated(BaseModel):
@@ -125,6 +146,14 @@ class JobLinks(BaseModel):
     transcript: str
     events: str
     subtitles: dict[str, str] = Field(default_factory=dict)
+
+
+class TranslateQueued(BaseModel):
+    """The ``POST /v1/jobs/{id}/translate`` and MCP ``translate_job`` result."""
+
+    job_id: uuid.UUID
+    status: str
+    links: JobLinks
 
 
 class JobStatus(BaseModel):

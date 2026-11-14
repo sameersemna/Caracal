@@ -895,3 +895,37 @@ async def test_skipped_verify_keeps_the_identity_flags(
     assert [flag.message for flag in report.quality.review_flags] == [
         "performance content: speaker identities uncertain"
     ]
+
+
+async def test_translate_checkpoint_becomes_report_translations(
+    make_settings: Callable[..., Settings], tmp_path: Path
+) -> None:
+    settings = make_settings(CARACAL_PUBLIC_BASE_URL="http://caracal.test")
+    repos = make_fake_repos()
+    job = await _job(repos)
+    checkpoints = _full_checkpoints()
+    checkpoints[Stage.TRANSLATE.value] = _checkpoint(
+        "done",
+        {
+            "langs": {
+                "de": {"units": 5, "failed_units": 0, "overlong_cues": 1, "duration_s": 2.1},
+                "ar": {"units": 5, "failed_units": 5, "overlong_cues": 0, "duration_s": 1.4},
+            }
+        },
+    )
+
+    report = assemble_report(
+        checkpoints,
+        job=job,
+        settings=settings,
+        transcript=_transcript(speaker="S1"),
+    )
+
+    by_lang = {translation.lang: translation for translation in report.translations}
+    assert set(by_lang) == {"de", "ar"}
+    assert by_lang["de"].status == "done"
+    assert by_lang["de"].links["srt"] == (f"http://caracal.test/v1/jobs/{job.id}/subtitles/de.srt")
+    assert by_lang["de"].links["vtt"] == (f"http://caracal.test/v1/jobs/{job.id}/subtitles/de.vtt")
+    assert by_lang["ar"].status == "failed"
+    flags = [flag for flag in report.quality.review_flags if flag.field == "translations"]
+    assert [flag.message for flag in flags] == ["translation failed for: ar"]

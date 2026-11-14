@@ -23,7 +23,7 @@ from caracal.errors import CaracalError, ErrorCode
 from caracal.ingest.ssrf import Resolver, SystemResolver
 from caracal.llm.client import LLMClient
 from caracal.log import get_logger
-from caracal.pipeline.runner import RunnerDeps, run_pipeline
+from caracal.pipeline.runner import RunnerDeps, run_pipeline, run_translate
 from caracal.pipeline.stages import Repos, Stage, StageFn, m2_registry
 from caracal.queue import (
     Delivery,
@@ -247,7 +247,18 @@ class Worker:
         touch = asyncio.create_task(self._touch_entry(delivery.entry_id))
         status: str | None = None
         try:
-            status = await run_pipeline(delivery.job_id, self._deps(delivery.entry_id), self.registry)
+            if delivery.kind == "translate":
+                status = await run_translate(
+                    delivery.job_id,
+                    self._deps(delivery.entry_id),
+                    self.registry,
+                )
+            else:
+                status = await run_pipeline(
+                    delivery.job_id,
+                    self._deps(delivery.entry_id),
+                    self.registry,
+                )
         except asyncio.CancelledError:
             raise
         except CaracalError as exc:

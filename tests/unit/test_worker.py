@@ -14,6 +14,7 @@ from tests.fakes.redis import RecordingRedis, all_keys, make_fake_redis, text
 from tests.fakes.repo import make_fake_repos
 from tests.repo_contract import Repos
 
+from caracal.analysis.translate import TRANSLATE_REQUEST_FILENAME
 from caracal.config import Settings
 from caracal.llm.client import LLMClient
 from caracal.pipeline.stages import Stage, StageContext, StageResult, default_registry
@@ -424,3 +425,49 @@ async def test_worker_wires_an_llm_client_into_the_content_stage(
     assert seen == [worker.llm]
     assert seen[0] is not None
     assert isinstance(seen[0], LLMClient)
+
+
+async def test_translate_delivery_reruns_only_translate_subtitles_and_assemble(
+    make_settings: MakeSettings, tmp_path: Path, redis: RecordingRedis
+) -> None:
+    keys = Keys(PREFIX)
+    repos = make_fake_repos()
+    job_id = await _new_job(repos)
+    await repos.jobs.set_status(job_id, "done")
+    files = JobFiles(tmp_path, job_id)
+    files.ensure()
+    files.write_json(files.root / TRANSLATE_REQUEST_FILENAME, {"target_langs": ["de"]})
+
+    queue = JobQueue(redis, keys)
+    await queue.ensure_group()
+    await queue.enqueue(job_id, "translate")
+
+    calls: list[str] = []
+    registry = {
+        Stage.INGEST: _done_stage(Stage.INGEST, calls),
+        Stage.TRANSLATE: _done_stage(Stage.TRANSLATE, calls),
+        Stage.SUBTITLES: _done_stage(Stage.SUBTITLES, calls),
+        Stage.ASSEMBLE: _done_stage(Stage.ASSEMBLE, calls),
+    }
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path, REDIS_PREFIX=PREFIX, CARACAL_WORKER_CONCURRENCY=1)
+    worker = Worker(
+        settings,
+        redis,
+        repos,
+        registry=registry,
+        worker_id="worker-translate",
+        intervals=_fast_intervals(),
+    )
+    stop = asyncio.Event()
+    run = asyncio.create_task(worker.run(stop))
+    try:
+        await _wait_for(lambda: _stream_is_empty(redis, keys))
+    finally:
+        stop.set()
+        await asyncio.wait_for(run, timeout=5)
+
+    assert calls == ["translate", "subtitles", "assemble"]
+    job = await repos.jobs.get(job_id)
+    assert job is not None
+    assert job.status == "done"
+    assert not (files.root / TRANSLATE_REQUEST_FILENAME).exists()

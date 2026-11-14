@@ -12,6 +12,7 @@ import asyncio
 import os
 import shutil
 import threading
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
@@ -19,12 +20,21 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, Protocol, cast
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError, field_validator
 
 from caracal.analysis.content import analyse_content
 from caracal.analysis.identity import VoiceprintMatch, resolve_identities
 from caracal.analysis.planner import PlanInputs
 from caracal.analysis.planner import plan as build_plan
+from caracal.analysis.translate import (
+    TranslatedUnits,
+    is_valid_target_lang,
+    normalise_target_langs,
+    redistribute,
+    resolve_target_langs,
+    translate_units,
+    units_from_cues,
+)
 from caracal.analysis.verify import verify as verify_targets
 from caracal.asr import (
     Segment,
@@ -54,7 +64,7 @@ from caracal.speakers.align import assign_speakers, retime_outside_speech, speak
 from caracal.speakers.diarize import Diarizer, Turn
 from caracal.speakers.voiceprint import classify
 from caracal.storage import JobFiles
-from caracal.subtitles import cues_from_transcript, to_srt, to_vtt
+from caracal.subtitles import Cue, cues_from_transcript, to_srt, to_vtt
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
@@ -107,6 +117,20 @@ class JobOptions(BaseModel):
     speaker_hints: list[SpeakerHint] = Field(default_factory=list, max_length=20)
     context_hint: str | None = Field(default=None, max_length=2000)
 
+    @field_validator("target_langs")
+    @classmethod
+    def _valid_target_langs(cls, value: list[str] | None) -> list[str] | None:
+        """Reject unknown/ill-shaped codes at job creation (docs/03 §2, docs/04 §10)."""
+        if value is None:
+            return None
+        ordered: list[str] = []
+        for code in value:
+            if not is_valid_target_lang(code):
+                raise ValueError(f"invalid target language code: {code!r}")
+            if code not in ordered:
+                ordered.append(code)
+        return ordered
+
 
 class Repos(Protocol):
     """The repository bundle a stage and the runner depend on (docs/01 §3)."""
@@ -156,6 +180,9 @@ class StageContext:
     keys: Keys | None = None
     search: SearchRouter | None = None
     cancelled: Callable[[], Awaitable[bool]] = _never_cancelled
+    #: Set by the runner for an on-demand ``translate`` delivery: translate exactly these
+    #: languages and ignore the plan's skip flag (docs/04 §10, card T3.3).
+    translate_targets: list[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -1140,12 +1167,145 @@ async def stage_verify(ctx: StageContext) -> StageResult:
     )
 
 
+_NO_TRANSLATION_REASON = "no target language differs from the source"
+
+
+def _langid_languages(output: dict[str, object] | None) -> list[dict[str, object]]:
+    """The ``languages`` array a langid checkpoint recorded, tolerating an empty stage."""
+    if output is None:
+        return []
+    return [_as_dict(item, "langid") for item in _as_list(output.get("languages", []), "langid")]
+
+
+def _translation_context(content: dict[str, object] | None) -> tuple[list[str], str]:
+    """Glossary names and the one-line summary the translation prompt receives."""
+    if content is None:
+        return [], ""
+    summary_text = ""
+    summary = content.get("summary")
+    if isinstance(summary, dict):
+        for key in ("one_line", "short", "detailed"):
+            value = summary.get(key)
+            if isinstance(value, str) and value.strip():
+                summary_text = value.strip()
+                break
+    glossary: list[str] = []
+    for item in _as_list(content.get("entities", []), "content"):
+        entry = _as_dict(item, "content")
+        text = entry.get("text")
+        if isinstance(text, str) and text.strip() and text.strip() not in glossary:
+            glossary.append(text.strip())
+    return glossary, summary_text
+
+
+def _translated_cue_payload(cues: list[Cue]) -> list[dict[str, object]]:
+    """Serialise translated cues for the translate checkpoint (timings stay the source's)."""
+    return [
+        {
+            "start": cue.start,
+            "end": cue.end,
+            "speaker": cue.speaker,
+            "lines": list(cue.lines),
+        }
+        for cue in cues
+    ]
+
+
 async def stage_translate(ctx: StageContext) -> StageResult:
-    """Translation is gated by the plan; the translator itself lands in a later card."""
-    reason = await _plan_skip(ctx, Stage.TRANSLATE)
-    if reason is not None:
-        return StageResult(status="skipped", reason=reason)
-    return StageResult(status="skipped", reason=_PENDING_STAGE)
+    """Translate the aligned transcript's sentence units and keep per-cue timings.
+
+    On-demand deliveries set :attr:`StageContext.translate_targets`, which bypasses the
+    plan's skip flag; a normal pipeline run resolves the languages from the job options and
+    the detected source language (docs/04 §2, §10).
+    """
+    transcript = _load_transcript(ctx) if ctx.files.transcript_json.is_file() else None
+    previous = await _stage_output(ctx, Stage.TRANSLATE)
+    languages: dict[str, object] = {}
+    if previous is not None and isinstance(previous.get("langs"), dict):
+        languages = dict(cast("dict[str, object]", previous["langs"]))
+    preserved: dict[str, object] = {"langs": languages} if languages else {}
+    if ctx.translate_targets is not None:
+        # The caller asked for exactly these languages; do not re-apply the source-language
+        # exclusion that a normal job-option resolution uses.
+        targets = normalise_target_langs([code for code in ctx.translate_targets if code])
+    else:
+        reason = await _plan_skip(ctx, Stage.TRANSLATE)
+        if reason is not None:
+            return StageResult(status="skipped", reason=reason, output=preserved)
+        langid = await _stage_output(ctx, Stage.LANGID)
+        targets = resolve_target_langs(
+            ctx.options.target_langs,
+            ctx.settings.CARACAL_DEFAULT_TARGET_LANGS,
+            _langid_languages(langid),
+            transcript.language_code if transcript is not None else None,
+        )
+    if not targets:
+        return StageResult(status="skipped", reason=_NO_TRANSLATION_REASON, output=preserved)
+    if ctx.llm is None:
+        return StageResult(status="skipped", reason="llm unavailable", output=preserved)
+    if transcript is None:
+        raise CaracalError(ErrorCode.INTERNAL, "transcript is missing")
+
+    cues = cues_from_transcript(transcript)
+    units = units_from_cues(cues)
+    if not units:
+        return StageResult(status="skipped", reason="nothing to translate", output=preserved)
+
+    content = await _done_output(ctx, Stage.CONTENT)
+    glossary, summary = _translation_context(content)
+
+    for target in targets:
+        started = time.monotonic()
+        try:
+            translated = await translate_units(
+                units,
+                target,
+                glossary=glossary,
+                summary=summary,
+                llm=ctx.llm,
+            )
+            failed_units = translated.failed_units if isinstance(translated, TranslatedUnits) else 0
+            translated_cues: list[Cue] = []
+            overlong_cues = 0
+            for unit, text in zip(units, translated, strict=True):
+                unit_cues, overlong = redistribute(unit, text, target)
+                translated_cues.extend(unit_cues)
+                overlong_cues += overlong
+        except CaracalError as exc:
+            # A language that cannot be translated at all keeps its source text and is
+            # reported as failed; the rest of the job (and other languages) continues.
+            logger.warning(
+                "translate.language_failed",
+                extra={"job_id": str(ctx.job_id), "lang": target, "code": exc.code.value},
+            )
+            failed_units = len(units)
+            overlong_cues = 0
+            translated_cues = []
+            for unit in units:
+                unit_cues, _overlong = redistribute(unit, unit.text, target)
+                translated_cues.extend(unit_cues)
+
+        duration_s = round(time.monotonic() - started, 3)
+        languages[target] = {
+            "units": len(units),
+            "failed_units": failed_units,
+            "overlong_cues": overlong_cues,
+            "duration_s": duration_s,
+            "cues": _translated_cue_payload(translated_cues),
+        }
+        logger.info(
+            "translate.language_done",
+            extra={
+                "job_id": str(ctx.job_id),
+                "lang": target,
+                "units": len(units),
+                "failed_units": failed_units,
+                "overlong_cues": overlong_cues,
+                "duration_s": duration_s,
+            },
+        )
+
+    return StageResult(status="done", output={"langs": languages})
 
 
 def _turns(value: object, what: str) -> list[Turn]:
@@ -1218,6 +1378,55 @@ def _render_subtitles(ctx: StageContext, transcript: Transcript) -> dict[str, ob
             "source.vtt": _relative(ctx, vtt),
         },
     }
+
+
+def _checkpoint_cue(raw: object, number: int) -> Cue:
+    """One translated cue from the translate checkpoint, re-validated for rendering."""
+    item = _as_dict(raw, "translate")
+    lines = [
+        line.strip()
+        for line in _as_list(item.get("lines", []), "translate")
+        if isinstance(line, str) and line.strip()
+    ]
+    speaker = item.get("speaker")
+    return Cue(
+        index=number,
+        start=_as_number(item.get("start"), "translate"),
+        end=_as_number(item.get("end"), "translate"),
+        lines=lines,
+        speaker=speaker if isinstance(speaker, str) and speaker else None,
+        word_span=(0, 0),
+    )
+
+
+def _write_translated_subtitles(
+    ctx: StageContext,
+    translate: dict[str, object],
+) -> dict[str, str]:
+    """Render every language the translate checkpoint holds to SRT and WebVTT."""
+    raw_langs = translate.get("langs")
+    if not isinstance(raw_langs, dict):
+        return {}
+    files: dict[str, str] = {}
+    for lang in sorted(cast("dict[str, object]", raw_langs)):
+        entry = _as_dict(cast("dict[str, object]", raw_langs)[lang], "translate")
+        raw_cues = entry.get("cues")
+        if not isinstance(raw_cues, list):
+            continue
+        cues: list[Cue] = []
+        for raw in raw_cues:
+            cue = _checkpoint_cue(raw, len(cues) + 1)
+            if cue.lines:
+                cues.append(cue)
+        if not cues:
+            continue
+        srt = ctx.files.subtitle(lang, "srt")
+        vtt = ctx.files.subtitle(lang, "vtt")
+        ctx.files.write_text(srt, to_srt(cues))
+        ctx.files.write_text(vtt, to_vtt(cues))
+        files[f"{lang}.srt"] = _relative(ctx, srt)
+        files[f"{lang}.vtt"] = _relative(ctx, vtt)
+    return files
 
 
 async def stage_align(ctx: StageContext) -> StageResult:
@@ -1303,11 +1512,23 @@ async def stage_voiceprint(ctx: StageContext) -> StageResult:
 
 
 async def stage_subtitles(ctx: StageContext) -> StageResult:
-    """Render the source-language SRT and WebVTT cues (docs/04 §10)."""
+    """Render source and translated SRT/WebVTT cues (docs/04 §10)."""
     transcript = _load_transcript(ctx)
     output = _render_subtitles(ctx, transcript)
+    translate = await _done_output(ctx, Stage.TRANSLATE)
+    if translate is not None:
+        files = output.get("files")
+        if isinstance(files, dict):
+            cast("dict[str, str]", files).update(_write_translated_subtitles(ctx, translate))
     cues = cast("int", output["cues"])
-    logger.info("subtitles complete", extra={"job_id": str(ctx.job_id), "cues": cues})
+    logger.info(
+        "subtitles complete",
+        extra={
+            "job_id": str(ctx.job_id),
+            "cues": cues,
+            "files": len(cast("dict[str, object]", output.get("files", {}))),
+        },
+    )
     return StageResult(status="done", output=output)
 
 

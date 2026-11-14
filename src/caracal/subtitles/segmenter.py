@@ -191,6 +191,69 @@ def _timings(
     return list(zip(starts, ends, strict=True))
 
 
+def wrap_lines(
+    text: str,
+    *,
+    max_chars: int = 42,
+    max_lines: int = 2,
+    break_chars: bool = False,
+) -> tuple[list[str], bool]:
+    """Wrap already-translated text into subtitle lines (docs/04 §10).
+
+    Word languages wrap at spaces; ``break_chars=True`` (CJK) wraps at characters. The
+    normal case is one or two balanced lines. When two lines cannot hold the text the
+    function keeps every character and reports ``overlong=True``; the caller counts those
+    cues, because the fixed cue timing cannot be widened.
+    """
+    cleaned = "".join(text.split()) if break_chars else " ".join(text.split())
+    if not cleaned:
+        return [], False
+    if len(cleaned) <= max_chars:
+        return [cleaned], False
+
+    if break_chars:
+        best: tuple[int, int] | None = None
+        for split in range(max(1, len(cleaned) - max_chars), min(len(cleaned), max_chars) + 1):
+            left = cleaned[:split]
+            right = cleaned[split:]
+            if len(left) <= max_chars and len(right) <= max_chars:
+                balance = abs(len(left) - len(right))
+                if best is None or balance < best[1]:
+                    best = (split, balance)
+        if best is not None:
+            return [cleaned[: best[0]], cleaned[best[0] :]], False
+        lines = [cleaned[index : index + max_chars] for index in range(0, len(cleaned), max_chars)]
+        return lines, len(lines) > max_lines or any(len(line) > max_chars for line in lines)
+
+    tokens = cleaned.split()
+    best = None
+    for split in range(1, len(tokens)):
+        left = " ".join(tokens[:split])
+        right = " ".join(tokens[split:])
+        if len(left) <= max_chars and len(right) <= max_chars:
+            balance = abs(len(left) - len(right))
+            if best is None or balance < best[1]:
+                best = (split, balance)
+    if best is not None:
+        left = " ".join(tokens[: best[0]])
+        right = " ".join(tokens[best[0] :])
+        return [left, right], False
+
+    packed: list[list[str]] = []
+    current: list[str] = []
+    for token in tokens:
+        if current and len(" ".join([*current, token])) > max_chars:
+            packed.append(current)
+            current = [token]
+        else:
+            current = [*current, token]
+    if current:
+        packed.append(current)
+    lines = [" ".join(line) for line in packed]
+    overlong = len(lines) > max_lines or any(len(line) > max_chars for line in lines)
+    return lines, overlong
+
+
 def cues_from_transcript(
     transcript: Transcript,
     *,
