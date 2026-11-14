@@ -28,6 +28,7 @@ from caracal.pipeline.stages import (
     default_registry,
 )
 from caracal.queue import Keys
+from caracal.speakers.diarize import Diarizer
 from caracal.storage import JobFiles
 
 _RETRY_DELAYS: tuple[float, ...] = (2.0, 8.0)
@@ -56,6 +57,7 @@ class RunnerDeps:
     # Process-wide stage clients, built once by the worker (docs/01 §4). They stay optional
     # so the M0 stub registry can run without any network-capable objects.
     whisper: WhisperClient | None = None
+    diarizer: Diarizer | None = None
     resolver: Resolver | None = None
     redis: Redis | None = None
     keys: Keys | None = None
@@ -181,6 +183,7 @@ async def run_pipeline(
         load=load,
         progress=progress,
         whisper=deps.whisper,
+        diarizer=deps.diarizer,
         resolver=deps.resolver,
         redis=deps.redis,
         keys=deps.keys,

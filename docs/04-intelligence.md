@@ -109,7 +109,8 @@ The LLM call (prompt `plan.md`) receives title, description excerpt, first ~3 mi
 
 - `diarize`: pyannote pipeline loaded once per worker process (lazy, `HF_TOKEN`), on `DIARIZATION_DEVICE`.
   Input `audio.wav`. Output turns `[{start,end,label}]` with labels renamed `S1..Sn` in order of first appearance,
-  plus one embedding per label (centroid over that label's turns ≥ 1.5 s). Pass `num_speakers` only if the
+  plus one embedding per label — pyannote's own `speaker_embeddings` (256-d, rows in `labels()` order), L2-normalised. Measured: same
+  speaker 0.94–0.99, different speakers 0.29–0.31 (cosine). Pass `num_speakers` only if the
   caller hinted it.
 - `align`: each word gets the speaker whose turn overlaps its midpoint most; segments are split at speaker changes.
 - `voiceprint`: cosine search in `voiceprints` (pgvector) per label → `VoiceMatch{known_speaker_id, name,
