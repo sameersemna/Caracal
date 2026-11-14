@@ -161,6 +161,9 @@ class Keys:
     def search(self, provider: str, qhash: str) -> str:
         return self.key("search", provider, qhash)
 
+    def search_budget(self, job_id: uuid.UUID | str) -> str:
+        return self.key("search", "budget", str(job_id))
+
     def ratelimit(self, ident_hash: str) -> str:
         return self.key("ratelimit", ident_hash)
 
