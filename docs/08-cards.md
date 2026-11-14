@@ -53,6 +53,7 @@ Card fields: **Read** (only these doc sections), **Files** (the only files the w
 ### T1.6 Wire M1 stages + transcript/subtitle endpoints + MCP server (`analyze_audio`, `get_job`, `get_transcript`)
 - Read: 03 §0, §2–3, 01 §4
 - Files: `src/caracal/pipeline/stages.py`, `src/caracal/mcp/**`, `src/caracal/api/routes.py`, `src/caracal/cli.py`, contract tests incl. `tests/contract/test_parity.py`
+- Cleanup (verdict 08): `UploadRepo.create(upload_id=…)` so uploads live in `uploads/<upload_id>/`; move the round-07 test's dummy route off `/v1/uploads` and delete the 404→415 mapping.
 - Must: `/mcp` behind the same pure-ASGI pre-body bearer auth + body cap as `/v1` (verdict 07), plus the Origin guard.
 - Accept: parity test (docs/03 §0) covers every capability that exists after M1; rows for later milestones are listed in the test as `pending=<card>` and the test fails if a pending row's card is already merged
 - Boss live check: end-to-end on jfk.wav upload and on a YouTube link; MCP via a real MCP client

@@ -12,17 +12,23 @@ from typing import TYPE_CHECKING, Any, cast
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.routing import APIRoute
+from python_multipart.multipart import parse_options_header
+from starlette.datastructures import Headers
+from starlette.routing import Match
+from starlette.types import Scope
 
 from caracal.api.auth import bearer_token, require_auth
-from caracal.api.schemas import JobCreate
+from caracal.api.schemas import JobCreate, UploadCreated
 from caracal.db.repo import JobRecord, StageRecord
 from caracal.db.tables import JOB_STATUSES, JOB_TERMINAL_STATUSES
 from caracal.errors import CaracalError, ErrorCode
 from caracal.ingest.router import classify_source_static
+from caracal.ingest.upload import receive_upload
 from caracal.log import get_logger
 from caracal.pipeline.stages import Stage
 from caracal.queue import rate_limit, set_cancel
-from caracal.storage import JobFiles
+from caracal.storage import JobFiles, UploadFiles
 
 if TYPE_CHECKING:
     from caracal.app import AppDeps
@@ -148,6 +154,82 @@ def _remove_job_dir(settings: Settings, job_id: uuid.UUID) -> None:
         )
         return
     shutil.rmtree(target, ignore_errors=True)
+
+
+class MultipartUploadRoute(APIRoute):
+    """An ``APIRoute`` that only claims ``multipart/form-data`` requests.
+
+    docs/03 §2 defines ``POST /v1/uploads`` as a multipart endpoint, so a request with any
+    other content type is not this route's business: it falls through the router and
+    :func:`caracal.app.create_app` renders it as 415 rather than a 404.
+    """
+
+    def matches(self, scope: Scope) -> tuple[Match, Scope]:
+        match, child_scope = super().matches(scope)
+        if match is not Match.FULL:
+            return match, child_scope
+        content_type = Headers(scope=scope).get("content-type", "")
+        if not content_type.lower().startswith("multipart/form-data"):
+            return Match.NONE, {}
+        return match, child_scope
+
+
+async def create_upload(request: Request) -> JSONResponse:
+    """Stream one multipart ``file`` part to disk (docs/03 §2, docs/06 S6).
+
+    The body is parsed as it arrives and is never buffered whole. Exactly one part named
+    ``file`` carrying a filename is accepted; other form fields are ignored.
+    """
+    deps = _deps(request)
+    settings = _settings(request)
+    content_type, options = parse_options_header(request.headers.get("content-type"))
+    if content_type != b"multipart/form-data":
+        raise CaracalError(
+            ErrorCode.UNSUPPORTED_MEDIA,
+            "POST /v1/uploads requires multipart/form-data",
+        )
+    boundary = options.get(b"boundary")
+    if not boundary:
+        raise CaracalError(ErrorCode.INVALID_INPUT, "multipart boundary is required")
+
+    files = UploadFiles(settings.CARACAL_DATA_DIR, uuid.uuid4())
+    info = await receive_upload(
+        request.stream(),
+        boundary=boundary,
+        files=files,
+        max_bytes=settings.CARACAL_MAX_UPLOAD_MB * 1024 * 1024,
+    )
+    try:
+        record = await deps.repos.uploads.create(
+            filename=info.filename,
+            size_bytes=info.size_bytes,
+            sha256=info.sha256,
+            path=str(info.path),
+        )
+    except Exception:
+        # The row is the only reference retained by the API; without it the file is junk.
+        try:
+            info.path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning(
+                "could not remove an orphaned upload file", extra={"upload_id": str(info.upload_id)}
+            )
+        raise
+    body = UploadCreated(
+        upload_id=record.id,
+        filename=record.filename,
+        size_bytes=record.size_bytes,
+        sha256=record.sha256,
+    )
+    return JSONResponse(status_code=201, content=body.model_dump(mode="json"))
+
+
+router.add_api_route(
+    "/uploads",
+    create_upload,
+    methods=["POST"],
+    route_class_override=MultipartUploadRoute,
+)
 
 
 @router.post("/jobs")

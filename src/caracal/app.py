@@ -52,6 +52,7 @@ if TYPE_CHECKING:
 logger = get_logger("caracal.app")
 
 DEFAULT_V1_BODY_LIMIT_BYTES = 64 * 1024
+MULTIPART_OVERHEAD_BYTES = 64 * 1024
 DEFAULT_HEALTH_TIMEOUT_S = 2.0
 DEFAULT_HEALTH_CACHE_TTL_S = 10.0
 
@@ -350,7 +351,15 @@ def create_app(
         return _envelope(413, ErrorCode.TOO_LARGE, "request body is too large")
 
     @app.exception_handler(StarletteHTTPException)
-    async def http_error_handler(_request: Request, exc: StarletteHTTPException) -> JSONResponse:
+    async def http_error_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+        if exc.status_code == 404 and request.method == "POST" and request.url.path == "/v1/uploads":
+            # The upload route only claims multipart bodies (see ``MultipartUploadRoute``);
+            # any other content type is an unsupported media type, not a missing route.
+            return _envelope(
+                415,
+                ErrorCode.UNSUPPORTED_MEDIA,
+                "POST /v1/uploads requires multipart/form-data",
+            )
         code = ErrorCode.NOT_FOUND if exc.status_code == 404 else ErrorCode.INVALID_INPUT
         response = _envelope(exc.status_code, code, str(exc.detail))
         for name, value in (exc.headers or {}).items():
@@ -365,12 +374,19 @@ def create_app(
     app.include_router(public_router)
     app.include_router(router)
     app.add_middleware(OriginGuardMiddleware, public_base_url=settings.CARACAL_PUBLIC_BASE_URL)
+    # The upload route has its own cap (docs/02 CARACAL_MAX_UPLOAD_MB) plus multipart
+    # header/boundary overhead; explicit overrides win so tests can shrink it.
+    effective_limits: dict[tuple[str, str], int] = {
+        ("POST", "/v1/uploads"): settings.CARACAL_MAX_UPLOAD_MB * 1024 * 1024 + MULTIPART_OVERHEAD_BYTES,
+    }
+    if body_limits:
+        effective_limits.update(body_limits)
     # Added last so it is the outermost user middleware (inside Starlette's error handling):
     # no /v1 body byte is read before the bearer token has been checked.
     app.add_middleware(
         AuthBodyLimitMiddleware,
         token=settings.CARACAL_API_TOKEN.get_secret_value(),
-        body_limits=body_limits,
+        body_limits=effective_limits,
     )
     return app
 

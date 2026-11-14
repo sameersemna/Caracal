@@ -43,3 +43,112 @@ def test_media_extensions_are_direct(url: str) -> None:
 )
 def test_everything_else_is_platform(url: str) -> None:
     assert classify_source_static(url) == "platform"
+
+
+# --- async router: platform hosts, static extensions and the HEAD probe (T1.1) ---
+
+from tests.fakes.resolver import PUBLIC_IP, FakeResolver  # noqa: E402
+
+from caracal.errors import CaracalError, ErrorCode  # noqa: E402
+from caracal.ingest.router import classify_source  # noqa: E402
+
+
+class _Head:
+    def __init__(self, content_type: str | None = "audio/mpeg", error: Exception | None = None) -> None:
+        self.content_type = content_type
+        self.error = error
+        self.calls: list[str] = []
+
+    async def __call__(self, url: str) -> str | None:
+        self.calls.append(url)
+        if self.error is not None:
+            raise self.error
+        return self.content_type
+
+
+def _resolver() -> FakeResolver:
+    resolver = FakeResolver()
+    resolver.add("example.com", PUBLIC_IP)
+    return resolver
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.youtube.com/watch?v=abc",
+        "https://youtu.be/abc",
+        "https://vimeo.com/123",
+        "https://on.soundcloud.com/x",
+        "https://www.tiktok.com/@a/video/1",
+        "https://www.instagram.com/reel/x",
+        "https://www.facebook.com/watch?v=1",
+        "https://fb.watch/abc",
+        "https://x.com/a/status/1",
+        "https://twitter.com/a/status/1",
+        "https://www.twitch.tv/videos/1",
+        "https://www.dailymotion.com/video/x",
+        "https://www.bilibili.com/video/BV1",
+        "https://rumble.com/v1",
+    ],
+)
+async def test_platform_hosts_need_no_network(url: str) -> None:
+    head = _Head()
+    assert await classify_source(url, resolver=_resolver(), http_head=head) == "platform"
+    assert head.calls == []
+
+
+async def test_static_media_extension_is_direct_without_a_probe() -> None:
+    head = _Head()
+    assert (
+        await classify_source("https://example.com/a.mp3", resolver=_resolver(), http_head=head) == "direct"
+    )
+    assert head.calls == []
+
+
+async def test_media_head_response_is_direct() -> None:
+    head = _Head("video/mp4; charset=binary")
+    assert (
+        await classify_source("https://example.com/watch", resolver=_resolver(), http_head=head) == "direct"
+    )
+    assert head.calls == ["https://example.com/watch"]
+
+
+async def test_html_head_response_is_platform() -> None:
+    head = _Head("text/html")
+    assert (
+        await classify_source("https://example.com/article", resolver=_resolver(), http_head=head)
+        == "platform"
+    )
+
+
+async def test_head_failure_falls_back_to_platform() -> None:
+    head = _Head(error=RuntimeError("boom"))
+    assert await classify_source("https://example.com/x", resolver=_resolver(), http_head=head) == "platform"
+
+
+async def test_unavailable_head_falls_back_to_platform() -> None:
+    head = _Head(error=CaracalError(ErrorCode.SOURCE_UNAVAILABLE, "dns"))
+    assert await classify_source("https://example.com/x", resolver=_resolver(), http_head=head) == "platform"
+
+
+async def test_blocked_head_propagates() -> None:
+    head = _Head(error=CaracalError(ErrorCode.SOURCE_BLOCKED, "blocked"))
+    with pytest.raises(CaracalError) as excinfo:
+        await classify_source("https://example.com/x", resolver=_resolver(), http_head=head)
+    assert excinfo.value.code is ErrorCode.SOURCE_BLOCKED
+
+
+async def test_lookalike_platform_suffix_is_probed() -> None:
+    head = _Head("text/html")
+    assert (
+        await classify_source("https://notyoutube.com/x", resolver=_resolver(), http_head=head) == "platform"
+    )
+    assert head.calls == ["https://notyoutube.com/x"]
+
+
+async def test_non_http_scheme_is_platform_without_a_probe() -> None:
+    head = _Head()
+    assert (
+        await classify_source("ftp://example.com/a.mp3", resolver=_resolver(), http_head=head) == "platform"
+    )
+    assert head.calls == []
