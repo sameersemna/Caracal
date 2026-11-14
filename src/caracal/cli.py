@@ -162,6 +162,43 @@ def _worker() -> int:
         return 1
 
 
+def _serve(settings: Settings) -> int:
+    """Run the REST + MCP HTTP app with uvicorn in this process (docs/01 §3)."""
+    import uvicorn
+
+    from caracal.app import create_app
+
+    uvicorn.run(
+        create_app(settings),
+        host=settings.CARACAL_HOST,
+        port=settings.CARACAL_PORT,
+        workers=1,
+        log_config=None,
+        proxy_headers=False,
+    )
+    return 0
+
+
+def _serve_command() -> int:
+    """Load settings, configure JSON logging, then run uvicorn in-process."""
+    configure_logging("INFO")
+    logger = get_logger("caracal.serve")
+    try:
+        settings = get_settings()
+    except ValidationError as exc:
+        logger.error("config invalid", extra={"fields": _invalid_config_fields(exc)})
+        return 1
+    configure_logging(settings.CARACAL_LOG_LEVEL, secrets=_secret_values(settings))
+    try:
+        return _serve(settings)
+    except CaracalError as exc:
+        logger.error(
+            "server stopped with an error",
+            extra={"code": exc.code.value, "error": exc.message},
+        )
+        return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the CLI. Returns the process exit code."""
     parser = _build_parser()
@@ -183,6 +220,8 @@ def main(argv: list[str] | None = None) -> int:
         return _migrate()
     if command == "worker":
         return _worker()
+    if command == "serve":
+        return _serve_command()
 
     sys.stderr.write(f"{command}: available from a later milestone\n")
     return 2

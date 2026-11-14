@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from caracal.cli import _run_worker, main
+from caracal.cli import _run_worker, _serve, main
 from caracal.config import Settings, get_settings
 from caracal.db.repo import PostgresJobRepo
 from caracal.log import get_logger
@@ -35,7 +35,7 @@ def test_help_lists_all_subcommands(capsys: pytest.CaptureFixture[str]) -> None:
         assert name in captured.out
 
 
-@pytest.mark.parametrize("command", ["serve", "mcp-stdio"])
+@pytest.mark.parametrize("command", ["mcp-stdio"])
 def test_unimplemented_subcommands_exit_two_with_stderr_message(
     command: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -43,6 +43,67 @@ def test_unimplemented_subcommands_exit_two_with_stderr_message(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == f"{command}: available from a later milestone\n"
+
+
+def test_serve_command_runs_the_server(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _set_required(monkeypatch)
+    calls: list[Settings] = []
+
+    def fake_serve(settings: Settings) -> int:
+        calls.append(settings)
+        return 0
+
+    monkeypatch.setattr("caracal.cli._serve", fake_serve)
+
+    assert main(["serve"]) == 0
+    assert len(calls) == 1
+    assert calls[0].CARACAL_PORT == 11404
+    assert calls[0].CARACAL_HOST == "127.0.0.1"
+    assert capsys.readouterr().out == ""
+
+
+def test_serve_passes_uvicorn_the_documented_options(
+    make_settings: Callable[..., Settings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = make_settings(CARACAL_HOST="192.0.2.10", CARACAL_PORT=12000)
+    app = object()
+    built: list[Settings] = []
+    run_calls: list[tuple[object, dict[str, Any]]] = []
+
+    def fake_create_app(received: Settings) -> object:
+        built.append(received)
+        return app
+
+    def fake_run(application: object, **kwargs: Any) -> None:
+        run_calls.append((application, kwargs))
+
+    monkeypatch.setattr("caracal.app.create_app", fake_create_app)
+    monkeypatch.setattr("uvicorn.run", fake_run)
+
+    assert _serve(settings) == 0
+    assert built == [settings]
+    assert run_calls == [
+        (
+            app,
+            {
+                "host": "192.0.2.10",
+                "port": 12000,
+                "workers": 1,
+                "log_config": None,
+                "proxy_headers": False,
+            },
+        )
+    ]
+
+
+def test_serve_rejects_invalid_configuration(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["serve"]) == 1
+    records = _records(capsys.readouterr().err)
+    invalid = next(record for record in records if record["msg"] == "config invalid")
+    assert invalid["level"] == "ERROR"
+    assert "CARACAL_API_TOKEN" in str(invalid["fields"])
 
 
 def test_worker_command_runs_the_worker(
