@@ -17,6 +17,9 @@ TimeoutStopSec=60
 NoNewPrivileges=true
 ProtectSystem=strict
 ReadWritePaths=/home/sameer/Public/Shared/Work/Services/MCP/Caracal/data
+# pyannote/huggingface_hub writes refs + lock files even for cached models; torch and yt-dlp keep caches too.
+# Without these, ProtectHome=read-only would break diarization and YouTube downloads under the system manager.
+ReadWritePaths=/home/sameer/.cache/huggingface /home/sameer/.cache/torch /home/sameer/.cache/yt-dlp
 PrivateTmp=true
 ProtectHome=read-only
 
