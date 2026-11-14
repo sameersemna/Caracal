@@ -15,8 +15,7 @@ Verified 2026-11-14: PostgreSQL **18.6** on latitude, database `caracal`, user `
 | `known_speakers` | `id uuid pk`, `name text`, `name_norm text unique`, `notes text null`, `created_at`, `updated_at` |
 | `voiceprints` | `id uuid pk`, `known_speaker_id uuid fk cascade`, `job_id uuid null`, `speaker_label text`, `embedding vector(EMB_DIM)`, `created_at` — HNSW index `vector_cosine_ops` |
 
-`EMB_DIM` is a migration constant set in card T2.3 after measuring the pyannote embedding size
-(do not guess; T2.3 records the measured value in `docs/findings/errata.md` for the boss to confirm).
+`EMB_DIM = 256` (measured 2026-11-14: community-1 `speaker_embeddings` shape (n, 256)).
 
 Dedup: a new job whose source `sha256` (uploads) or `webpage_url` (platform) matches a `done` job from the last
 7 days with identical options returns the existing job id with `"deduplicated": true` unless `options.depth=="deep"`.
