@@ -393,7 +393,7 @@ async def test_lindsay_confirmation_expands_the_name_and_promotes(
         script=script,
     )
 
-    assert router.calls == ["Lindsay All Ears English Podcast"]
+    assert router.calls == ["Lindsay All Ears English"]
     assert len(result.hits) == len(hits)
     assert [hit.id for hit in result.hits] == ["web:1", "web:2", "web:3", "web:4", "web:5"]
     assert result.queries_used == 1
@@ -414,6 +414,54 @@ async def test_lindsay_confirmation_expands_the_name_and_promotes(
     assert verification.target == "speaker:S1"
     assert verification.verdict == "supported"
     assert {source.evidence_id for source in verification.sources} == {"web:1", "web:4"}
+
+
+async def test_identity_query_uses_the_channel_not_the_episode_title(
+    make_settings: MakeSettings,
+) -> None:
+    """Verdict 33, real All Ears English job: the episode title is generic, the channel is stable.
+
+    The model planned ``Lindsay <episode title>`` and the live job found nothing, so the
+    deterministic ``<candidate> <channel>`` query must run first and the title-based model
+    query must still run alongside it.
+    """
+    settings = make_settings(BRAVE_API_KEY="brave-key")
+    hits = await _fixture_hits("brave_lindsay")
+    script = [
+        json_response(
+            _queries("speaker:S1", "Lindsay How to Learn English with a Podcast Thank You"),
+        ),
+        json_response(
+            {
+                "results": [
+                    {
+                        "label": "S1",
+                        "candidate": "Lindsay",
+                        "full_name": "Lindsay McMahon",
+                        "supported": True,
+                        "web_ids": ["web:1", "web:4"],
+                    }
+                ]
+            }
+        ),
+    ]
+
+    result, _fake, router = await _run(
+        settings,
+        speakers=[_speaker("S1", "Lindsay", 0.55)],
+        outcomes=[hits, []],
+        script=script,
+        metadata={
+            "title": "How to Learn English with a Podcast Thank You",
+            "channel": "All Ears English",
+            "uploader": "All Ears English",
+        },
+    )
+
+    assert router.calls[0] == "Lindsay All Ears English"
+    assert router.calls[1] == ("Lindsay How to Learn English with a Podcast Thank You All Ears English")
+    assert result.queries_used == 2
+    assert result.speakers[0].name == "Lindsay McMahon"
 
 
 async def test_thin_name_match_triggers_one_corroboration_and_promotes(
@@ -451,7 +499,7 @@ async def test_thin_name_match_triggers_one_corroboration_and_promotes(
     )
 
     assert router.calls == [
-        "Lindsay All Ears English Podcast",
+        "Lindsay All Ears English",
         '"Lindsay McMahon" All Ears English',
     ]
     assert [hit.id for hit in result.hits] == ["web:1", "web:2", "web:3", "web:4", "web:5"]
@@ -505,7 +553,7 @@ async def test_budget_exhausted_before_corroboration_keeps_the_confirmed_name(
         budget_after_calls=1,
     )
 
-    assert router.calls == ["Lindsay All Ears English Podcast"]
+    assert router.calls == ["Lindsay All Ears English"]
     assert result.queries_used == 1
     assert [hit.id for hit in result.hits] == ["web:1"]
     # The apple.com hit still confirms the given name, but the expansion is not corroborated.

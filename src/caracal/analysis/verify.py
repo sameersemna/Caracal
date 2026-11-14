@@ -446,9 +446,17 @@ def _quote_sentence(text: str) -> str:
 
 
 def _mentions_context(query: str, metadata: Mapping[str, str]) -> bool:
-    """Whether the query already names the recording's title, channel or uploader."""
+    """Whether the query already names the stable channel/uploader context (verdict 33).
+
+    Episode titles are often generic ("How to Learn English with a Podcast"), so when a
+    channel or uploader exists that is what an identity query must name. The title is only
+    the context of last resort when the metadata has neither a channel nor an uploader.
+    """
     tokens = set(normalise_text(query).split())
-    for field in ("title", "channel", "uploader"):
+    fields: tuple[str, ...] = ("channel", "uploader")
+    if not any(metadata.get(field) for field in fields):
+        fields = ("title",)
+    for field in fields:
         value = metadata.get(field)
         if not value:
             continue
@@ -459,8 +467,8 @@ def _mentions_context(query: str, metadata: Mapping[str, str]) -> bool:
 
 
 def _identity_context(metadata: Mapping[str, str]) -> str:
-    """The best metadata phrase to attach to an identity search."""
-    for field in ("title", "channel", "uploader"):
+    """The stable show/person phrase to attach to an identity search: channel → uploader → title."""
+    for field in ("channel", "uploader", "title"):
         value = _clean(metadata.get(field))
         if value:
             return value
@@ -471,7 +479,7 @@ def _apply_query_rules(target: VerifyTarget, query: str, metadata: Mapping[str, 
     """Enforce the documented query shapes (docs/04 §8 step 2, card T3.2 requirement 2).
 
     A quote-attribution query carries the sentence in double quotes; an identity-confirm
-    query carries the candidate and a piece of recording context (title / channel / show).
+    query carries the candidate and a piece of recording context (channel / uploader / title).
     """
     text = _clean(query)
     if target.kind == "quote_attribution":
@@ -515,8 +523,19 @@ def _queries_for(
     raw: Sequence[str],
     metadata: Mapping[str, str],
 ) -> list[str]:
-    """Validate the model's queries, apply the query rules and fall back deterministically."""
+    """Validate the model's queries, apply the query rules and fall back deterministically.
+
+    An identity-confirm target always leads with the deterministic ``<candidate> <channel or
+    uploader>`` query (verdict 33). The model's own query still runs when it differs, so a
+    title-based plan cannot replace the stable show/person context. Without any metadata
+    context the deterministic query would be the bare candidate, which the model's queries
+    already carry, so the model's list is used as before.
+    """
     queries: list[str] = []
+    if target.kind == "identity_confirm" and target.candidate and _identity_context(metadata):
+        deterministic = normalise_query(_apply_query_rules(target, _clean(target.candidate), metadata))
+        if deterministic:
+            queries.append(deterministic)
     for candidate in raw:
         query = normalise_query(_apply_query_rules(target, candidate, metadata))
         if query and query not in queries:
@@ -848,11 +867,7 @@ def _proposed_name(target: VerifyTarget, answer: _LlmIdentityResult) -> str | No
 
 def _corroboration_context(metadata: Mapping[str, str]) -> str:
     """The channel/show/title phrase a name corroboration query appends."""
-    for name in ("channel", "title", "uploader"):
-        value = _clean(metadata.get(name))
-        if value:
-            return value
-    return ""
+    return _identity_context(metadata)
 
 
 def _corroboration_query(target: VerifyTarget, name: str, metadata: Mapping[str, str]) -> str:
