@@ -21,7 +21,11 @@ Card fields: **Read** (only these doc sections), **Files** (the only files the w
 - Files: `alembic.ini`, `src/caracal/migrations/**`, `src/caracal/db/{__init__,engine,tables,repo}.py`, `tests/fakes/repo.py`, `tests/unit/test_repo_fake.py`, `tests/live/test_db.py`
 - Accept: `alembic upgrade head` creates every table except `voiceprints` (T2.3); repo protocol + in-memory fake share one interface; live test (boss) migrates a scratch schema on latitude and round-trips a job
 
-### T0.3 Queue, worker skeleton, runner with checkpoints, jobs REST
+### T0.3a Queue (Streams), worker, runner, storage → round 04
+### T0.3b REST app: auth, Origin, jobs routes, SSE, healthz, rate limit, `serve` → round 05
+(T0.3 was split in two for the worker's context size; the summary below covers both halves.)
+
+### T0.3 (combined summary)
 - Read: 01 §1, §4–5, 03 §1–2 (jobs, healthz), 03 §4, 05 §2–3, 06 S1/S2/S10/S11
 - Files: `src/caracal/{app,queue,worker,storage}.py`, `src/caracal/api/**`, `src/caracal/pipeline/{__init__,stages,runner}.py`, tests under `tests/unit/` and `tests/contract/`
 - Accept: Streams queue per docs/05 §2 (enqueue, consumer group, heartbeat XCLAIM, XAUTOCLAIM recovery, max-deliveries → failed, ack+del), every key via `queue.key()` (test with a recording fake asserts every touched key starts with the configured prefix, using a non-default prefix like `t3st:`); runner executes a list of stages, writes checkpoints atomically, resumes skipping done stages, applies the failure policy, honours cancel flag; REST `POST/GET /v1/jobs`, `/events` (SSE), `/healthz`, auth 401s, Origin check; stages are stubs that return `skipped: reason="not implemented in M0"` (allowed string, not a TODO)
