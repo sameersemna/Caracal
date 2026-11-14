@@ -25,7 +25,7 @@ from typing import Any, Literal, cast
 from pydantic import ValidationError
 from redis.asyncio import Redis
 
-from caracal.analysis.translate import TRANSLATE_REQUEST_FILENAME, is_valid_target_lang
+from caracal.analysis.translate import is_valid_target_lang
 from caracal.api.schemas import (
     AnalyzeSummary,
     CancelResult,
@@ -511,8 +511,8 @@ class JobService:
         """Queue an on-demand translation for a finished job (docs/03 §2-§3).
 
         The job keeps its ``done`` status: only translate, subtitles and assemble re-run,
-        and existing translations are kept. The requested languages are written to a small
-        request artifact the worker's ``translate`` delivery reads.
+        and existing translations are kept. The requested languages travel inside the queue
+        entry, so back-to-back requests for one job each keep their own languages.
         """
         job = await self.repos.jobs.get(job_id)
         if job is None:
@@ -540,14 +540,9 @@ class JobService:
                 {"job_id": str(job_id)},
             )
 
-        files = JobFiles(self.data_dir, job_id)
-        files.ensure()
-        request = files.root / TRANSLATE_REQUEST_FILENAME
-        files.write_json(request, {"target_langs": languages})
         try:
-            await self.queue.enqueue(job_id, "translate")
+            await self.queue.enqueue(job_id, "translate", payload={"target_langs": languages})
         except Exception as exc:
-            request.unlink(missing_ok=True)
             raise CaracalError(
                 ErrorCode.DEPENDENCY_DOWN,
                 "queue unavailable",

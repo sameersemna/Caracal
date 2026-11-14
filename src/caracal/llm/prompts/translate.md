@@ -6,7 +6,8 @@ Rules:
 - Return exactly the same number of units as the input, each with its original index `i`. Do not add, drop or merge units.
 - Keep the subtitle register: short, plain, spoken language. No commentary, no explanations, no notes.
 - Do not add evidence ids, citations, labels or metadata to the translated text.
-- Keep these names exactly as written: {glossary}
+- Names and place names: {name_rule}
+- Apply the same name rule to these names from the recording: {glossary}
 - Keep numbers, dates, units of measure and proper nouns unchanged unless they have a standard, widely used translation.
 - Do not add quotation marks, bidi control characters or other marks that are not in the source.
 - Context of the recording: {summary}

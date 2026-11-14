@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import math
 import uuid
 from collections.abc import Callable
@@ -17,7 +18,6 @@ from typing import Any
 import pytest
 from mcp.client import Client
 
-from caracal.analysis.translate import TRANSLATE_REQUEST_FILENAME
 from caracal.mcp.server import build_mcp
 from caracal.pipeline.stages import JobOptions, Stage
 from caracal.queue import publish_event
@@ -632,9 +632,7 @@ async def test_translate_job_queues_the_requested_languages(
     entries = await h.redis.xrange(h.keys.jobs_stream())
     assert len(entries) == 1
     assert entries[0][1][b"kind"] == b"translate"
-
-    files = JobFiles(h.settings.CARACAL_DATA_DIR, done_id)
-    assert files.read_json(files.root / TRANSLATE_REQUEST_FILENAME) == {"target_langs": ["de", "ar"]}
+    assert json.loads(entries[0][1][b"payload"]) == {"target_langs": ["de", "ar"]}
 
     assert not_ready.is_error is True
     assert "job_not_ready" in _text(not_ready)

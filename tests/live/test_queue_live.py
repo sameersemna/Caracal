@@ -56,13 +56,20 @@ async def test_queue_lock_events_cancel_and_rate_limit(redis: Redis) -> None:
     job_id = uuid.uuid4()
     try:
         await queue.ensure_group()
-        entry_id = await queue.enqueue(job_id, "pipeline")
+        entry_id = await queue.enqueue(
+            job_id,
+            "translate",
+            payload={"target_langs": ["de", "ar"], "nested": {"keep": True}},
+        )
 
         deliveries = await queue.read("live-worker", count=1, block_ms=1_000)
         assert len(deliveries) == 1
         assert deliveries[0].job_id == job_id
         assert deliveries[0].entry_id == entry_id
+        assert deliveries[0].kind == "translate"
         assert deliveries[0].times_delivered == 1
+        # Verdict 35 fix 1 on real Redis: the entry payload survives the round trip intact.
+        assert deliveries[0].payload == {"target_langs": ["de", "ar"], "nested": {"keep": True}}
 
         assert await queue.touch("live-worker", entry_id) is True
         assert await queue.ack("live-worker", entry_id) is True

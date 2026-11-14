@@ -14,7 +14,8 @@ from pydantic import ValidationError
 from redis.asyncio import Redis
 
 from caracal.analysis.translate import (
-    TRANSLATE_REQUEST_FILENAME,
+    is_valid_target_lang,
+    normalise_target_langs,
     resolve_target_langs,
 )
 from caracal.asr.whisper import WhisperClient
@@ -382,16 +383,15 @@ async def run_pipeline(
 _TRANSLATE_STAGES: tuple[Stage, ...] = (Stage.TRANSLATE, Stage.SUBTITLES, Stage.ASSEMBLE)
 
 
-def _read_translate_request(files: JobFiles) -> list[str] | None:
-    """The languages an on-demand ``translate`` delivery asked for, if it left a request."""
-    payload = files.read_json(files.root / TRANSLATE_REQUEST_FILENAME)
-    if not isinstance(payload, dict):
+def _requested_languages(payload: Mapping[str, Any] | None) -> list[str] | None:
+    """The valid language codes a ``translate`` entry carries, or ``None`` when it carries none."""
+    if not payload or "target_langs" not in payload:
         return None
     raw = payload.get("target_langs")
     if not isinstance(raw, list):
         return None
-    languages = [item for item in raw if isinstance(item, str) and item]
-    return languages or None
+    languages = [item for item in raw if isinstance(item, str) and is_valid_target_lang(item)]
+    return normalise_target_langs(languages) or None
 
 
 def _transcript_language(files: JobFiles) -> str | None:
@@ -406,13 +406,15 @@ async def run_translate(
     job_id: uuid.UUID,
     deps: RunnerDeps,
     registry: Mapping[Stage, StageFn] | None = None,
+    *,
+    payload: Mapping[str, Any] | None = None,
 ) -> str:
     """Re-run translate, subtitles and assemble for a finished job (docs/03 §2).
 
-    The service writes ``translate-request.json`` before enqueueing the ``translate``
-    delivery; when it is absent (a manually enqueued delivery) the job's own target-language
-    option is resolved instead. The job keeps its ``done`` status: only translations,
-    subtitle files and the report change.
+    The requested languages travel in the queue entry's ``payload`` (``target_langs``); when
+    the entry carries none (a manually enqueued delivery) the job's own target-language option
+    is resolved instead. The job keeps its ``done`` status: only translations, subtitle files
+    and the report change.
     """
     job = await deps.repos.jobs.get(job_id)
     if job is None:
@@ -426,7 +428,7 @@ async def run_translate(
         )
         return job.status
     files = JobFiles(deps.settings.CARACAL_DATA_DIR, job_id)
-    targets = _read_translate_request(files)
+    targets = _requested_languages(payload)
     if targets is None:
         try:
             options = JobOptions.model_validate(job.options)
@@ -443,10 +445,9 @@ async def run_translate(
             _transcript_language(files),
         )
     if not targets:
-        (files.root / TRANSLATE_REQUEST_FILENAME).unlink(missing_ok=True)
         return "done"
 
-    status = await run_pipeline(
+    return await run_pipeline(
         job_id,
         deps,
         registry,
@@ -454,6 +455,3 @@ async def run_translate(
         force=frozenset(_TRANSLATE_STAGES),
         translate_targets=targets,
     )
-    if status == "done":
-        (files.root / TRANSLATE_REQUEST_FILENAME).unlink(missing_ok=True)
-    return status

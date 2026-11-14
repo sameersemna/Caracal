@@ -702,20 +702,37 @@ def _quality(
     )
 
 
+def _subtitle_languages(checkpoints: Mapping[str, Mapping[str, Any] | None]) -> set[str]:
+    """Languages the subtitles checkpoint wrote both an SRT and a WebVTT file for."""
+    subtitles = _output(checkpoints, "subtitles")
+    raw_files = _mapping(subtitles.get("files")) if subtitles is not None else None
+    if raw_files is None:
+        return set()
+    names = {name for name in raw_files if isinstance(name, str)}
+    srt = {name[: -len(".srt")] for name in names if name.endswith(".srt")}
+    vtt = {name[: -len(".vtt")] for name in names if name.endswith(".vtt")}
+    return srt & vtt
+
+
 def _translations(
     checkpoints: Mapping[str, Mapping[str, Any] | None],
     settings: Settings,
     job_id: uuid.UUID,
 ) -> list[Translation]:
-    """The translate checkpoint's languages as report items with REST links."""
+    """Translate entries that actually have subtitle files, as report items with REST links.
+
+    A translate entry without rendered subtitles is not a usable translation (its links would
+    be dead), so the subtitles checkpoint is the second source of truth (verdict 35 fix 2).
+    """
     output = _output(checkpoints, "translate")
     raw_langs = _mapping(output.get("langs")) if output is not None else None
     if raw_langs is None:
         return []
+    rendered = _subtitle_languages(checkpoints)
     base = settings.CARACAL_PUBLIC_BASE_URL.rstrip("/")
     prefix = f"{base}/v1/jobs/{job_id}"
     translations: list[Translation] = []
-    for lang in sorted(raw_langs):
+    for lang in sorted(set(raw_langs) & rendered):
         entry = _mapping(raw_langs[lang])
         if entry is None:
             continue

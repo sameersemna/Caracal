@@ -31,6 +31,7 @@ from caracal.queue import (
     Keys,
     is_cancelled,
     publish_event,
+    redis_lock,
     whisper_lock,
 )
 from caracal.search import BraveProvider, ExaProvider, SearchProvider, SearchRouter
@@ -248,11 +249,16 @@ class Worker:
         status: str | None = None
         try:
             if delivery.kind == "translate":
-                status = await run_translate(
-                    delivery.job_id,
-                    self._deps(delivery.entry_id),
-                    self.registry,
-                )
+                # Serialise translate runs per job: back-to-back requests must not read the
+                # same checkpoint and lose each other's languages. Wait for the lock, never
+                # drop the delivery (verdict 35 fix 1).
+                async with redis_lock(self.redis, self.keys.lock_translate(delivery.job_id)):
+                    status = await run_translate(
+                        delivery.job_id,
+                        self._deps(delivery.entry_id),
+                        self.registry,
+                        payload=delivery.payload,
+                    )
             else:
                 status = await run_pipeline(
                     delivery.job_id,

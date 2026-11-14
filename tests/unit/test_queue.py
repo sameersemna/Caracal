@@ -54,6 +54,7 @@ def test_key_prefixes_and_joins_parts(keys: Keys) -> None:
     assert keys.lock_whisper() == "t3st:lock:whisper"
     assert keys.lock_retention() == "t3st:lock:retention"
     job_id = uuid.UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+    assert keys.lock_translate(job_id) == ("t3st:lock:translate:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
     assert keys.events(job_id) == "t3st:events:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
     assert keys.cancel(job_id) == "t3st:cancel:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
     assert keys.search("brave", "abc123") == "t3st:search:brave:abc123"
@@ -91,6 +92,39 @@ async def test_enqueue_read_and_ack(queue: JobQueue, redis: RecordingRedis) -> N
     assert await redis.xlen(queue.keys.jobs_stream()) == 0
     pending = await redis.xpending(queue.keys.jobs_stream(), queue.group)
     assert pending["pending"] == 0
+
+
+async def test_enqueue_carries_a_payload_round_trip(queue: JobQueue, redis: RecordingRedis) -> None:
+    """Verdict 35 fix 1: a translate entry carries its own languages, never a shared file."""
+    await queue.ensure_group()
+    job_id = uuid.uuid4()
+
+    await queue.enqueue(job_id, "translate", payload={"target_langs": ["de", "ar"]})
+    await queue.enqueue(job_id, "pipeline")
+
+    deliveries = await queue.read("worker-a", count=2, block_ms=10)
+    assert [delivery.kind for delivery in deliveries] == ["translate", "pipeline"]
+    assert deliveries[0].payload == {"target_langs": ["de", "ar"]}
+    assert deliveries[1].payload == {}
+
+    entries = await redis.xrange(queue.keys.jobs_stream())
+    raw = {key: value for key, value in entries[0][1].items()}
+    assert text(raw[b"job_id"]) == str(job_id)
+    assert raw[b"payload"] == b'{"target_langs":["de","ar"]}'
+
+
+async def test_malformed_entry_payload_is_a_caracal_error(queue: JobQueue, redis: RecordingRedis) -> None:
+    await queue.ensure_group()
+    await redis.xadd(
+        queue.keys.jobs_stream(),
+        {"job_id": str(uuid.uuid4()), "kind": "translate", "payload": "{not json"},
+    )
+
+    with pytest.raises(CaracalError) as excinfo:
+        await queue.read("worker-a", count=1, block_ms=10)
+
+    assert excinfo.value.code is ErrorCode.INTERNAL
+    assert excinfo.value.message == "malformed queue entry"
 
 
 async def test_reclaim_reports_delivery_count(queue: JobQueue) -> None:

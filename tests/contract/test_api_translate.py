@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Callable
 from typing import Any
 
-from caracal.analysis.translate import TRANSLATE_REQUEST_FILENAME
 from caracal.pipeline.stages import JobOptions
-from caracal.storage import JobFiles
 from tests.contract.conftest import AUTH, Harness
 
 URL = "https://example.com/talk"
@@ -52,14 +51,30 @@ async def test_translate_queues_a_done_job_and_keeps_it_done(
 
     entries = await h.redis.xrange(h.keys.jobs_stream())
     assert len(entries) == 1
-    assert entries[0][1][b"job_id"].decode() == str(job_id)
-    assert entries[0][1][b"kind"].decode() == "translate"
-
-    files = JobFiles(h.settings.CARACAL_DATA_DIR, job_id)
-    assert files.read_json(files.root / TRANSLATE_REQUEST_FILENAME) == {"target_langs": ["de", "ar"]}
+    fields = entries[0][1]
+    assert fields[b"job_id"].decode() == str(job_id)
+    assert fields[b"kind"].decode() == "translate"
+    assert json.loads(fields[b"payload"]) == {"target_langs": ["de", "ar"]}
     # The report and its links stay available while the extra languages are produced.
     assert status.status_code == 200
     assert status.json()["status"] == "done"
+
+
+async def test_two_translate_requests_each_carry_their_own_languages(
+    make_harness: Callable[..., Harness],
+) -> None:
+    """Verdict 35: back-to-back REST requests must not overwrite a shared request file."""
+    h = make_harness()
+    job_id = await _job(h, status="done")
+
+    async with h.client() as client:
+        first = await client.post(f"/v1/jobs/{job_id}/translate", headers=AUTH, json=_body("de"))
+        second = await client.post(f"/v1/jobs/{job_id}/translate", headers=AUTH, json=_body("ar"))
+
+    assert (first.status_code, second.status_code) == (202, 202)
+    entries = await h.redis.xrange(h.keys.jobs_stream())
+    payloads = [json.loads(fields[b"payload"]) for _entry_id, fields in entries]
+    assert payloads == [{"target_langs": ["de"]}, {"target_langs": ["ar"]}]
 
 
 async def test_translate_rejects_a_job_that_is_not_done(

@@ -317,3 +317,40 @@ def test_target_language_codes_are_validated_at_job_creation() -> None:
         JobOptions(target_langs=["xx"])
     assert is_valid_target_lang("de")
     assert not is_valid_target_lang("de-DE")
+
+
+async def test_translate_prompt_keeps_names_verbatim_for_a_latin_target(
+    make_settings: MakeSettings,
+) -> None:
+    settings = make_settings()
+    units = [_unit([_cue(1, "A few years ago")])]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        _payload(request)
+        return json_response({"cues": [{"i": 0, "text": "Vor ein paar Jahren"}]})
+
+    _translated, _failed, bodies = await _translate(settings, units, handler, lang="de")
+
+    system = bodies[0]["messages"][0]["content"]
+    assert "German (Deutsch)" in system
+    assert "keep every name and place name exactly as written in the source, in the Latin script" in system
+    assert "conventional form used in the target script" not in system
+
+
+async def test_translate_prompt_uses_target_script_names_for_arabic(
+    make_settings: MakeSettings,
+) -> None:
+    settings = make_settings()
+    units = [_unit([_cue(1, "A few years ago")])]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        _payload(request)
+        return json_response({"cues": [{"i": 0, "text": "قبل بضع سنوات"}]})
+
+    _translated, _failed, bodies = await _translate(settings, units, handler, lang="ar")
+
+    system = bodies[0]["messages"][0]["content"]
+    assert "Arabic (العربية)" in system
+    assert "write names and place names in the conventional form used in the target script" in system
+    assert "مونتريال" in system
+    assert "keep every name and place name exactly as written" not in system

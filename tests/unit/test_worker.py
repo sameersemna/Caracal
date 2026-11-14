@@ -3,21 +3,24 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
+from tests.fakes.ollama import json_response
 from tests.fakes.redis import RecordingRedis, all_keys, make_fake_redis, text
 from tests.fakes.repo import make_fake_repos
 from tests.repo_contract import Repos
 
-from caracal.analysis.translate import TRANSLATE_REQUEST_FILENAME
+from caracal.asr import Segment, Transcript, Word
 from caracal.config import Settings
 from caracal.llm.client import LLMClient
-from caracal.pipeline.stages import Stage, StageContext, StageResult, default_registry
+from caracal.pipeline.stages import Stage, StageContext, StageResult, default_registry, m2_registry
 from caracal.queue import JobQueue, Keys
 from caracal.storage import JobFiles
 from caracal.worker import Worker, WorkerIntervals
@@ -195,6 +198,10 @@ async def _status_is(repos: Repos, job_id: uuid.UUID, expected: str) -> bool:
 
 async def _stream_is_empty(redis: RecordingRedis, keys: Keys) -> bool:
     return await redis.xlen(keys.jobs_stream()) == 0
+
+
+async def _is_set(event: asyncio.Event) -> bool:
+    return event.is_set()
 
 
 async def test_job_enqueued_before_the_worker_starts_is_delivered(
@@ -434,13 +441,10 @@ async def test_translate_delivery_reruns_only_translate_subtitles_and_assemble(
     repos = make_fake_repos()
     job_id = await _new_job(repos)
     await repos.jobs.set_status(job_id, "done")
-    files = JobFiles(tmp_path, job_id)
-    files.ensure()
-    files.write_json(files.root / TRANSLATE_REQUEST_FILENAME, {"target_langs": ["de"]})
 
     queue = JobQueue(redis, keys)
     await queue.ensure_group()
-    await queue.enqueue(job_id, "translate")
+    await queue.enqueue(job_id, "translate", payload={"target_langs": ["de"]})
 
     calls: list[str] = []
     registry = {
@@ -470,7 +474,6 @@ async def test_translate_delivery_reruns_only_translate_subtitles_and_assemble(
     job = await repos.jobs.get(job_id)
     assert job is not None
     assert job.status == "done"
-    assert not (files.root / TRANSLATE_REQUEST_FILENAME).exists()
 
 
 async def test_translate_delivery_for_an_active_job_is_ignored(
@@ -509,3 +512,162 @@ async def test_translate_delivery_for_an_active_job_is_ignored(
     job = await repos.jobs.get(job_id)
     assert job is not None
     assert job.status == "queued"
+
+
+def _word(text: str, start: float, end: float) -> Word:
+    return Word(text=text, start=start, end=end, prob=0.9, space_before=True)
+
+
+def _transcript(texts: list[str]) -> Transcript:
+    segments: list[Segment] = []
+    for index, phrase in enumerate(texts):
+        start = float(index) * 2.0
+        words = tuple(
+            _word(token, start + position / 10, start + (position + 1) / 10)
+            for position, token in enumerate(phrase.split())
+        )
+        segments.append(
+            Segment(
+                id=index,
+                start=start,
+                end=start + 0.9,
+                text=phrase,
+                words=words,
+                avg_logprob=-0.1,
+                no_speech_prob=0.0,
+                lang="en",
+            )
+        )
+    return Transcript(segments=tuple(segments), language_code="en", dropped={})
+
+
+def _translation_llm(settings: Settings) -> tuple[LLMClient, httpx.AsyncClient]:
+    """An LLM that prefixes each unit with the target language (DE/AR) it was asked for."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        request.read()
+        body = json.loads(request.content)
+        system = body["messages"][0]["content"]
+        prefix = "AR" if "Arabic" in system else "DE"
+        user = next(message for message in body["messages"] if message["role"] == "user")
+        cues = json.loads(user["content"])["cues"]
+        return json_response({"cues": [{"i": cue["i"], "text": f"{prefix} {cue['text']}"} for cue in cues]})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return LLMClient(settings, http), http
+
+
+async def test_back_to_back_translate_deliveries_both_reach_the_report(
+    make_settings: MakeSettings, tmp_path: Path, redis: RecordingRedis
+) -> None:
+    """Verdict 35 fix 1+2: each entry carries its own languages; the merge keeps both."""
+    keys = Keys(PREFIX)
+    repos = make_fake_repos()
+    job_id = await _new_job(repos)
+    await repos.jobs.set_status(job_id, "done")
+    files = JobFiles(tmp_path, job_id)
+    files.ensure()
+    files.write_json(
+        files.transcript_json,
+        _transcript(["A few years ago", "I started running."]).to_dict(),
+    )
+
+    queue = JobQueue(redis, keys)
+    await queue.ensure_group()
+    await queue.enqueue(job_id, "translate", payload={"target_langs": ["de"]})
+    await queue.enqueue(job_id, "translate", payload={"target_langs": ["ar"]})
+
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path, REDIS_PREFIX=PREFIX, CARACAL_WORKER_CONCURRENCY=2)
+    llm, http = _translation_llm(settings)
+    worker = Worker(
+        settings,
+        redis,
+        repos,
+        registry=m2_registry(),
+        worker_id="worker-two-langs",
+        intervals=_fast_intervals(reclaim_min_idle_ms=60_000),
+        http=http,
+        llm=llm,
+    )
+    stop = asyncio.Event()
+    run = asyncio.create_task(worker.run(stop))
+    try:
+        await _wait_for(lambda: _stream_is_empty(redis, keys))
+    finally:
+        stop.set()
+        await asyncio.wait_for(run, timeout=5)
+        await http.aclose()
+
+    stored = await repos.reports.get(job_id)
+    assert stored is not None
+    by_lang = {item["lang"]: item for item in stored["translations"]}
+    assert set(by_lang) == {"de", "ar"}
+    assert by_lang["de"]["status"] == "done"
+    assert by_lang["ar"]["status"] == "done"
+    for lang in ("de", "ar"):
+        assert files.subtitle(lang, "srt").is_file()
+        assert files.subtitle(lang, "vtt").is_file()
+        content = files.subtitle(lang, "srt").read_text(encoding="utf-8")
+        assert ("DE " if lang == "de" else "AR ") in content
+
+
+async def test_translate_deliveries_for_one_job_are_serialised(
+    make_settings: MakeSettings, tmp_path: Path, redis: RecordingRedis
+) -> None:
+    """Verdict 35 fix 1: the per-job Redis lock makes concurrent translate runs wait."""
+    keys = Keys(PREFIX)
+    repos = make_fake_repos()
+    job_id = await _new_job(repos)
+    await repos.jobs.set_status(job_id, "done")
+
+    queue = JobQueue(redis, keys)
+    await queue.ensure_group()
+    await queue.enqueue(job_id, "translate", payload={"target_langs": ["de"]})
+    await queue.enqueue(job_id, "translate", payload={"target_langs": ["ar"]})
+
+    active = 0
+    max_active = 0
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_translate(_ctx: StageContext) -> StageResult:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        started.set()
+        await release.wait()
+        await asyncio.sleep(0.01)
+        active -= 1
+        return StageResult(status="done")
+
+    calls: list[str] = []
+    registry = {
+        Stage.TRANSLATE: slow_translate,
+        Stage.SUBTITLES: _done_stage(Stage.SUBTITLES, calls),
+        Stage.ASSEMBLE: _done_stage(Stage.ASSEMBLE, calls),
+    }
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path, REDIS_PREFIX=PREFIX, CARACAL_WORKER_CONCURRENCY=2)
+    worker = Worker(
+        settings,
+        redis,
+        repos,
+        registry=registry,
+        worker_id="worker-lock",
+        intervals=_fast_intervals(reclaim_min_idle_ms=60_000),
+    )
+    stop = asyncio.Event()
+    run = asyncio.create_task(worker.run(stop))
+    try:
+        await _wait_for(lambda: _is_set(started))
+        # Give the second delivery time to reach the lock and (without it) enter the stage.
+        await asyncio.sleep(0.2)
+        assert active == 1
+        assert max_active == 1
+        release.set()
+        await _wait_for(lambda: _stream_is_empty(redis, keys))
+    finally:
+        stop.set()
+        await asyncio.wait_for(run, timeout=5)
+
+    assert max_active == 1
+    assert calls == ["subtitles", "assemble", "subtitles", "assemble"]

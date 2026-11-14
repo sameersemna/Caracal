@@ -32,9 +32,6 @@ from caracal.subtitles.segmenter import Cue, wrap_lines
 
 logger = get_logger("caracal.analysis.translate")
 
-#: The file a queued ``translate`` delivery reads its languages from (written by the service).
-TRANSLATE_REQUEST_FILENAME: Final = "translate-request.json"
-
 _TARGET_LANG_RE: Final = re.compile(r"^[a-z]{2,3}$")
 _SENTENCE_ENDINGS: Final = frozenset(".?!…。！？؟")  # noqa: RUF001 - CJK/Arabic punctuation
 _CLOSING_CHARS: Final = "\"'”’»)]}"  # noqa: RUF001 - typographic quotes
@@ -45,6 +42,62 @@ _MAX_GLOSSARY: Final = 60
 _MAX_LINE_CHARS: Final = 42
 _MAX_LINES: Final = 2
 _CJK_LANGS: Final = frozenset({"zh", "ja", "ko", "yue"})
+
+#: Targets whose conventional written form is not the Latin script. Names stay verbatim for
+#: every other target; for these the prompt asks for the conventional target-script form
+#: ("Montreal" -> "مونتريال") when one exists.
+_NON_LATIN_SCRIPT_LANGS: Final = frozenset(
+    {
+        "am",
+        "ar",
+        "bg",
+        "bn",
+        "el",
+        "fa",
+        "gu",
+        "he",
+        "hi",
+        "hy",
+        "ja",
+        "ka",
+        "kk",
+        "km",
+        "kn",
+        "ko",
+        "lo",
+        "mk",
+        "ml",
+        "mn",
+        "mr",
+        "my",
+        "ne",
+        "pa",
+        "ru",
+        "si",
+        "sr",
+        "ta",
+        "te",
+        "th",
+        "uk",
+        "ur",
+        "yi",
+        "zh",
+    }
+)
+
+_LATIN_NAME_RULE: Final = (
+    "keep every name and place name exactly as written in the source, in the Latin script."
+)
+_NON_LATIN_NAME_RULE: Final = (
+    "write names and place names in the conventional form used in the target script when one "
+    "exists (for example Montreal becomes مونتريال in Arabic); otherwise keep the source form."
+)
+
+
+def name_rule(target_lang: str) -> str:
+    """The prompt rule for proper names in ``target_lang`` (verdict 35 fix 3)."""
+    return _NON_LATIN_NAME_RULE if target_lang in _NON_LATIN_SCRIPT_LANGS else _LATIN_NAME_RULE
+
 
 #: Native names make the target unambiguous for the model ("German (Deutsch)").
 _NATIVE_NAMES: Final[dict[str, str]] = {
@@ -454,6 +507,7 @@ async def translate_units(
         target_language=english,
         target_native=native,
         glossary=", ".join(names[:_MAX_GLOSSARY]) or "none",
+        name_rule=name_rule(target_lang),
         summary=summary.strip() or "none",
     )
 
@@ -473,11 +527,11 @@ async def translate_units(
 
 
 __all__ = [
-    "TRANSLATE_REQUEST_FILENAME",
     "TranslatedUnits",
     "TranslationUnit",
     "cue_text",
     "is_valid_target_lang",
+    "name_rule",
     "normalise_target_langs",
     "redistribute",
     "resolve_target_langs",
