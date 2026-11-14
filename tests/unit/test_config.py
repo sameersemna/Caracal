@@ -255,3 +255,37 @@ def test_database_url_scheme_is_case_insensitive(
 def test_unknown_database_scheme_is_rejected(make_settings: MakeSettings, scheme: str) -> None:
     with pytest.raises(ValidationError, match="DATABASE_URL"):
         make_settings(DATABASE_URL=f"{scheme}://u:p@h/db")
+
+
+def test_db_schema_defaults_to_public(make_settings: MakeSettings) -> None:
+    assert make_settings().CARACAL_DB_SCHEMA == "public"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("caracal", "caracal"),
+        ("  caracal_t_0123abcd  ", "caracal_t_0123abcd"),
+        ("_private", "_private"),
+        ("a" * 63, "a" * 63),
+    ],
+)
+def test_db_schema_accepts_valid_identifiers(make_settings: MakeSettings, value: str, expected: str) -> None:
+    assert make_settings(CARACAL_DB_SCHEMA=value).CARACAL_DB_SCHEMA == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["", "   ", "Public", "1caracal", "caracal-t", "caracal.t", "a" * 64],
+)
+def test_db_schema_rejects_invalid_identifiers(make_settings: MakeSettings, value: str) -> None:
+    with pytest.raises(ValidationError, match="CARACAL_DB_SCHEMA"):
+        make_settings(CARACAL_DB_SCHEMA=value)
+
+
+def test_db_schema_is_read_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CARACAL_API_TOKEN", "e" * 32)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@h:5432/caracal")
+    monkeypatch.setenv("REDIS_URL", "redis://:p@h:6379/0")
+    monkeypatch.setenv("CARACAL_DB_SCHEMA", "caracal_t_deadbeef")
+    assert Settings(_env_file=None).CARACAL_DB_SCHEMA == "caracal_t_deadbeef"

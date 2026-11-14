@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 
 from caracal.cli import main
+from caracal.config import get_settings
 from caracal.log import get_logger
 
 SUBCOMMANDS = ("serve", "worker", "mcp-stdio", "migrate", "doctor")
@@ -30,7 +32,7 @@ def test_help_lists_all_subcommands(capsys: pytest.CaptureFixture[str]) -> None:
         assert name in captured.out
 
 
-@pytest.mark.parametrize("command", ["serve", "worker", "mcp-stdio", "migrate"])
+@pytest.mark.parametrize("command", ["serve", "worker", "mcp-stdio"])
 def test_unimplemented_subcommands_exit_two_with_stderr_message(
     command: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -99,3 +101,66 @@ def test_doctor_registers_loaded_secrets_for_exact_match_redaction(
     assert captured.out == ""
     assert sample not in captured.err
     assert "***" in captured.err
+
+
+def test_migrate_upgrades_head_programmatically(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _set_required(monkeypatch)
+    calls: list[tuple[Any, str]] = []
+
+    def upgrade(config: Any, revision: str) -> None:
+        calls.append((config, revision))
+
+    monkeypatch.setattr("caracal.cli.command.upgrade", upgrade)
+
+    assert main(["migrate"]) == 0
+
+    assert len(calls) == 1
+    config, revision = calls[0]
+    assert revision == "head"
+    script_location = config.get_main_option("script_location")
+    assert script_location is not None
+    assert script_location.replace("\\", "/").endswith("caracal/migrations")
+    records = _records(capsys.readouterr().err)
+    assert [record["msg"] for record in records] == ["applying migrations", "migrations applied"]
+    assert all(record["level"] != "ERROR" for record in records)
+
+
+def test_migrate_returns_one_and_logs_redacted_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _set_required(monkeypatch)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://caracal:topsecret@db:5432/caracal")
+    get_settings.cache_clear()
+
+    def explode(config: object, revision: str) -> None:
+        raise RuntimeError("cannot connect to postgresql://caracal:topsecret@db:5432/caracal")
+
+    monkeypatch.setattr("caracal.cli.command.upgrade", explode)
+
+    assert main(["migrate"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    records = _records(captured.err)
+    failed = next(record for record in records if record["msg"] == "migration failed")
+    assert failed["level"] == "ERROR"
+    assert "cannot connect" in str(failed["error"])
+    assert "topsecret" not in captured.err
+
+
+def test_migrate_rejects_invalid_configuration_without_running_alembic(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def must_not_run(config: object, revision: str) -> None:
+        raise AssertionError("alembic must not run without a valid configuration")
+
+    monkeypatch.setattr("caracal.cli.command.upgrade", must_not_run)
+
+    assert main(["migrate"]) == 1
+
+    records = _records(capsys.readouterr().err)
+    invalid = next(record for record in records if record["msg"] == "config invalid")
+    assert invalid["level"] == "ERROR"
+    assert "DATABASE_URL" in str(invalid["fields"])
