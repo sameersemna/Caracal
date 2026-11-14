@@ -192,9 +192,12 @@ infers protected attributes (gender, age, ethnicity, religion, health) from the 
 
 ## 10. Translation and subtitles
 
-- Translate **cues**, not free text: batch ≈ 40 cues per call (`translate.md`), input `[{i, text}]`, output
-  `[{i, text}]` via `call_tool`. Validate that the set of `i` matches exactly; on mismatch retry that batch once,
-  then fall back to per-cue calls. Pass the summary + glossary of entity names to keep names consistent.
+- Translate **sentence units**, not single cues (measured: a cue holding only "A few" before "years ago, …" is translated in isolation
+  into an ungrammatical fragment — German needs "Vor ein paar Jahren"). Units = consecutive cues of one speaker up to a sentence end
+  (max 4 cues / 200 chars). Batches of ≈ 25 units per call (`translate.md`, json mode), input `[{i, text}]`, output `[{i, text}]`; the
+  set of `i` must match exactly (measured 4/4 index-exact for 35 cues, de and ar, both modes) — on mismatch retry the batch once, then
+  per-unit calls. The translated unit is redistributed over its source cues' time spans at word boundaries, proportionally to the source
+  cues' character counts, then re-wrapped (≤ 42 chars × 2 lines). Pass the one-line summary + a glossary of entity names (kept verbatim).
 - Cue segmentation (`subtitles/segmenter.py`): from word timestamps; break at sentence end, then comma, then speaker
   change (always break on speaker change), max 42 chars/line, 2 lines, 1.0–7.0 s, ≥ 0.08 s gap. Optional speaker
   prefix `"- "` when two speakers share a cue is not allowed — never mix speakers in one cue.
