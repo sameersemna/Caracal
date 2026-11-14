@@ -1,9 +1,12 @@
-"""Ollama chat client with tool-call protocol, coercion, repair and fallback (docs/04 §1).
+"""Ollama chat client with tool-call and JSON modes, coercion, repair and fallback (docs/04 §1).
 
-The measured gemma4 behaviour drives the design: ``format`` is ignored, so every structured
-call goes through a single tool definition with an inlined schema, then a coercion pass and
-pydantic validation. Two consecutive primary failures (or an auth rejection) move the call
-to the local fallback model. Prompts are never logged at INFO.
+The measured gemma4 behaviour drives the design. Small schemas use the tool-call protocol:
+one tool definition with an inlined schema, then a coercion pass and pydantic validation.
+Big multi-section schemas use JSON mode (``format: "json"`` with the prepared schema in the
+system prompt), because tool calls there validate but are never complete and sometimes come
+back empty. An empty tool reply automatically retries the call in JSON mode. Two consecutive
+primary failures (or an auth rejection) move the call to the local fallback model. Prompts are
+never logged at INFO.
 """
 
 from __future__ import annotations
@@ -28,10 +31,15 @@ logger = get_logger("caracal.llm.client")
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 EndpointKind = Literal["cloud", "local"]
+Mode = Literal["tool", "json"]
 
 _TOOL_SUFFIX = (
     "You MUST answer by calling the tool {tool_name} exactly once. "
     "Use the exact field names and allowed values from the tool schema."
+)
+_JSON_SUFFIX = (
+    "Reply with ONE JSON object only, no prose, matching this JSON Schema exactly "
+    "(field names and allowed values):\n{schema}"
 )
 _BACKOFF_PRIMARY = 1.0
 _BACKOFF_SWITCH = 4.0
@@ -54,6 +62,7 @@ class CallMeta:
     coerced: bool
     fallback_used: bool
     duration_s: float
+    mode_used: Mode
 
 
 @dataclass(frozen=True)
@@ -120,6 +129,40 @@ def _system_prompt(system: str, tool_name: str) -> str:
     return f"{text}\n{suffix}" if text else suffix
 
 
+def _json_system_prompt(system: str, prepared: Mapping[str, Any]) -> str:
+    """The JSON-mode system prompt: the caller's text plus the prepared schema."""
+    suffix = _JSON_SUFFIX.format(schema=json.dumps(prepared, ensure_ascii=False))
+    text = system.rstrip()
+    if text.endswith(suffix):
+        return text
+    return f"{text}\n{suffix}" if text else suffix
+
+
+def _messages(
+    system: str,
+    prompt: str,
+    *,
+    mode: Mode,
+    prepared: Mapping[str, Any],
+    tool_name: str,
+) -> list[dict[str, Any]]:
+    system_text = (
+        _system_prompt(system, tool_name) if mode == "tool" else _json_system_prompt(system, prepared)
+    )
+    return [
+        {"role": "system", "content": system_text},
+        {"role": "user", "content": prompt},
+    ]
+
+
+def _is_empty_reply(message: Mapping[str, Any]) -> bool:
+    """A reply with neither a tool call nor text: Ollama dropped a malformed tool call."""
+    if _first_tool_call(message) is not None:
+        return False
+    content = message.get("content")
+    return not (isinstance(content, str) and content.strip())
+
+
 def _repair_message(errors: list[dict[str, Any]], tool_name: str) -> str:
     summary = [
         {"loc": list(error.get("loc", ())), "msg": str(error.get("msg", ""))}
@@ -128,6 +171,17 @@ def _repair_message(errors: list[dict[str, Any]], tool_name: str) -> str:
     return (
         f"Your previous answer was rejected. Call the tool {tool_name} exactly once with corrected "
         f"arguments. Validation errors: {json.dumps(summary, ensure_ascii=False)}"
+    )
+
+
+def _json_repair_message(errors: list[dict[str, Any]]) -> str:
+    summary = [
+        {"loc": list(error.get("loc", ())), "msg": str(error.get("msg", ""))}
+        for error in errors[:_REPAIR_ERRORS]
+    ]
+    return (
+        "Your previous answer was rejected. Reply with ONE JSON object only, no prose, matching "
+        f"the JSON Schema exactly. Validation errors: {json.dumps(summary, ensure_ascii=False)}"
     )
 
 
@@ -198,25 +252,39 @@ class LLMClient:
         temperature: float = 0.1,
         max_tokens: int = 4096,
         synonyms: Mapping[str, str] | None = None,
+        mode: Mode = "tool",
     ) -> ToolResult[ModelT]:
-        """Call ``tool_name`` once and return a validated ``model_cls`` instance."""
+        """Call ``tool_name`` once and return a validated ``model_cls`` instance.
+
+        ``mode="json"`` sends ``format: "json"`` with the prepared schema in the system prompt
+        instead of a tool definition (big multi-section schemas; docs/04 §1). In tool mode an
+        empty reply — no tool call and no text — retries the same attempt in JSON mode.
+        """
         started = time.monotonic()
         prepared = prepare_schema(model_cls)
         merged_synonyms = {**DEFAULT_SYNONYMS, **dict(synonyms or {})}
-        tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": tool_name,
-                    "description": tool_description,
-                    "parameters": prepared,
-                },
-            }
-        ]
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": _system_prompt(system, tool_name)},
-            {"role": "user", "content": prompt},
-        ]
+        tools: list[dict[str, Any]] | None = (
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "description": tool_description,
+                        "parameters": prepared,
+                    },
+                }
+            ]
+            if mode == "tool"
+            else None
+        )
+        current_mode: Mode = mode
+        messages = _messages(
+            system,
+            prompt,
+            mode=current_mode,
+            prepared=prepared,
+            tool_name=tool_name,
+        )
         state = _CallState(endpoint=self._primary)
         repairs = 0
         while True:
@@ -226,25 +294,51 @@ class LLMClient:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 tools=tools,
+                json_mode=current_mode == "json",
             )
+            if current_mode == "tool" and _is_empty_reply(message):
+                # Ollama drops a malformed tool call; the same attempt continues in JSON mode
+                # (docs/04 §1: "empty tool reply → next attempt json mode").
+                current_mode = "json"
+                tools = None
+                repairs = 0
+                messages = _messages(
+                    system,
+                    prompt,
+                    mode=current_mode,
+                    prepared=prepared,
+                    tool_name=tool_name,
+                )
+                continue
             try:
                 value, coerced = self._interpret(
                     message,
                     model_cls=model_cls,
                     prepared=prepared,
                     synonyms=merged_synonyms,
+                    mode=current_mode,
                 )
             except _InvalidOutput as invalid:
                 if repairs >= _MAX_REPAIRS:
                     raise CaracalError(
                         ErrorCode.INTERNAL,
                         "LLM did not return valid structured output",
-                        {"errors": invalid.errors[:_REPAIR_ERRORS]},
+                        {"errors": invalid.errors[:_REPAIR_ERRORS], "mode": current_mode},
                         retryable=True,
                     ) from None
                 repairs += 1
-                messages.append(dict(message))
-                messages.append({"role": "tool", "content": _repair_message(invalid.errors, tool_name)})
+                if current_mode == "tool":
+                    messages.append(dict(message))
+                    messages.append({"role": "tool", "content": _repair_message(invalid.errors, tool_name)})
+                else:
+                    content = message.get("content")
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": content if isinstance(content, str) else "",
+                        }
+                    )
+                    messages.append({"role": "user", "content": _json_repair_message(invalid.errors)})
                 continue
 
             duration = time.monotonic() - started
@@ -256,6 +350,7 @@ class LLMClient:
                     "attempts": state.requests,
                     "coerced": coerced,
                     "fallback_used": state.fallback_used,
+                    "mode": current_mode,
                     "duration_s": round(duration, 3),
                 },
             )
@@ -268,6 +363,7 @@ class LLMClient:
                     coerced=coerced,
                     fallback_used=state.fallback_used,
                     duration_s=duration,
+                    mode_used=current_mode,
                 ),
             )
 
@@ -320,26 +416,36 @@ class LLMClient:
         model_cls: type[ModelT],
         prepared: Mapping[str, Any],
         synonyms: Mapping[str, str],
+        mode: Mode,
     ) -> tuple[ModelT, bool]:
-        function = _first_tool_call(message)
         arguments: object
-        if function is not None:
-            arguments = function.get("arguments")
-            if isinstance(arguments, str):
-                try:
-                    arguments = extract_json(arguments)
-                except CaracalError as exc:
-                    raise _InvalidOutput([{"loc": [], "msg": exc.message}]) from exc
-            elif not isinstance(arguments, Mapping):
-                raise _InvalidOutput([{"loc": [], "msg": "tool call has no arguments object"}])
-        else:
+        if mode == "json":
             content = message.get("content")
-            if not isinstance(content, str):
-                raise _InvalidOutput([{"loc": [], "msg": "no tool call and no text content"}])
+            if not isinstance(content, str) or not content.strip():
+                raise _InvalidOutput([{"loc": [], "msg": "empty JSON-mode reply"}])
             try:
                 arguments = extract_json(content)
             except CaracalError as exc:
                 raise _InvalidOutput([{"loc": [], "msg": exc.message}]) from exc
+        else:
+            function = _first_tool_call(message)
+            if function is not None:
+                arguments = function.get("arguments")
+                if isinstance(arguments, str):
+                    try:
+                        arguments = extract_json(arguments)
+                    except CaracalError as exc:
+                        raise _InvalidOutput([{"loc": [], "msg": exc.message}]) from exc
+                elif not isinstance(arguments, Mapping):
+                    raise _InvalidOutput([{"loc": [], "msg": "tool call has no arguments object"}])
+            else:
+                content = message.get("content")
+                if not isinstance(content, str):
+                    raise _InvalidOutput([{"loc": [], "msg": "no tool call and no text content"}])
+                try:
+                    arguments = extract_json(content)
+                except CaracalError as exc:
+                    raise _InvalidOutput([{"loc": [], "msg": exc.message}]) from exc
 
         original = arguments
         coerced_value = coerce(arguments, prepared, synonyms=synonyms)
@@ -360,6 +466,7 @@ class LLMClient:
         temperature: float,
         max_tokens: int,
         tools: list[dict[str, Any]] | None,
+        json_mode: bool = False,
     ) -> dict[str, Any]:
         """One logical exchange; retries, auth fallback and model fallback happen here."""
         while True:
@@ -369,6 +476,7 @@ class LLMClient:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 tools=tools,
+                json_mode=json_mode,
             )
             try:
                 message = await self._post(state.endpoint, body)
@@ -439,6 +547,7 @@ class LLMClient:
         temperature: float,
         max_tokens: int,
         tools: list[dict[str, Any]] | None,
+        json_mode: bool = False,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": endpoint.model,
@@ -447,7 +556,9 @@ class LLMClient:
             "keep_alive": self._settings.LLM_KEEP_ALIVE,
             "options": {"temperature": temperature, "num_predict": max_tokens},
         }
-        if tools is not None:
+        if json_mode:
+            body["format"] = "json"
+        elif tools is not None:
             body["tools"] = tools
         return body
 
@@ -514,4 +625,4 @@ class LLMClient:
         return cast(dict[str, Any], message)
 
 
-__all__ = ["CallMeta", "LLMClient", "ToolResult"]
+__all__ = ["CallMeta", "LLMClient", "Mode", "ToolResult"]

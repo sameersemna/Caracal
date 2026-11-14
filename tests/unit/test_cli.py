@@ -203,7 +203,7 @@ def test_run_worker_builds_datastores_and_stops_cleanly(
 
     fake_redis = FakeRedis()
     fake_engine = FakeEngine()
-    monkeypatch.setattr("caracal.cli.redis_asyncio.from_url", lambda url: fake_redis)
+    monkeypatch.setattr("caracal.cli.make_redis", lambda settings: fake_redis)
     monkeypatch.setattr("caracal.cli.make_engine", lambda settings: fake_engine)
     monkeypatch.setattr("caracal.cli.Worker", FakeWorker)
 
@@ -237,6 +237,9 @@ def test_doctor_reports_valid_config(
     valid = next(record for record in records if record["msg"] == "config valid")
     assert valid["port"] == 11404
     assert valid["host"] == "127.0.0.1"
+    assert "js_runtime" in valid
+    assert "node" in valid["js_runtime"]
+    assert "yt_dlp_ejs" in valid["js_runtime"]
 
 
 def test_doctor_reports_invalid_config_without_leaking_secrets(

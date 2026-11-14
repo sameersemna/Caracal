@@ -98,12 +98,13 @@ scripts/
 ## 4. Pipeline (DAG)
 
 ```
-ingest ─> normalize ─> chunk ─> transcribe ─> langid ─> plan ─┬─> diarize ─> align ─> voiceprint ─┐
+ingest ─> normalize ─> chunk ─> transcribe ─> langid ─> diarize ─> plan ─┬─> align ─> voiceprint ─┐
             │                                                  │   (align regenerates subtitles)  │
             └─ (platform metadata + captions from ingest) ──────┴──────────────────────────────────┤
                                                                                                   v
                            content ─> identity ─> verify ─> translate ─> subtitles ─> review ─> assemble
-(The planner runs right after langid so that its music / depth / option rules can skip diarize and later stages — T2.5.)
+(The planner runs right after diarize: pyannote's speech share is the measured music discriminator — music 2 % vs speech 87 %. Its rules
+then skip align/voiceprint and the analysis stages that do not apply — verdict 25.)
 ```
 
 Every stage has the signature:

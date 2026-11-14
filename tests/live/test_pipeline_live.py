@@ -20,7 +20,6 @@ from typing import Any
 import httpx
 import pytest
 import pytest_asyncio
-import redis.asyncio as redis_asyncio
 from alembic import command
 from alembic.config import Config as AlembicConfig
 from redis.asyncio import Redis
@@ -41,7 +40,7 @@ from caracal.db.repo import (
 from caracal.ingest.ssrf import SystemResolver
 from caracal.pipeline.runner import RunnerDeps, run_pipeline
 from caracal.pipeline.stages import JobOptions, Stage, m1_registry
-from caracal.queue import Keys, is_cancelled, publish_event, whisper_lock
+from caracal.queue import Keys, is_cancelled, make_redis, publish_event, whisper_lock
 from caracal.storage import JobFiles, UploadFiles
 from tests.repo_contract import Repos
 
@@ -117,7 +116,7 @@ async def live(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> AsyncIterator
             segments=PostgresSegmentRepo(engine),
             cleanup=_noop_cleanup,
         )
-        redis = redis_asyncio.from_url(settings.REDIS_URL.get_secret_value())
+        redis = make_redis(settings)
         keys = Keys(settings.REDIS_PREFIX)
         http = httpx.AsyncClient()
         whisper = WhisperClient(

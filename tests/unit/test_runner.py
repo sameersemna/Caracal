@@ -615,3 +615,48 @@ def test_job_options_limit_speaker_hints() -> None:
 def test_job_options_limit_context_hint() -> None:
     with pytest.raises(ValidationError):
         JobOptions(context_hint="x" * 2001)
+
+
+async def test_runner_logs_every_stage_outcome_without_transcript_text(
+    make_settings: MakeSettings,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    repos = make_fake_repos()
+    job_id = await _new_job(repos)
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+
+    async def done(ctx: StageContext) -> StageResult:
+        return StageResult(status="done", output={})
+
+    async def skipped(ctx: StageContext) -> StageResult:
+        return StageResult(status="skipped", reason="not needed")
+
+    async def broken(ctx: StageContext) -> StageResult:
+        raise CaracalError(ErrorCode.DEPENDENCY_DOWN, "whisper down", retryable=True)
+
+    with caplog.at_level("INFO", logger="caracal.pipeline.runner"):
+        status = await run_pipeline(
+            job_id,
+            _deps(settings, repos, sleeps=[0.0, 0.0]),
+            {Stage.INGEST: done, Stage.NORMALIZE: skipped, Stage.DIARIZE: broken},
+        )
+
+    assert status == "done"
+    records = {record.getMessage(): record for record in caplog.records}
+    assert "stage.done" in records
+    assert records["stage.done"].levelname == "INFO"
+    assert records["stage.done"].stage == "ingest"
+    assert records["stage.done"].duration_s >= 0.0
+    assert "stage.skipped" in records
+    assert records["stage.skipped"].levelname == "INFO"
+    assert records["stage.skipped"].reason == "not needed"
+    failed = next(record for record in caplog.records if record.msg == "stage.failed %s: %s")
+    assert failed.getMessage() == "stage.failed dependency_down: whisper down"
+    assert failed.levelname == "WARNING"
+    assert failed.stage == "diarize"
+    assert failed.code == "dependency_down"
+    assert failed.error == "whisper down"
+    assert failed.retryable is True
+    assert failed.attempts == 3
+    assert "transcript" not in caplog.text.lower()

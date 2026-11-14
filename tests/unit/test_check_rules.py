@@ -281,3 +281,26 @@ def test_legal_snippets_are_clean(tmp_path: Path) -> None:
     )
     _write(tmp_path, "cli.py", source)
     assert _hits(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'import redis.asyncio as redis_asyncio\nclient = redis_asyncio.from_url("redis://localhost")\n',
+        'from redis.asyncio import from_url\nclient = from_url("redis://localhost")\n',
+        'from redis.asyncio import Redis\nclient = Redis.from_url("redis://localhost")\n',
+    ],
+)
+def test_redis_from_url_outside_queue_is_reported(tmp_path: Path, source: str) -> None:
+    _write(tmp_path, "cli.py", source)
+    hits = _hits(tmp_path)
+    assert [hit.rule for hit in hits] == ["redis-from-url"]
+
+
+def test_redis_from_url_is_allowed_in_the_queue_factory(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "queue.py",
+        'import redis.asyncio as redis_asyncio\nclient = redis_asyncio.from_url("redis://localhost")\n',
+    )
+    assert _hits(tmp_path) == []

@@ -15,6 +15,7 @@ from tests.fakes.repo import make_fake_repos
 from tests.repo_contract import Repos
 
 from caracal.config import Settings
+from caracal.llm.client import LLMClient
 from caracal.pipeline.stages import Stage, StageContext, StageResult, default_registry
 from caracal.queue import JobQueue, Keys
 from caracal.storage import JobFiles
@@ -388,3 +389,38 @@ async def test_shutdown_leaves_a_running_job_unacked(
     assert job is not None
     assert job.status == "running"
     release.set()
+
+
+async def test_worker_wires_an_llm_client_into_the_content_stage(
+    make_settings: MakeSettings, tmp_path: Path, redis: RecordingRedis
+) -> None:
+    keys = Keys(PREFIX)
+    repos = make_fake_repos()
+    job_id = await _new_job(repos)
+    await _enqueue(redis, keys, job_id)
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path, REDIS_PREFIX=PREFIX, CARACAL_WORKER_CONCURRENCY=1)
+    seen: list[LLMClient | None] = []
+
+    async def capture(ctx: StageContext) -> StageResult:
+        seen.append(ctx.llm)
+        return StageResult(status="done")
+
+    worker = Worker(
+        settings,
+        redis,
+        repos,
+        registry={Stage.CONTENT: capture},
+        worker_id="worker-llm",
+        intervals=_fast_intervals(),
+    )
+    stop = asyncio.Event()
+    run = asyncio.create_task(worker.run(stop))
+    try:
+        await _wait_for(lambda: _status_is(repos, job_id, "done"))
+    finally:
+        stop.set()
+        await asyncio.wait_for(run, timeout=5)
+
+    assert seen == [worker.llm]
+    assert seen[0] is not None
+    assert isinstance(seen[0], LLMClient)

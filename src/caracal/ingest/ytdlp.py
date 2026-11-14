@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import re
+import shutil
 import tempfile
 import threading
 from collections.abc import Callable
@@ -199,6 +200,13 @@ def build_options(
     }
     if settings.YTDLP_COOKIES_FILE is not None:
         options["cookiefile"] = str(settings.YTDLP_COOKIES_FILE)
+
+    # YouTube's JS challenge needs a JS runtime plus the yt-dlp-ejs solver package
+    # (verdict 25 D5, measured: 44 formats / 15 audio, no warning). When node is not on
+    # PATH, leave yt-dlp's own default untouched.
+    node = shutil.which("node")
+    if node is not None:
+        options["js_runtimes"] = {"node": {"path": node}}
 
     if purpose == "metadata":
         options["skip_download"] = True

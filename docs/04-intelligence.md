@@ -24,6 +24,12 @@ JSON-Schema keyword names (`type`, `items`, `properties`, `enum`, `format`, `req
 pydantic aliases; evidence lists are normalised by extracting `(seg|meta|web|vp|caption|hint):[A-Za-z0-9_.-]+` tokens; transcript lines are
 rendered `[seg:12] S2 03:14.2 | text` (id alone inside the brackets).
 
+**Measured on the full content schema** (7 sections): tool calls validate but are never complete (0/6 — whole sections omitted) and
+sometimes come back **empty** (Ollama drops a malformed tool call). **JSON mode** (`format:"json"`, schema in the system prompt, "fill every
+field") → 5/6 complete, 0/87 unknown ids. Nullable float fields (`start`/`end`) trigger empty replies — LLM-facing models reference segment ids
+instead of times. Rule: big multi-section outputs use json mode + a completeness re-ask; small schemas may use tool mode, with an automatic
+json-mode retry on an empty reply.
+
 `call_tool` algorithm:
 0. **Schema preparation** (cached per model class): `model_json_schema()` → inline every `$ref` from `$defs`, drop `title`, append
    `Must be exactly one of: a, b, c.` to the description of every `enum`/`Literal` field.
@@ -58,9 +64,10 @@ Inputs: duration, speech_ratio, music_detected, languages, platform metadata, op
 needs_identity: bool, checkworthy_domain: bool}, budgets: {search_queries: int, llm_calls: int}}`.
 
 Rules (in order; each produces a reason string):
-- **music / non-lexical** (measured: an instrumental track gives `🎵🎵🎵` segments and whisper labels it `nn`): if ≥ 70 % of speech time is in
-  segments whose text has no letters/digits after removing ♪ 🎵 🎶 `[Music]`-style tags → `music_detected: true`, every language span → `und`,
-  skip diarize/identity/verify/translate; the report describes it as music.
+- **music / non-speech** (measured: instrumental → `🎵` segments *or hallucinated words*, language `nn`; pyannote speech share **2 %** vs
+  87 % for a talk; whisper confidences do not discriminate): `music_detected = speech_share < 0.15` (Σ exclusive diarization turns / duration);
+  without a diarize checkpoint fall back to the text rule (≥ 70 % of segment time non-lexical). Music → languages `und`, content in music mode
+  (metadata-only summary/context, no quotes/claims, ReviewFlag "non-speech audio"), skip align/voiceprint/identity/verify/translate.
 - `speech_ratio < 0.05` → skip diarize/identity/verify/translate; content = "music/ambient" description only.
 - `options.diarize == "off"` or diarizer unavailable → skip diarize/align/voiceprint.
 - `diarize == "auto"` and duration < 20 s → diarize anyway (cheap) but identity uses single-speaker logic.

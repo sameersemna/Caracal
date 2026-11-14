@@ -21,7 +21,6 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from mcp.server.transport_security import TransportSecuritySettings
-from redis import asyncio as redis_asyncio
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.datastructures import Headers
@@ -48,7 +47,7 @@ from caracal.db.repo import (
 from caracal.errors import HTTP_STATUS, CaracalError, ErrorCode
 from caracal.log import get_logger
 from caracal.mcp.server import HTTP_INLINE_BASE64_BYTES, build_mcp
-from caracal.queue import JobQueue, Keys
+from caracal.queue import JobQueue, Keys, make_redis
 from caracal.services import JobService
 
 if TYPE_CHECKING:
@@ -302,7 +301,7 @@ def _build_real_deps(settings: Settings) -> tuple[AppDeps, AsyncEngine]:
         segments=PostgresSegmentRepo(engine),
         speakers=PostgresSpeakerRepo(engine),
     )
-    redis_client = redis_asyncio.from_url(settings.REDIS_URL.get_secret_value())
+    redis_client = make_redis(settings)
     http_client = httpx.AsyncClient(timeout=DEFAULT_HEALTH_TIMEOUT_S)
     keys = Keys(settings.REDIS_PREFIX)
     queue = JobQueue(redis_client, keys)
