@@ -336,3 +336,31 @@ def test_join_words_keeps_contractions_and_attached_punctuation() -> None:
     )
     assert join_words(words) == "I'm here,"
     assert join_words(()) == ""
+
+
+def test_join_words_keeps_the_space_across_a_real_segment_seam() -> None:
+    """Cue building joins words across segment boundaries: the seam keeps its space.
+
+    Regression for the old "first word of a segment has no leading space" rule, which
+    produced ``totalcatastrophe?`` / ``effects.That's`` at live chunk seams.
+    """
+    result = _real("talk_c0")
+    joins = [
+        (left.words[-1], right.words[0], join_words((left.words[-1], right.words[0])))
+        for left, right in zip(result.segments, result.segments[1:], strict=False)
+    ]
+
+    assert joins[0][2] == ". I"  # segment 0 ends with ".", segment 1 starts with "I"
+    assert joins[4][2] == "40 degrees"  # segment 4 ends with "40", segment 5 starts with "degrees"
+    for last, first, seam in joins:
+        if last.text[-1].isalnum() and first.text[0].isalnum():
+            assert seam == f"{last.text} {first.text}"  # never totalcatastrophe / effects.That's
+
+
+def test_join_words_attaches_a_detached_punctuation_token() -> None:
+    """Whisper's isolated "..." token joins the preceding word instead of rendering "and ..."."""
+    words = (
+        _word("and", 0.0, 0.1, space_before=False),
+        _word("...", 0.1, 0.2, space_before=True),
+    )
+    assert join_words(words) == "and..."

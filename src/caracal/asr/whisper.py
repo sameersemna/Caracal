@@ -90,7 +90,7 @@ def parse_whisper_response(payload: object) -> WhisperResult:
                         start=_as_float(item.get("start")),
                         end=_as_float(item.get("end")),
                         prob=_as_float(item.get("probability")),
-                        space_before=bool(words) and raw_text[:1].isspace(),
+                        space_before=raw_text[:1].isspace(),
                     )
                 )
         segments.append(

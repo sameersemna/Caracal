@@ -129,8 +129,9 @@ class Word:
     """One transcribed word with its timing and acoustic confidence.
 
     ``space_before`` is whisper's own spacing signal: ``True`` when the raw token started
-    with whitespace, ``False`` for the first word of a segment and for tokens such as
-    ``"'t"`` or ``","`` that are attached to the preceding word.
+    with whitespace, ``False`` for tokens such as ``"'t"`` or ``","`` that are attached to
+    the preceding word. It is recorded for every word, including the first word of a
+    segment, so words joined across a segment seam keep their separating space.
     """
 
     text: str
@@ -155,16 +156,25 @@ class Word:
         return payload
 
 
+_SENTENCE_PUNCTUATION = frozenset(".,?!;:")
+
+
+def _is_sentence_punctuation(text: str) -> bool:
+    return bool(text) and all(character in _SENTENCE_PUNCTUATION for character in text)
+
+
 def join_words(words: Sequence[Word]) -> str:
     """Rebuild text from words using whisper's spacing signal.
 
     One space is inserted before a word only when :attr:`Word.space_before` is ``True``,
     so contractions (``"'t"``) and attached punctuation (``","``) survive the rebuild.
-    The result is stripped; the first kept word never receives a leading space.
+    A token made only of sentence punctuation (whisper's detached ``"..."``) is attached to
+    the preceding word instead of being rendered as ``"and ..."``. The result is stripped;
+    the first kept word never receives a leading space.
     """
     parts: list[str] = []
     for word in words:
-        if parts and word.space_before:
+        if parts and word.space_before and not _is_sentence_punctuation(word.text):
             parts.append(" ")
         parts.append(word.text)
     return "".join(parts).strip()
