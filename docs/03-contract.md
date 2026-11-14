@@ -105,6 +105,7 @@ asynchronous. Inputs validated with pydantic; errors raised as MCP tool errors c
 | `unsupported_media` | 415 | ffprobe finds no audio stream |
 | `dependency_down` | 503 | whisper / ollama / db / redis unreachable (retryable) |
 | `job_not_ready` | 409 | report requested before `done` |
+| `rate_limited` | 429 | job creation over `CARACAL_RATE_LIMIT_PER_MIN` |
 | `internal` | 500 | |
 
 ## 5. Report schema (`report/model.py`, pydantic, `schema_version: "1.0"`)
