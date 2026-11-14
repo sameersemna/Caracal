@@ -232,3 +232,26 @@ def test_get_settings_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
     get_settings.cache_clear()
     monkeypatch.setenv("CARACAL_PORT", "12000")
     assert get_settings().CARACAL_PORT == 12000
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("POSTGRESQL://u:p@h:5432/caracal", "postgresql+asyncpg://u:p@h:5432/caracal"),
+        ("Postgres://u:p@h/db", "postgresql+asyncpg://u:p@h/db"),
+        (
+            "PostgreSQL+Psycopg://u:p@h/db?sslmode=require",
+            "postgresql+asyncpg://u:p@h/db?sslmode=require",
+        ),
+    ],
+)
+def test_database_url_scheme_is_case_insensitive(
+    make_settings: MakeSettings, value: str, expected: str
+) -> None:
+    assert _database_url(make_settings(DATABASE_URL=value)) == expected
+
+
+@pytest.mark.parametrize("scheme", ["MYSQL", "PostgresX", "Postgresql+Weird!"])
+def test_unknown_database_scheme_is_rejected(make_settings: MakeSettings, scheme: str) -> None:
+    with pytest.raises(ValidationError, match="DATABASE_URL"):
+        make_settings(DATABASE_URL=f"{scheme}://u:p@h/db")

@@ -106,3 +106,111 @@ def test_level_filtering(capsys: pytest.CaptureFixture[str]) -> None:
 def test_unknown_level_is_rejected() -> None:
     with pytest.raises(ValueError, match="unknown log level"):
         configure_logging("LOUD")
+
+
+# --- verdict 01, attack A2: every leaked secret form must be masked ----------------------
+
+
+def _emit(
+    capsys: pytest.CaptureFixture[str],
+    *,
+    message: str = "msg",
+    extra: dict[str, object] | None = None,
+    secrets: tuple[str, ...] = (),
+) -> str:
+    configure_logging("INFO", secrets=secrets)
+    get_logger("caracal.test").info(message, extra={} if extra is None else extra)
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    return captured.err
+
+
+def _assert_masked(stderr: str, secret: str) -> None:
+    assert secret not in stderr
+    assert "***" in stderr
+
+
+def test_a2_extra_api_key_is_masked(capsys: pytest.CaptureFixture[str]) -> None:
+    _assert_masked(_emit(capsys, extra={"api_key": "api-key-value-111"}), "api-key-value-111")
+
+
+def test_a2_extra_token_is_masked(capsys: pytest.CaptureFixture[str]) -> None:
+    _assert_masked(_emit(capsys, extra={"token": "token-value-222"}), "token-value-222")
+
+
+def test_a2_extra_password_is_masked(capsys: pytest.CaptureFixture[str]) -> None:
+    _assert_masked(_emit(capsys, extra={"password": "password-value-333"}), "password-value-333")
+
+
+def test_a2_message_access_token_is_masked(capsys: pytest.CaptureFixture[str]) -> None:
+    _assert_masked(
+        _emit(capsys, message="access_token=access-token-444"),
+        "access-token-444",
+    )
+
+
+def test_a2_message_x_api_key_header_is_masked(capsys: pytest.CaptureFixture[str]) -> None:
+    _assert_masked(_emit(capsys, message="x-api-key: x-api-key-555"), "x-api-key-555")
+
+
+def test_a2_message_x_subscription_token_header_is_masked(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _assert_masked(
+        _emit(capsys, message="X-Subscription-Token: subscription-token-666"),
+        "subscription-token-666",
+    )
+
+
+def test_a2_hf_token_shape_is_masked(capsys: pytest.CaptureFixture[str]) -> None:
+    secret = "hf_" + "a" * 24
+    _assert_masked(_emit(capsys, message=f"token {secret}"), secret)
+
+
+def test_a2_message_password_is_masked(capsys: pytest.CaptureFixture[str]) -> None:
+    _assert_masked(_emit(capsys, message="password=password-777"), "password-777")
+
+
+def test_a2_nested_x_api_key_header_is_masked(capsys: pytest.CaptureFixture[str]) -> None:
+    _assert_masked(
+        _emit(capsys, extra={"headers": {"x-api-key": "nested-api-key-888"}}),
+        "nested-api-key-888",
+    )
+
+
+def test_sk_token_shape_is_masked(capsys: pytest.CaptureFixture[str]) -> None:
+    secret = "sk-" + "b" * 24
+    _assert_masked(_emit(capsys, message=f"key {secret}"), secret)
+
+
+def test_json_name_value_form_is_masked(capsys: pytest.CaptureFixture[str]) -> None:
+    _assert_masked(
+        _emit(capsys, message='{"api_key": "json-secret-999"}'),
+        "json-secret-999",
+    )
+
+
+def test_registered_setting_secret_value_is_masked(capsys: pytest.CaptureFixture[str]) -> None:
+    sample = "registered-secret-value"
+    _assert_masked(
+        _emit(capsys, message=f"using {sample}", secrets=(sample,)),
+        sample,
+    )
+
+
+def test_registered_secret_shorter_than_eight_characters_is_ignored(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stderr = _emit(capsys, message="value short is fine", secrets=("short",))
+    assert "short" in stderr
+
+
+def test_token_count_extra_is_not_masked(capsys: pytest.CaptureFixture[str]) -> None:
+    record = _records(_emit(capsys, message="tokens counted", extra={"token_count": 5}))[0]
+    assert record["token_count"] == 5
+
+
+@pytest.mark.parametrize("key", ["token_usage", "prompt_tokens_count", "token_limit"])
+def test_token_metric_suffixes_are_not_masked(capsys: pytest.CaptureFixture[str], key: str) -> None:
+    record = _records(_emit(capsys, message="metrics", extra={key: 7}))[0]
+    assert record[key] == 7

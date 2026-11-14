@@ -7,6 +7,7 @@ import json
 import pytest
 
 from caracal.cli import main
+from caracal.log import get_logger
 
 SUBCOMMANDS = ("serve", "worker", "mcp-stdio", "migrate", "doctor")
 
@@ -82,3 +83,19 @@ def test_doctor_defaults_are_valid(
     _set_required(monkeypatch)
     assert main(["doctor"]) == 0
     assert any(record["msg"] == "config valid" for record in _records(capsys.readouterr().err))
+
+
+def test_doctor_registers_loaded_secrets_for_exact_match_redaction(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _set_required(monkeypatch)
+    sample = "exa-registered-secret-value"
+    monkeypatch.setenv("EXA_API_KEY", sample)
+    assert main(["doctor"]) == 0
+    capsys.readouterr()
+
+    get_logger("caracal.test").info("search key %s", sample)
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert sample not in captured.err
+    assert "***" in captured.err

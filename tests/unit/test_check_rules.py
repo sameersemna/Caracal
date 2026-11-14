@@ -183,3 +183,101 @@ def test_cli_rejects_a_missing_root(tmp_path: Path) -> None:
 def test_repository_source_is_clean() -> None:
     package_root = Path(check_rules.__file__).resolve().parents[1] / "src" / "caracal"
     assert _hits(package_root) == []
+
+
+# --- verdict 01, attack A1: code rules must be decided on the AST -------------------------
+
+
+def _rules(tmp_path: Path, source: str) -> list[tuple[str, int]]:
+    _write(tmp_path, "cli.py", source)
+    return [(hit.rule, hit.line) for hit in _hits(tmp_path)]
+
+
+def test_a1_from_os_import_environ_and_getenv_is_reported(tmp_path: Path) -> None:
+    assert ("os-environ", 1) in _rules(
+        tmp_path,
+        'from os import environ, getenv\nvalue = getenv("HF_TOKEN")\n',
+    )
+
+
+def test_a1_getenv_call_is_reported(tmp_path: Path) -> None:
+    assert _rules(tmp_path, 'from os import getenv\nvalue = getenv("HF_TOKEN")\n') == [
+        ("os-environ", 1),
+        ("os-environ", 2),
+    ]
+
+
+def test_a1_asyncio_create_subprocess_shell_is_reported(tmp_path: Path) -> None:
+    source = (
+        "import asyncio\n\nasync def f(cmd: str) -> None:\n    await asyncio.create_subprocess_shell(cmd)\n"
+    )
+    assert _rules(tmp_path, source) == [("async-subprocess-shell", 4)]
+
+
+def test_a1_subprocess_run_with_string_on_the_next_line_is_reported(tmp_path: Path) -> None:
+    source = 'import subprocess\nsubprocess.run(\n    "ls -la")\n'
+    assert _rules(tmp_path, source) == [("subprocess-string-arg", 2)]
+
+
+def test_from_os_import_alias_is_reported(tmp_path: Path) -> None:
+    assert ("os-environ", 2) in _rules(tmp_path, 'from os import getenv as g\nvalue = g("X")\n')
+
+
+def test_from_subprocess_import_alias_is_reported(tmp_path: Path) -> None:
+    assert _rules(tmp_path, 'from subprocess import run\nrun("ls")\n') == [
+        ("subprocess-string-arg", 2),
+    ]
+
+
+def test_subprocess_module_alias_is_reported(tmp_path: Path) -> None:
+    assert _rules(tmp_path, 'import subprocess as sp\nsp.run("ls")\n') == [
+        ("subprocess-string-arg", 2),
+    ]
+
+
+def test_os_module_alias_environment_access_is_reported(tmp_path: Path) -> None:
+    assert _rules(tmp_path, 'import os as o\nvalue = o.environ["X"]\n') == [
+        ("os-environ", 2),
+    ]
+
+
+def test_asyncio_module_alias_create_subprocess_shell_is_reported(tmp_path: Path) -> None:
+    source = (
+        "import asyncio as aio\n"
+        "\n"
+        "async def f(cmd: str) -> None:\n"
+        "    await aio.create_subprocess_shell(cmd)\n"
+    )
+    assert _rules(tmp_path, source) == [("async-subprocess-shell", 4)]
+
+
+def test_os_popen_is_reported(tmp_path: Path) -> None:
+    assert _rules(tmp_path, 'import os\nos.popen("ls")\n') == [("os-popen", 2)]
+
+
+def test_os_putenv_call_is_reported(tmp_path: Path) -> None:
+    assert _rules(tmp_path, 'import os\nos.putenv("A", "b")\n') == [("os-environ", 2)]
+
+
+def test_from_os_import_putenv_is_reported(tmp_path: Path) -> None:
+    assert ("os-environ", 1) in _rules(tmp_path, 'from os import putenv\nputenv("A", "b")\n')
+
+
+def test_file_that_does_not_parse_is_a_syntax_error(tmp_path: Path) -> None:
+    assert _rules(tmp_path, "def broken(:\n    pass\n") == [("syntax-error", 1)]
+
+
+def test_legal_snippets_are_clean(tmp_path: Path) -> None:
+    source = (
+        "import asyncio\n"
+        "\n"
+        "from caracal.config import get_settings\n"
+        "\n"
+        "async def f(path: str) -> None:\n"
+        '    await asyncio.create_subprocess_exec("ffmpeg", "-i", path)\n'
+        "\n"
+        "settings = get_settings()\n"
+        "value = settings.HF_TOKEN\n"
+    )
+    _write(tmp_path, "cli.py", source)
+    assert _hits(tmp_path) == []

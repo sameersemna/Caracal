@@ -15,7 +15,10 @@ from typing import Annotated, Any
 from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
-_DATABASE_SCHEME = re.compile(r"^(?P<scheme>postgresql|postgres)(?:\+[A-Za-z0-9_]+)?://")
+_DATABASE_SCHEME = re.compile(
+    r"^(?P<scheme>postgresql|postgres)(?:\+[A-Za-z0-9_]+)?://",
+    re.IGNORECASE,
+)
 _OLLAMA_SUFFIXES = ("/api", "/v1")
 _LOG_LEVELS = frozenset({"CRITICAL", "DEBUG", "ERROR", "INFO", "WARNING"})
 

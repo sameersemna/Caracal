@@ -6,9 +6,9 @@ import argparse
 import sys
 from typing import cast
 
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
-from caracal.config import get_settings
+from caracal.config import Settings, get_settings
 from caracal.log import configure_logging, get_logger
 
 _COMMANDS = ("serve", "worker", "mcp-stdio", "migrate", "doctor")
@@ -36,6 +36,16 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _secret_values(settings: Settings) -> list[str]:
+    """Every loaded ``SecretStr`` value, for exact-match redaction (docs/06 S8c)."""
+    values: list[str] = []
+    for field in type(settings).model_fields:
+        value = getattr(settings, field)
+        if isinstance(value, SecretStr):
+            values.append(value.get_secret_value())
+    return values
+
+
 def _doctor() -> int:
     configure_logging("INFO")
     logger = get_logger("caracal.doctor")
@@ -50,7 +60,7 @@ def _doctor() -> int:
         )
         logger.error("config invalid", extra={"fields": fields})
         return 1
-    configure_logging(settings.CARACAL_LOG_LEVEL)
+    configure_logging(settings.CARACAL_LOG_LEVEL, secrets=_secret_values(settings))
     logger.info(
         "config valid",
         extra={

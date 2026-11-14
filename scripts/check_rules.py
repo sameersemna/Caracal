@@ -10,6 +10,7 @@ or the tests unless they are explicitly passed as the root.
 from __future__ import annotations
 
 import argparse
+import ast
 import fnmatch
 import re
 import sys
@@ -40,24 +41,150 @@ class LineRule:
     allow_config: bool = False
 
 
+# Only comment/text markers and string-literal rules run on raw lines; every code rule is
+# decided on the AST (docs/07 §2) so aliases and multi-line calls cannot slip through.
 LINE_RULES: tuple[LineRule, ...] = (
-    LineRule("os-environ", re.compile(r"\bos\.(?:environ|getenv)\b"), allow_config=True),
-    LineRule("print-call", re.compile(r"\bprint\s*\(")),
-    LineRule("shell-true", re.compile(r"\bshell\s*=\s*True\b")),
-    LineRule("os-system", re.compile(r"\bos\.system\s*\(")),
-    LineRule("subprocess-string-arg", re.compile(r"\bsubprocess\.(?:call|run)\s*\(\s*[rbfuRBFU]{0,2}[\"']")),
-    LineRule("eval-call", re.compile(r"(?<![\w.])eval\s*\(")),
-    LineRule("exec-call", re.compile(r"(?<![\w.])exec\s*\(")),
-    LineRule("pickle-load", re.compile(r"\bpickle\.loads?\s*\(")),
     LineRule("todo-marker", re.compile(r"\b(?:TODO|FIXME|XXX)\b")),
-    LineRule("not-implemented", re.compile(r"\bNotImplementedError\b")),
     LineRule("stub-pass", re.compile(r"\bpass\s+#\s*stub\b")),
-    LineRule("requests-import", re.compile(r"^\s*(?:import|from)\s+requests\b")),
-    LineRule("queue-import", re.compile(r"^\s*(?:import|from)\s+(?:arq|rq|celery)\b")),
-    LineRule("redis-flush", re.compile(r"\b(?:flushdb|flushall)\b")),
-    LineRule("redis-keys", re.compile(r"\.keys\s*\(")),
     LineRule("redis-prefix-literal", re.compile(r"[\"']caracal:"), allow_config=True),
 )
+
+_OS_ENVIRONMENT_NAMES = frozenset({"environ", "getenv", "putenv"})
+_FORBIDDEN_IMPORT_RULES = {
+    "requests": "requests-import",
+    "arq": "queue-import",
+    "rq": "queue-import",
+    "celery": "queue-import",
+}
+_REDIS_FLUSH_NAMES = frozenset({"flushdb", "flushall"})
+
+
+def _is_string_literal(node: ast.expr) -> bool:
+    """True for a plain string constant or an f-string."""
+    if isinstance(node, ast.JoinedStr):
+        return True
+    return isinstance(node, ast.Constant) and isinstance(node.value, str)
+
+
+def _is_true_constant(node: ast.expr) -> bool:
+    return isinstance(node, ast.Constant) and node.value is True
+
+
+class RuleVisitor(ast.NodeVisitor):
+    """Report code-rule violations on the AST, resolving local import aliases."""
+
+    def __init__(self, path: Path, text: str, *, is_config: bool) -> None:
+        self.path = path
+        self.is_config = is_config
+        self.lines = text.splitlines()
+        self.aliases: dict[str, str] = {}
+        self.violations: dict[tuple[int, str], Violation] = {}
+
+    def collect_aliases(self, tree: ast.AST) -> None:
+        """Map every local import name to its dotted target (``getenv -> os.getenv``)."""
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    local = alias.asname or alias.name.split(".")[0]
+                    target = alias.name if alias.asname else alias.name.split(".")[0]
+                    self.aliases[local] = target
+            elif isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                for alias in node.names:
+                    if alias.name == "*":
+                        continue
+                    local = alias.asname or alias.name
+                    self.aliases[local] = f"{module}.{alias.name}" if module else alias.name
+
+    def add(self, node: ast.AST, rule: str) -> None:
+        line = getattr(node, "lineno", 1)
+        key = (line, rule)
+        if key in self.violations:
+            return
+        excerpt = self.lines[line - 1].strip()[:MAX_EXCERPT] if 0 < line <= len(self.lines) else ""
+        self.violations[key] = Violation(self.path, line, rule, excerpt)
+
+    def resolve(self, node: ast.expr) -> str | None:
+        """Return the canonical dotted name for a name/attribute expression."""
+        if isinstance(node, ast.Name):
+            return self.aliases.get(node.id, node.id)
+        if isinstance(node, ast.Attribute):
+            base = self.resolve(node.value)
+            return f"{base}.{node.attr}" if base is not None else None
+        return None
+
+    def _environment(self, node: ast.AST, rule: str) -> None:
+        if not self.is_config:
+            self.add(node, rule)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            rule = _FORBIDDEN_IMPORT_RULES.get(alias.name.split(".")[0])
+            if rule is not None:
+                self.add(node, rule)
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        module = node.module or ""
+        rule = _FORBIDDEN_IMPORT_RULES.get(module.split(".")[0])
+        if rule is not None:
+            self.add(node, rule)
+        if module == "os":
+            for alias in node.names:
+                if alias.name in _OS_ENVIRONMENT_NAMES:
+                    self._environment(node, "os-environ")
+        self.generic_visit(node)
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        canonical = self.resolve(node)
+        if canonical in {"os.environ", "os.getenv", "os.putenv"}:
+            self._environment(node, "os-environ")
+        if node.attr == "NotImplementedError":
+            self.add(node, "not-implemented")
+        self.generic_visit(node)
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if node.id == "NotImplementedError":
+            self.add(node, "not-implemented")
+        self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        canonical = self.resolve(node.func)
+        if canonical is not None:
+            self._check_call(node, canonical)
+        self.generic_visit(node)
+
+    def _check_call(self, node: ast.Call, canonical: str) -> None:
+        if canonical in {"print", "builtins.print"}:
+            self.add(node, "print-call")
+        elif canonical in {"eval", "builtins.eval"}:
+            self.add(node, "eval-call")
+        elif canonical in {"exec", "builtins.exec"}:
+            self.add(node, "exec-call")
+        elif canonical in {"pickle.load", "pickle.loads"}:
+            self.add(node, "pickle-load")
+        elif canonical in {"os.getenv", "os.putenv"}:
+            self._environment(node, "os-environ")
+        elif canonical == "os.system":
+            self.add(node, "os-system")
+        elif canonical == "os.popen":
+            self.add(node, "os-popen")
+        elif canonical == "asyncio.create_subprocess_shell":
+            self.add(node, "async-subprocess-shell")
+        elif canonical.startswith("subprocess."):
+            if any(keyword.arg == "shell" and _is_true_constant(keyword.value) for keyword in node.keywords):
+                self.add(node, "shell-true")
+            if node.args and _is_string_literal(node.args[0]):
+                self.add(node, "subprocess-string-arg")
+
+        if isinstance(node.func, ast.Attribute):
+            if node.func.attr in _REDIS_FLUSH_NAMES:
+                self.add(node, "redis-flush")
+            if node.func.attr == "keys":
+                self.add(node, "redis-keys")
+        elif canonical in _REDIS_FLUSH_NAMES:
+            self.add(node, "redis-flush")
+
 
 _BRACE_RE = re.compile(r"\{([^{}]*)\}")
 _GLOB_SHAPE = re.compile(r"[A-Za-z0-9_./{},\-*]+")
@@ -176,6 +303,18 @@ def check_file(path: Path, root: Path, layout: Layout) -> list[Violation]:
                 continue
             if rule.pattern.search(line):
                 violations.append(Violation(path, number, rule.name, _excerpt(line)))
+
+    try:
+        tree = ast.parse(text, filename=str(path))
+    except SyntaxError as exc:
+        line = exc.lineno or 1
+        excerpt = _excerpt(text.splitlines()[line - 1]) if 0 < line <= len(text.splitlines()) else ""
+        violations.append(Violation(path, line, "syntax-error", excerpt))
+    else:
+        visitor = RuleVisitor(path, text, is_config=is_config)
+        visitor.collect_aliases(tree)
+        visitor.visit(tree)
+        violations.extend(visitor.violations.values())
 
     relative = path.relative_to(root).as_posix()
     if not layout.matches(relative):
