@@ -18,7 +18,8 @@ Code rules (environment access, subprocess, eval/exec, pickle, forbidden imports
 Line regexes are only used for comment/text markers (TODO etc.) and string-literal rules. In particular these must be
 reported: `from os import environ|getenv|putenv` (any alias), `os.environ`, `os.getenv`, `os.putenv`;
 `asyncio.create_subprocess_shell`, `os.system`, `os.popen`, any `subprocess.*` call with `shell=True` or whose first
-argument is a string literal / f-string (even on the next line), including `from subprocess import run` aliases.
+argument is a string literal / f-string (even on the next line), including `from subprocess import run` aliases. Rule names: `os-environ` (environ/getenv/putenv), `os-system`, `os-popen`,
+`async-subprocess-shell`, `shell-true`, `subprocess-string-arg`, `eval-call`, `exec-call`, `pickle-load`, `syntax-error`.
 
 - `os.environ` / `os.getenv` outside `src/caracal/config.py`
 - `print(` anywhere in `src/` (stdout is the MCP stdio channel — use `log.py`)
