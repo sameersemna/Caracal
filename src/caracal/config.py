@@ -83,6 +83,7 @@ class Settings(BaseSettings):
     CARACAL_PORT: int = 11404
     CARACAL_API_TOKEN: SecretStr
     CARACAL_PUBLIC_BASE_URL: str = "http://127.0.0.1:11404"
+    CARACAL_ALLOWED_HOSTS: Annotated[list[str], NoDecode] = []
     CARACAL_DATA_DIR: Path = Path("./data")
     CARACAL_RETENTION_DAYS: int = 30
     CARACAL_KEEP_MEDIA: bool = False
@@ -163,7 +164,12 @@ class Settings(BaseSettings):
     def _normalise_ollama(cls, value: str) -> str:
         return normalise_ollama_url(value)
 
-    @field_validator("SEARCH_PROVIDERS", "CARACAL_DEFAULT_TARGET_LANGS", mode="before")
+    @field_validator(
+        "SEARCH_PROVIDERS",
+        "CARACAL_DEFAULT_TARGET_LANGS",
+        "CARACAL_ALLOWED_HOSTS",
+        mode="before",
+    )
     @classmethod
     def _parse_csv_fields(cls, value: Any) -> list[str]:
         return parse_csv(value)

@@ -20,6 +20,7 @@ import sqlalchemy as sa
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from mcp.server.transport_security import TransportSecuritySettings
 from redis import asyncio as redis_asyncio
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -44,7 +45,9 @@ from caracal.db.repo import (
 )
 from caracal.errors import HTTP_STATUS, CaracalError, ErrorCode
 from caracal.log import get_logger
+from caracal.mcp.server import HTTP_INLINE_BASE64_BYTES, build_mcp
 from caracal.queue import JobQueue, Keys
+from caracal.services import JobService
 
 if TYPE_CHECKING:
     from caracal.pipeline.stages import Repos
@@ -53,6 +56,7 @@ logger = get_logger("caracal.app")
 
 DEFAULT_V1_BODY_LIMIT_BYTES = 64 * 1024
 MULTIPART_OVERHEAD_BYTES = 64 * 1024
+MCP_HTTP_BODY_LIMIT_BYTES = 1024 * 1024
 DEFAULT_HEALTH_TIMEOUT_S = 2.0
 DEFAULT_HEALTH_CACHE_TTL_S = 10.0
 
@@ -110,8 +114,13 @@ def _caracal_response(error: CaracalError) -> JSONResponse:
 
 
 def _is_v1_path(path: str) -> bool:
-    """True for the authenticated API surface only (``/healthz`` and ``/mcp`` stay untouched)."""
+    """True for the REST API surface (``/healthz`` stays public)."""
     return path == "/v1" or path.startswith("/v1/")
+
+
+def _is_mcp_path(path: str) -> bool:
+    """True for the mounted streamable-HTTP MCP endpoint (``/mcp`` and ``/mcp/*``)."""
+    return path == "/mcp" or path.startswith("/mcp/")
 
 
 def _content_length(scope: Scope) -> int | None:
@@ -166,29 +175,31 @@ class OriginGuardMiddleware:
         await self.app(scope, receive, send)
 
 
-class _BodyTooLarge(StarletteHTTPException):
+class _BodyTooLarge(BaseException):
     """Raised from ``receive`` when a body crosses the route limit.
 
-    It subclasses ``HTTPException`` because FastAPI re-raises those while parsing a request
-    body (it wraps every other exception into a 400, which would hide the 413). A dedicated
-    handler in :func:`create_app` renders it as the ``too_large`` envelope.
+    It must not be an ``Exception``: FastAPI wraps exceptions raised while parsing a body
+    into a 400, and the mounted MCP sub-app has a Starlette exception middleware that turns
+    an ``HTTPException`` into a plain-text 413. A ``BaseException`` passes both layers
+    untouched, so :class:`AuthBodyLimitMiddleware` can render the ``too_large`` envelope.
     """
 
     def __init__(self) -> None:
-        super().__init__(status_code=413, detail="request body is too large")
+        super().__init__("request body is too large")
 
 
 class AuthBodyLimitMiddleware:
-    """Authenticate ``/v1`` requests before the body is read, then cap the body stream.
+    """Authenticate ``/v1`` and ``/mcp`` requests before the body is read, then cap the stream.
 
     Docs: docs/03 §1 (auth on everything but ``/healthz``), docs/06 S1 (bearer), docs/03 §4
     (``too_large``). This is a *pure* ASGI middleware on purpose: ``BaseHTTPMiddleware`` would
     let the routed app pull the body first, so an unauthenticated client could make us buffer
-    30 MiB before answering 401.
+    an upload before answering 401.
 
-    ``body_limits`` maps ``(METHOD, path)`` to a byte cap so later cards can register routes
-    with their own limit (e.g. ``POST /v1/uploads``); every other ``/v1`` route uses
-    ``default_body_limit``.
+    ``body_limits`` maps ``(METHOD, path)`` to a byte cap so individual REST routes can
+    declare their own limit (e.g. ``POST /v1/uploads``); every other ``/v1`` route uses
+    ``default_body_limit``. The MCP endpoint gets its own cap (``mcp_body_limit``, 1 MiB):
+    larger audio must go through ``POST /v1/uploads``.
     """
 
     def __init__(
@@ -198,17 +209,25 @@ class AuthBodyLimitMiddleware:
         token: str,
         body_limits: BodyLimits | None = None,
         default_body_limit: int = DEFAULT_V1_BODY_LIMIT_BYTES,
+        mcp_body_limit: int = MCP_HTTP_BODY_LIMIT_BYTES,
     ) -> None:
         self.app = app
         self.token = token
         self.body_limits = dict(body_limits or {})
         self.default_body_limit = default_body_limit
+        self.mcp_body_limit = mcp_body_limit
 
     def _limit(self, method: str, path: str) -> int:
+        if _is_mcp_path(path):
+            return self.mcp_body_limit
         return self.body_limits.get((method.upper(), path), self.default_body_limit)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http" or not _is_v1_path(scope["path"]):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        path = scope["path"]
+        if not (_is_v1_path(path) or _is_mcp_path(path)):
             await self.app(scope, receive, send)
             return
 
@@ -299,6 +318,51 @@ def _build_real_deps(settings: Settings) -> tuple[AppDeps, AsyncEngine]:
     return deps, engine
 
 
+def _dedupe(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            ordered.append(value)
+    return ordered
+
+
+def mcp_transport_security(settings: Settings) -> TransportSecuritySettings:
+    """Allowed Host/Origin values for the MCP transport (docs/02 ``CARACAL_ALLOWED_HOSTS``)."""
+    port = settings.CARACAL_PORT
+    hosts = [
+        f"localhost:{port}",
+        f"127.0.0.1:{port}",
+        "localhost:*",
+        "127.0.0.1:*",
+    ]
+    try:
+        base = urlsplit(settings.CARACAL_PUBLIC_BASE_URL)
+    except ValueError:
+        base = None
+    if base is not None and base.hostname:
+        hosts.append(base.hostname)
+        if base.port is not None:
+            hosts.append(f"{base.hostname}:{base.port}")
+        elif base.scheme.lower() == "https":
+            hosts.append(f"{base.hostname}:443")
+        else:
+            hosts.append(f"{base.hostname}:80")
+    hosts.extend(settings.CARACAL_ALLOWED_HOSTS)
+    allowed_hosts = _dedupe(hosts)
+    # A browser Origin has no default port, so the bare loopback names are allowed too.
+    origin_hosts = _dedupe([*allowed_hosts, "localhost", "127.0.0.1"])
+    allowed_origins = _dedupe(
+        [f"http://{host}" for host in origin_hosts] + [f"https://{host}" for host in origin_hosts]
+    )
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+    )
+
+
 def create_app(
     settings: Settings,
     deps: AppDeps | None = None,
@@ -307,28 +371,48 @@ def create_app(
 ) -> FastAPI:
     """Build the FastAPI application; ``deps`` is injected by every test.
 
-    ``body_limits`` overrides the 64 KiB cap for specific ``(METHOD, path)`` pairs; it is
-    threaded into :class:`AuthBodyLimitMiddleware` so upload routes can declare their own.
+    The MCP transport is wired here (its session manager needs the sub-app at mount time),
+    so real dependencies are built eagerly and still closed by the lifespan. ``body_limits``
+    overrides the 64 KiB cap for specific ``(METHOD, path)`` pairs; it is threaded into
+    :class:`AuthBodyLimitMiddleware` so upload routes can declare their own.
     """
+    engine: AsyncEngine | None = None
+    if deps is None:
+        deps, engine = _build_real_deps(settings)
+    service = JobService(
+        settings,
+        deps.repos,
+        deps.redis,
+        deps.keys,
+        deps.queue,
+        settings.CARACAL_DATA_DIR,
+    )
+    mcp_server = build_mcp(service, settings, max_inline_bytes=HTTP_INLINE_BASE64_BYTES)
+    mcp_app = mcp_server.streamable_http_app(
+        streamable_http_path="/",
+        stateless_http=True,
+        json_response=True,
+        max_request_body_size=MCP_HTTP_BODY_LIMIT_BYTES,
+        transport_security=mcp_transport_security(settings),
+    )
+    owned_engine = engine
 
     @asynccontextmanager
-    async def lifespan(application: FastAPI) -> AsyncIterator[None]:
-        if deps is not None:
-            yield
-            return
-        built, engine = _build_real_deps(settings)
-        application.state.deps = built
-        try:
-            yield
-        finally:
-            await built.http.aclose()
-            await built.redis.aclose()
-            await engine.dispose()
+    async def lifespan(_application: FastAPI) -> AsyncIterator[None]:
+        async with mcp_app.router.lifespan_context(mcp_app):
+            try:
+                yield
+            finally:
+                if owned_engine is not None:
+                    await deps.http.aclose()
+                    await deps.redis.aclose()
+                    await owned_engine.dispose()
 
     app = FastAPI(title="Caracal", version=__version__, lifespan=lifespan)
     app.state.settings = settings
-    if deps is not None:
-        app.state.deps = deps
+    app.state.deps = deps
+    app.state.service = service
+    app.state.mcp_server = mcp_server
 
     @app.exception_handler(CaracalError)
     async def caracal_error_handler(_request: Request, exc: CaracalError) -> JSONResponse:
@@ -346,10 +430,6 @@ def create_app(
         ]
         return _envelope(422, ErrorCode.INVALID_INPUT, "request validation failed", {"errors": details})
 
-    @app.exception_handler(_BodyTooLarge)
-    async def body_too_large_handler(_request: Request, _exc: _BodyTooLarge) -> JSONResponse:
-        return _envelope(413, ErrorCode.TOO_LARGE, "request body is too large")
-
     @app.exception_handler(StarletteHTTPException)
     async def http_error_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
         code = ErrorCode.NOT_FOUND if exc.status_code == 404 else ErrorCode.INVALID_INPUT
@@ -365,6 +445,7 @@ def create_app(
 
     app.include_router(public_router)
     app.include_router(router)
+    app.mount("/mcp", mcp_app)
     app.add_middleware(OriginGuardMiddleware, public_base_url=settings.CARACAL_PUBLIC_BASE_URL)
     # The upload route has its own cap (docs/02 CARACAL_MAX_UPLOAD_MB) plus multipart
     # header/boundary overhead; explicit overrides win so tests can shrink it.
@@ -374,7 +455,7 @@ def create_app(
     if body_limits:
         effective_limits.update(body_limits)
     # Added last so it is the outermost user middleware (inside Starlette's error handling):
-    # no /v1 body byte is read before the bearer token has been checked.
+    # no /v1 or /mcp body byte is read before the bearer token has been checked.
     app.add_middleware(
         AuthBodyLimitMiddleware,
         token=settings.CARACAL_API_TOKEN.get_secret_value(),
@@ -439,8 +520,10 @@ async def health_payload(settings: Settings, deps: AppDeps) -> dict[str, object]
 
 __all__ = [
     "DEFAULT_V1_BODY_LIMIT_BYTES",
+    "MCP_HTTP_BODY_LIMIT_BYTES",
     "AppDeps",
     "AuthBodyLimitMiddleware",
     "create_app",
     "health_payload",
+    "mcp_transport_security",
 ]

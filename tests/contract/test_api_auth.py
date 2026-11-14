@@ -97,17 +97,36 @@ async def test_healthz_is_public(make_harness: Callable[..., Harness]) -> None:
 async def test_mcp_origin_allows_absent_localhost_and_public_origin(
     make_harness: Callable[..., Harness], origin: str | None
 ) -> None:
-    h = make_harness(settings_overrides={"CARACAL_PUBLIC_BASE_URL": "https://caracal.example:8443"})
-
-    @h.app.get("/mcp/ping")
-    async def ping() -> dict[str, bool]:
-        return {"ok": True}
-
-    headers = {} if origin is None else {"Origin": origin}
-    async with h.client() as client:
-        response = await client.get("/mcp/ping", headers=headers)
+    # Card 15 mounts the real MCP app at /mcp and authenticates it, so the guard is exercised
+    # through a real ``initialize`` request (with Host: testserver explicitly allowed).
+    h = make_harness(
+        settings_overrides={
+            "CARACAL_PUBLIC_BASE_URL": "https://caracal.example:8443",
+            "CARACAL_ALLOWED_HOSTS": "testserver",
+        }
+    )
+    headers = {
+        **AUTH,
+        "Accept": "application/json, text/event-stream",
+        "Content-Type": "application/json",
+    }
+    if origin is not None:
+        headers["Origin"] = origin
+    initialize = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2026-07-28",
+            "capabilities": {},
+            "clientInfo": {"name": "contract", "version": "1"},
+        },
+    }
+    async with h.app.router.lifespan_context(h.app):
+        async with h.client() as client:
+            response = await client.post("/mcp/", headers=headers, json=initialize)
     assert response.status_code == 200
-    assert response.json() == {"ok": True}
+    assert response.json()["result"]["serverInfo"]["name"] == "caracal"
 
 
 @pytest.mark.parametrize(
@@ -130,7 +149,7 @@ async def test_mcp_origin_rejects_foreign_origins_with_the_envelope(
         return {"ok": True}
 
     async with h.client() as client:
-        response = await client.get("/mcp/ping", headers={"Origin": origin})
+        response = await client.get("/mcp/ping", headers={**AUTH, "Origin": origin})
     assert response.status_code == 403
     assert response.json()["error"]["code"] == "unauthorized"
 

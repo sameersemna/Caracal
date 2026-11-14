@@ -14,6 +14,7 @@ from alembic.config import Config as AlembicConfig
 from pydantic import SecretStr, ValidationError
 from redis import asyncio as redis_asyncio
 
+from caracal.app import _build_real_deps
 from caracal.config import Settings, get_settings
 from caracal.db.engine import make_engine
 from caracal.db.repo import (
@@ -24,6 +25,8 @@ from caracal.db.repo import (
 )
 from caracal.errors import CaracalError
 from caracal.log import configure_logging, get_logger
+from caracal.mcp.server import build_mcp
+from caracal.services import JobService
 from caracal.worker import RepoBundle, Worker
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
@@ -162,6 +165,53 @@ def _worker() -> int:
         return 1
 
 
+async def _run_mcp_stdio(settings: Settings) -> int:
+    """Build real dependencies, then serve the MCP tools on stdin/stdout (docs/01 §3).
+
+    Logs go to stderr (``configure_logging``); stdout belongs exclusively to the MCP
+    protocol framing.
+    """
+    deps, engine = _build_real_deps(settings)
+    service = JobService(
+        settings,
+        deps.repos,
+        deps.redis,
+        deps.keys,
+        deps.queue,
+        settings.CARACAL_DATA_DIR,
+    )
+    server = build_mcp(service, settings)
+    try:
+        await server.run_stdio_async()
+    finally:
+        await deps.http.aclose()
+        await deps.redis.aclose()
+        await engine.dispose()
+    return 0
+
+
+def _mcp_stdio() -> int:
+    """Load settings, configure JSON logging on stderr, then run the stdio server."""
+    configure_logging("INFO")
+    logger = get_logger("caracal.mcp")
+    try:
+        settings = get_settings()
+    except ValidationError as exc:
+        logger.error("config invalid", extra={"fields": _invalid_config_fields(exc)})
+        return 1
+    configure_logging(settings.CARACAL_LOG_LEVEL, secrets=_secret_values(settings))
+    try:
+        return asyncio.run(_run_mcp_stdio(settings))
+    except KeyboardInterrupt:
+        return 0
+    except CaracalError as exc:
+        logger.error(
+            "MCP stdio server stopped with an error",
+            extra={"code": exc.code.value, "error": exc.message},
+        )
+        return 1
+
+
 def _serve(settings: Settings) -> int:
     """Run the REST + MCP HTTP app with uvicorn in this process (docs/01 §3)."""
     import uvicorn
@@ -222,6 +272,6 @@ def main(argv: list[str] | None = None) -> int:
         return _worker()
     if command == "serve":
         return _serve_command()
-
-    sys.stderr.write(f"{command}: available from a later milestone\n")
+    if command == "mcp-stdio":
+        return _mcp_stdio()
     return 2
