@@ -50,7 +50,10 @@ Card fields: **Read** (only these doc sections), **Files** (the only files the w
 ### T1.5 Subtitles
 - Read: 04 §10 (segmenter, formats)
 - Files: `src/caracal/subtitles/{__init__,segmenter,formats}.py`, tests
-### T1.6 Wire M1 stages + transcript/subtitle endpoints + MCP server (`analyze_audio`, `get_job`, `get_transcript`)
+### T1.6a Wire M1 stages + transcript/subtitle endpoints + carry-forwards → round 14
+### T1.6b MCP server (`/mcp` + stdio) + parity test → round 15
+
+### T1.6 (combined summary) Wire M1 stages + transcript/subtitle endpoints + MCP server (`analyze_audio`, `get_job`, `get_transcript`)
 - Read: 03 §0, §2–3, 01 §4
 - Files: `src/caracal/pipeline/stages.py`, `src/caracal/mcp/**`, `src/caracal/api/routes.py`, `src/caracal/cli.py`, contract tests incl. `tests/contract/test_parity.py`
 - Cleanup (verdict 08): `UploadRepo.create(upload_id=…)` so uploads live in `uploads/<upload_id>/`; move the round-07 test's dummy route off `/v1/uploads` and delete the 404→415 mapping.
