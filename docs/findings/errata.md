@@ -31,3 +31,13 @@ upload directory is keyed by the storage id stored in `uploads.path` and that co
 **Evidence:** docs/00 "pyannote" row and the round-18 card: `speaker_embeddings` is `(n, 256)` whose rows follow `speaker_diarization.labels()` order; `Pipeline.from_pretrained(...)` + `.to(cuda)` returns that field directly.
 
 **Suggested resolution:** update docs/04 §5 to say the stage stores the pipeline's `speaker_embeddings` (L2-normalised), and drop the "centroid over turns ≥ 1.5 s" wording (or record the ≥ 1.5 s filter as a future refinement that must be validated against this output).
+
+## 2026-11-14 T2.3 — docs/01 §3's voiceprint signatures disagree with the card (and the code)
+
+**What:** docs/01 §3 lists `speakers/voiceprint.py  match(embedding) -> list[VoiceMatch]; enroll(label, job_id, name)`. The round-19 card (requirement 3) instead specifies `classify(similarity, settings) -> "match" | "candidate" | None` and `enroll(service deps, job_id, speaker_label, name, notes)`, with the per-label cosine search living in the `voiceprint` stage (`nearest(embedding, k=3)` on `SpeakerRepo`) so the stage output carries the classes.
+
+**Where:** `docs/01-architecture.md` §3 (layout table); implemented in `src/caracal/speakers/voiceprint.py` and `src/caracal/pipeline/stages.py::stage_voiceprint`.
+
+**Evidence:** docs/01 §3 one-liner vs card 19 requirement 3 and requirement 4; the implemented module exposes `classify`, `enroll`, `EnrollmentDeps` and no `match()`.
+
+**Suggested resolution:** update the docs/01 §3 row to `classify(similarity, settings); enroll(deps, job_id, label, name, notes)` and state that the stage performs the `nearest(k=3)` search, or reword it as prose (the module's public API is what the card binds).

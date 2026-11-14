@@ -34,7 +34,7 @@ from caracal.asr.whisper import WhisperClient
 from caracal.audio import ffmpeg
 from caracal.audio.chunking import Chunk, plan_chunks
 from caracal.config import Settings
-from caracal.db.repo import JobRepo, ReportRepo, SegmentRepo, SegmentRow, UploadRepo
+from caracal.db.repo import JobRepo, ReportRepo, SegmentRepo, SegmentRow, SpeakerRepo, UploadRepo
 from caracal.errors import CaracalError, ErrorCode
 from caracal.ingest import ytdlp
 from caracal.ingest.direct import download_direct
@@ -42,6 +42,7 @@ from caracal.ingest.ssrf import Resolver
 from caracal.log import get_logger
 from caracal.speakers.align import assign_speakers, retime_outside_speech, speaker_stats
 from caracal.speakers.diarize import Diarizer, Turn
+from caracal.speakers.voiceprint import classify
 from caracal.storage import JobFiles
 from caracal.subtitles import cues_from_transcript, to_srt, to_vtt
 
@@ -110,6 +111,9 @@ class Repos(Protocol):
 
     @property
     def segments(self) -> SegmentRepo: ...
+
+    @property
+    def speakers(self) -> SpeakerRepo: ...
 
 
 async def _never_cancelled() -> bool:
@@ -753,6 +757,53 @@ async def stage_align(ctx: StageContext) -> StageResult:
     return StageResult(status="done", output={"speakers": stats, "retimed_words": retimed_words})
 
 
+def _embedding_vector(value: object, what: str) -> list[float]:
+    return [_as_number(item, what) for item in _as_list(value, what)]
+
+
+async def stage_voiceprint(ctx: StageContext) -> StageResult:
+    """Match every diarized label against stored voiceprints (docs/04 §5, docs/05 §1).
+
+    Read-only by design: enrollment happens only through the explicit API (docs/06 §2), so a
+    pipeline run can never attach a name to a voiceprint. A label whose best similarity is
+    below ``VOICEPRINT_CANDIDATE_THRESHOLD`` is absent from the output.
+    """
+    diarize_output = await _done_output(ctx, Stage.DIARIZE)
+    if diarize_output is None:
+        return StageResult(status="skipped", reason="unavailable")
+
+    embeddings = _as_dict(diarize_output.get("embeddings"), "diarize")
+    matches: dict[str, list[dict[str, object]]] = {}
+    for label in sorted(embeddings):
+        vector = _embedding_vector(embeddings[label], "diarize")
+        kept: list[dict[str, object]] = []
+        for match in await ctx.repos.speakers.nearest(vector, k=3):
+            match_class = classify(match.similarity, ctx.settings)
+            if match_class is None:
+                continue
+            kept.append(
+                {
+                    "known_speaker_id": str(match.known_speaker_id),
+                    "name": match.name,
+                    "similarity": round(match.similarity, 6),
+                    "class": match_class,
+                }
+            )
+        if kept:
+            matches[label] = kept
+
+    logger.info(
+        "voiceprint complete",
+        extra={
+            "job_id": str(ctx.job_id),
+            "labels": len(embeddings),
+            "matched_labels": len(matches),
+            "matches": sum(len(items) for items in matches.values()),
+        },
+    )
+    return StageResult(status="done", output={"matches": matches})
+
+
 async def stage_subtitles(ctx: StageContext) -> StageResult:
     """Render the source-language SRT and WebVTT cues (docs/04 §10)."""
     transcript = _load_transcript(ctx)
@@ -789,11 +840,12 @@ _M2_STAGES: dict[Stage, StageFn] = {
     **_M1_STAGES,
     Stage.DIARIZE: stage_diarize,
     Stage.ALIGN: stage_align,
+    Stage.VOICEPRINT: stage_voiceprint,
 }
 
 
 def m2_registry() -> dict[Stage, StageFn]:
-    """The production M2 registry: M1 plus diarization and speaker alignment."""
+    """The production M2 registry: M1 plus diarization, alignment and voiceprint matching."""
     return {stage: _M2_STAGES.get(stage, _m1_stub_stage) for stage in Stage}
 
 
@@ -821,4 +873,5 @@ __all__ = [
     "stage_normalize",
     "stage_subtitles",
     "stage_transcribe",
+    "stage_voiceprint",
 ]

@@ -175,3 +175,50 @@ class AnalyzeSummary(BaseModel):
     duration_s: float
     languages: list[dict[str, object]]
     transcript_preview: str
+
+
+class KnownSpeaker(BaseModel):
+    """One enrolled speaker (docs/03 §5)."""
+
+    id: uuid.UUID
+    name: str
+    notes: str | None = None
+    samples: int
+    created_at: datetime
+    updated_at: datetime
+
+    @model_serializer(mode="wrap")
+    def _serialise(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        return {key: value for key, value in handler(self).items() if value is not None}
+
+
+class SpeakerList(BaseModel):
+    """The ``GET /v1/speakers`` response and MCP ``list_speakers`` output (docs/03 §2-§3).
+
+    A wrapper object, not a bare array: MCP ``structuredContent`` must be a JSON object, so
+    the REST and MCP shapes are identical and a real MCP client can accept both.
+    """
+
+    items: list[KnownSpeaker]
+
+
+class EnrollSpeakerIn(BaseModel):
+    """The ``POST /v1/speakers/enroll`` body (docs/03 §2).
+
+    Enrollment stores biometric voice data, so it only ever happens through this explicit
+    contract and only for a finished job (docs/06 §2).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: uuid.UUID
+    speaker_label: str = Field(min_length=1, max_length=50)
+    name: str = Field(min_length=1, max_length=200)
+    notes: str | None = Field(default=None, max_length=2000)
+
+
+class SpeakerDeleted(BaseModel):
+    """Outcome of ``DELETE /v1/speakers/{id}`` for MCP ``delete_speaker`` (docs/03 §3)."""
+
+    deleted: bool = True
+    voiceprints_removed: int

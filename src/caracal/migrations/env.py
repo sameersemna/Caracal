@@ -13,6 +13,7 @@ from sqlalchemy import Connection, pool
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from caracal.config import get_settings
+from caracal.db.engine import server_settings
 from caracal.db.tables import metadata
 
 config = context.config
@@ -52,7 +53,7 @@ async def run_async_migrations() -> None:
     engine = create_async_engine(
         settings.DATABASE_URL.get_secret_value(),
         poolclass=pool.NullPool,
-        connect_args={"server_settings": {"search_path": settings.CARACAL_DB_SCHEMA}},
+        connect_args={"server_settings": server_settings(settings.CARACAL_DB_SCHEMA)},
     )
     async with engine.connect() as connection:
         await connection.run_sync(do_run_migrations)

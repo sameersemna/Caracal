@@ -32,9 +32,16 @@ def _index_ddl(table: Table, name: str) -> str:
     return str(CreateIndex(index).compile(dialect=DIALECT))
 
 
-def test_only_the_five_tables_exist_and_metadata_is_schema_less() -> None:
-    assert set(metadata.tables) == {"jobs", "job_stages", "uploads", "reports", "segments"}
-    assert "voiceprints" not in metadata.tables
+def test_all_documented_tables_exist_and_metadata_is_schema_less() -> None:
+    assert set(metadata.tables) == {
+        "jobs",
+        "job_stages",
+        "uploads",
+        "reports",
+        "segments",
+        "known_speakers",
+        "voiceprints",
+    }
     assert metadata.schema is None
 
 

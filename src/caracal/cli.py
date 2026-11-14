@@ -23,6 +23,7 @@ from caracal.db.repo import (
     PostgresJobRepo,
     PostgresReportRepo,
     PostgresSegmentRepo,
+    PostgresSpeakerRepo,
     PostgresUploadRepo,
 )
 from caracal.errors import CaracalError
@@ -157,6 +158,7 @@ async def _run_worker(settings: Settings) -> int:
         uploads=PostgresUploadRepo(engine),
         reports=PostgresReportRepo(engine),
         segments=PostgresSegmentRepo(engine),
+        speakers=PostgresSpeakerRepo(engine),
     )
     worker = Worker(settings, redis_client, repos)
     try:

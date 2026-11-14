@@ -47,7 +47,7 @@ to one side without the other fails the gate.
 | `POST /v1/jobs/{id}/translate` | `{"target_langs": ["de"]}` | `202` — runs translate+subtitles only |
 | `POST /v1/jobs/{id}/ask` | `{"question": "..."}` | `Answer` (§5.9) |
 | `DELETE /v1/jobs/{id}` | — | job `queued`/`running` → set cancel flag, `202 {"job_id","status":"cancelling"}` (the runner stops at the next stage boundary; call DELETE again later to remove it). Terminal job → delete DB rows (cascade) **and** `CARACAL_DATA_DIR/jobs/<id>/`, `204` |
-| `GET /v1/speakers` | `?q=` | `[KnownSpeaker]` |
+| `GET /v1/speakers` | `?q=` | `{"items": [KnownSpeaker]}` |
 | `POST /v1/speakers/enroll` | `{"job_id","speaker_label","name","notes"?}` | `201 KnownSpeaker` |
 | `DELETE /v1/speakers/{id}` | — | `204` |
 | `GET /v1/search` | `?q=&limit=20` | full-text hits across all transcripts `[{"job_id","title","seg_id","start","text","rank"}]` |
@@ -72,7 +72,8 @@ to one side without the other fails the gate.
 
 ## 3. MCP tools (FastMCP, streamable HTTP at `/mcp` and stdio)
 
-Tool descriptions are written for an LLM caller: say what the tool does, when to use it, and that analysis is
+**Every tool returns a JSON object** (MCP `structuredContent` must be an object — a list result is rejected by the SDK's
+serialiser over real transports; measured). Tool descriptions are written for an LLM caller: say what the tool does, when to use it, and that analysis is
 asynchronous. Inputs validated with pydantic; errors raised as MCP tool errors carrying the ErrorCode.
 
 | Tool | Inputs | Output |
@@ -86,7 +87,7 @@ asynchronous. Inputs validated with pydantic; errors raised as MCP tool errors c
 | `search_transcripts` | `query`, `limit` (≤50) | hits |
 | `list_jobs` | `status?`, `limit` (≤50, default 20), `cursor?` | `{"items": [JobSummary], "next_cursor"}` |
 | `cancel_job` | `job_id`, `delete_artifacts` (default false) | `{"job_id","status"}` |
-| `list_speakers` | `query?` | KnownSpeaker[] |
+| `list_speakers` | `query?` | `{"items": [KnownSpeaker]}` |
 | `enroll_speaker` | `job_id`, `speaker_label`, `name`, `notes?` | KnownSpeaker |
 | `delete_speaker` | `speaker_id` | `{"deleted": true, "voiceprints_removed": n}` |
 

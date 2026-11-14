@@ -10,6 +10,8 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import math
+import unicodedata
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -23,14 +25,17 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from caracal.db.engine import session_scope
 from caracal.db.tables import (
+    EMB_DIM,
     JOB_SOURCE_KINDS,
     JOB_STATUSES,
     JOB_TERMINAL_STATUSES,
     STAGE_STATUSES,
     job_stages,
     jobs,
+    known_speakers,
     reports,
     uploads,
+    voiceprints,
 )
 from caracal.db.tables import (
     segments as segments_table,
@@ -116,6 +121,75 @@ JobPage = tuple[list[JobRecord], str | None]
 StageList = list[StageRecord]
 UploadList = list[UploadRecord]
 SearchHitList = list[SearchHit]
+
+
+@dataclass(frozen=True)
+class KnownSpeakerRecord:
+    """One ``known_speakers`` row plus the number of stored embeddings."""
+
+    id: uuid.UUID
+    name: str
+    name_norm: str
+    notes: str | None
+    samples: int
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class VoiceMatch:
+    """One known speaker and its best cosine similarity to a query embedding."""
+
+    known_speaker_id: uuid.UUID
+    name: str
+    similarity: float
+
+
+KnownSpeakerList = list[KnownSpeakerRecord]
+VoiceMatchList = list[VoiceMatch]
+
+_PUNCTUATION_CATEGORY = "P"
+
+
+def normalise_text(value: str) -> str:
+    """NFKC, casefold, punctuation to space, collapse whitespace (docs/04 §5)."""
+    text = unicodedata.normalize("NFKC", value).casefold()
+    spaced = "".join(
+        " " if unicodedata.category(character).startswith(_PUNCTUATION_CATEGORY) else character
+        for character in text
+    )
+    return " ".join(spaced.split())
+
+
+def normalise_name(name: str) -> str:
+    """The merge key for known speakers: ``"Daniel  Levitin"`` and ``"daniel levitin."`` agree.
+
+    docs/04 §5: enrollment appends to an existing KnownSpeaker with the same normalised
+    name, so the normalisation must be identical in the Postgres repo and the fake.
+    """
+    if not isinstance(name, str):
+        raise CaracalError(ErrorCode.INVALID_INPUT, "speaker name must be a string")
+    normalised = normalise_text(name)
+    if not normalised:
+        raise CaracalError(ErrorCode.INVALID_INPUT, "speaker name must contain letters or digits")
+    return normalised
+
+
+def validate_embedding(embedding: Sequence[float]) -> list[float]:
+    """A speaker embedding must be exactly ``EMB_DIM`` finite numbers (docs/05 §1)."""
+    try:
+        values = [float(value) for value in embedding]
+    except (TypeError, ValueError) as exc:
+        raise CaracalError(ErrorCode.INVALID_INPUT, "embedding values must be numbers") from exc
+    if len(values) != EMB_DIM:
+        raise CaracalError(
+            ErrorCode.INVALID_INPUT,
+            f"embedding must have {EMB_DIM} dimensions",
+            {"dimensions": len(values), "expected": EMB_DIM},
+        )
+    if not all(math.isfinite(value) for value in values):
+        raise CaracalError(ErrorCode.INVALID_INPUT, "embedding values must be finite")
+    return values
 
 
 def encode_cursor(created_at: datetime, job_id: uuid.UUID) -> str:
@@ -318,6 +392,28 @@ class SegmentRepo(Protocol):
     async def replace_for_job(self, job_id: uuid.UUID, segments: Sequence[SegmentRow]) -> None: ...
 
     async def search(self, query: str, *, limit: int = 20) -> SearchHitList: ...
+
+
+class SpeakerRepo(Protocol):
+    """Persistence for known speakers and their biometric voiceprints (docs/05 §1)."""
+
+    async def upsert_known(self, name: str, notes: str | None = None) -> KnownSpeakerRecord: ...
+
+    async def add_voiceprint(
+        self,
+        known_speaker_id: uuid.UUID,
+        embedding: Sequence[float],
+        job_id: uuid.UUID | None,
+        speaker_label: str,
+    ) -> uuid.UUID: ...
+
+    async def nearest(self, embedding: Sequence[float], *, k: int = 5) -> VoiceMatchList: ...
+
+    async def list(self, q: str | None = None) -> KnownSpeakerList: ...
+
+    async def get(self, known_speaker_id: uuid.UUID) -> KnownSpeakerRecord | None: ...
+
+    async def delete(self, known_speaker_id: uuid.UUID) -> int: ...
 
 
 class PostgresJobRepo:
@@ -698,3 +794,176 @@ class PostgresSegmentRepo:
             )
             for row in rows
         ]
+
+
+def _known_speaker_record(row: RowMapping, samples: int) -> KnownSpeakerRecord:
+    return KnownSpeakerRecord(
+        id=row["id"],
+        name=row["name"],
+        name_norm=row["name_norm"],
+        notes=row["notes"],
+        samples=samples,
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+class PostgresSpeakerRepo:
+    """``SpeakerRepo`` backed by Postgres + pgvector (docs/05 §1).
+
+    ``voiceprints.embedding`` is a ``vector(256)`` column with an HNSW cosine index; a
+    nearest-neighbour query returns the best cosine similarity per known speaker because a
+    person may have dozens of stored samples. Guaranteeing the true best sample needs the
+    aggregate below, which cannot consume the index's ordering; the index is required by
+    docs/05 §1 and keeps the column ready for an approximate pre-filter once the store grows.
+    """
+
+    def __init__(self, engine: AsyncEngine) -> None:
+        self._engine = engine
+
+    async def upsert_known(self, name: str, notes: str | None = None) -> KnownSpeakerRecord:
+        name_norm = normalise_name(name)
+        insert_statement = pg_insert(known_speakers).values(
+            id=uuid.uuid4(),
+            name=name,
+            name_norm=name_norm,
+            notes=notes,
+        )
+        statement = insert_statement.on_conflict_do_update(
+            index_elements=["name_norm"],
+            set_={
+                # "notes updated if given": an enrollment without notes keeps the old text.
+                "notes": sa.func.coalesce(insert_statement.excluded.notes, known_speakers.c.notes),
+                "updated_at": sa.func.now(),
+            },
+        ).returning(*known_speakers.c)
+        async with session_scope(self._engine) as connection:
+            row = (await connection.execute(statement)).mappings().one()
+            samples = await connection.scalar(
+                sa.select(sa.func.count())
+                .select_from(voiceprints)
+                .where(voiceprints.c.known_speaker_id == row["id"])
+            )
+        return _known_speaker_record(row, int(samples or 0))
+
+    async def add_voiceprint(
+        self,
+        known_speaker_id: uuid.UUID,
+        embedding: Sequence[float],
+        job_id: uuid.UUID | None,
+        speaker_label: str,
+    ) -> uuid.UUID:
+        values = validate_embedding(embedding)
+        if not isinstance(speaker_label, str) or not speaker_label.strip():
+            raise CaracalError(ErrorCode.INVALID_INPUT, "speaker_label must not be empty")
+        voiceprint_id = uuid.uuid4()
+        async with session_scope(self._engine) as connection:
+            speaker = await connection.scalar(
+                sa.select(known_speakers.c.id).where(known_speakers.c.id == known_speaker_id)
+            )
+            if speaker is None:
+                raise CaracalError(
+                    ErrorCode.NOT_FOUND,
+                    "known speaker not found",
+                    {"speaker_id": str(known_speaker_id)},
+                )
+            if job_id is not None:
+                job = await connection.scalar(sa.select(jobs.c.id).where(jobs.c.id == job_id))
+                if job is None:
+                    raise CaracalError(
+                        ErrorCode.NOT_FOUND,
+                        "job not found",
+                        {"job_id": str(job_id)},
+                    )
+            await connection.execute(
+                sa.insert(voiceprints).values(
+                    id=voiceprint_id,
+                    known_speaker_id=known_speaker_id,
+                    job_id=job_id,
+                    speaker_label=speaker_label,
+                    embedding=values,
+                )
+            )
+        return voiceprint_id
+
+    async def nearest(self, embedding: Sequence[float], *, k: int = 5) -> VoiceMatchList:
+        values = validate_embedding(embedding)
+        page_size = max(1, min(_MAX_PAGE, k))
+        distance = sa.func.min(voiceprints.c.embedding.cosine_distance(values)).label("distance")
+        statement = (
+            sa.select(voiceprints.c.known_speaker_id, known_speakers.c.name, distance)
+            .select_from(
+                voiceprints.join(known_speakers, known_speakers.c.id == voiceprints.c.known_speaker_id)
+            )
+            .group_by(voiceprints.c.known_speaker_id, known_speakers.c.name)
+            .order_by(distance.asc(), known_speakers.c.name.asc())
+            .limit(page_size)
+        )
+        async with session_scope(self._engine) as connection:
+            rows = (await connection.execute(statement)).mappings().all()
+        return [
+            VoiceMatch(
+                known_speaker_id=row["known_speaker_id"],
+                name=row["name"],
+                similarity=1.0 - float(row["distance"]),
+            )
+            for row in rows
+        ]
+
+    async def list(self, q: str | None = None) -> KnownSpeakerList:
+        samples = sa.func.count(voiceprints.c.id).label("samples")
+        statement = (
+            sa.select(known_speakers, samples)
+            .select_from(
+                known_speakers.outerjoin(
+                    voiceprints,
+                    voiceprints.c.known_speaker_id == known_speakers.c.id,
+                )
+            )
+            .group_by(*known_speakers.c)
+            .order_by(known_speakers.c.name.asc(), known_speakers.c.id.asc())
+        )
+        if q is not None:
+            needle = normalise_text(q)
+            if needle:
+                statement = statement.where(known_speakers.c.name_norm.contains(needle))
+        async with session_scope(self._engine) as connection:
+            rows = (await connection.execute(statement)).mappings().all()
+        return [_known_speaker_record(row, int(row["samples"])) for row in rows]
+
+    async def get(self, known_speaker_id: uuid.UUID) -> KnownSpeakerRecord | None:
+        samples = sa.func.count(voiceprints.c.id).label("samples")
+        statement = (
+            sa.select(known_speakers, samples)
+            .select_from(
+                known_speakers.outerjoin(
+                    voiceprints,
+                    voiceprints.c.known_speaker_id == known_speakers.c.id,
+                )
+            )
+            .where(known_speakers.c.id == known_speaker_id)
+            .group_by(*known_speakers.c)
+        )
+        async with session_scope(self._engine) as connection:
+            row = (await connection.execute(statement)).mappings().one_or_none()
+        return _known_speaker_record(row, int(row["samples"])) if row is not None else None
+
+    async def delete(self, known_speaker_id: uuid.UUID) -> int:
+        async with session_scope(self._engine) as connection:
+            exists = await connection.scalar(
+                sa.select(known_speakers.c.id).where(known_speakers.c.id == known_speaker_id)
+            )
+            if exists is None:
+                raise CaracalError(
+                    ErrorCode.NOT_FOUND,
+                    "known speaker not found",
+                    {"speaker_id": str(known_speaker_id)},
+                )
+            removed = await connection.scalar(
+                sa.select(sa.func.count())
+                .select_from(voiceprints)
+                .where(voiceprints.c.known_speaker_id == known_speaker_id)
+            )
+            # The FK cascade removes the embeddings in the same transaction.
+            await connection.execute(sa.delete(known_speakers).where(known_speakers.c.id == known_speaker_id))
+        return int(removed or 0)

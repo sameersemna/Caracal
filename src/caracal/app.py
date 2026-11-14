@@ -38,9 +38,11 @@ from caracal.db.repo import (
     PostgresJobRepo,
     PostgresReportRepo,
     PostgresSegmentRepo,
+    PostgresSpeakerRepo,
     PostgresUploadRepo,
     ReportRepo,
     SegmentRepo,
+    SpeakerRepo,
     UploadRepo,
 )
 from caracal.errors import HTTP_STATUS, CaracalError, ErrorCode
@@ -87,6 +89,7 @@ class _RepoBundle:
     uploads: UploadRepo
     reports: ReportRepo
     segments: SegmentRepo
+    speakers: SpeakerRepo
 
 
 def _envelope(
@@ -297,6 +300,7 @@ def _build_real_deps(settings: Settings) -> tuple[AppDeps, AsyncEngine]:
         uploads=PostgresUploadRepo(engine),
         reports=PostgresReportRepo(engine),
         segments=PostgresSegmentRepo(engine),
+        speakers=PostgresSpeakerRepo(engine),
     )
     redis_client = redis_asyncio.from_url(settings.REDIS_URL.get_secret_value())
     http_client = httpx.AsyncClient(timeout=DEFAULT_HEALTH_TIMEOUT_S)

@@ -17,7 +17,7 @@ from redis.exceptions import RedisError
 
 from caracal.asr.whisper import WhisperClient
 from caracal.config import Settings
-from caracal.db.repo import JobRepo, ReportRepo, SegmentRepo, UploadRepo
+from caracal.db.repo import JobRepo, ReportRepo, SegmentRepo, SpeakerRepo, UploadRepo
 from caracal.db.tables import JOB_TERMINAL_STATUSES
 from caracal.errors import CaracalError, ErrorCode
 from caracal.ingest.ssrf import Resolver, SystemResolver
@@ -49,6 +49,7 @@ class RepoBundle:
     uploads: UploadRepo
     reports: ReportRepo
     segments: SegmentRepo
+    speakers: SpeakerRepo
 
 
 @dataclass(frozen=True)

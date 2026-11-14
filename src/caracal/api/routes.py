@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from python_multipart.multipart import parse_options_header
 
 from caracal.api.auth import bearer_token, require_auth
-from caracal.api.schemas import JobCreate
+from caracal.api.schemas import EnrollSpeakerIn, JobCreate, SpeakerList
 from caracal.db.tables import JOB_TERMINAL_STATUSES
 from caracal.errors import CaracalError, ErrorCode
 from caracal.ingest.upload import MultipartFileStream
@@ -261,6 +261,34 @@ async def delete_job(job_id: uuid.UUID, request: Request) -> Response:
     if result is None:
         return Response(status_code=204)
     return JSONResponse(status_code=202, content=result.model_dump(mode="json"))
+
+
+@router.get("/speakers")
+async def list_speakers(
+    request: Request,
+    q: str | None = Query(default=None),
+) -> SpeakerList:
+    """Known speakers and their sample counts, optionally filtered by name (docs/03 §2)."""
+    return await _service(request).list_speakers(q)
+
+
+@router.post("/speakers/enroll")
+async def enroll_speaker(payload: EnrollSpeakerIn, request: Request) -> JSONResponse:
+    """Store one diarized label's voiceprint under a name (docs/03 §2, docs/06 §2)."""
+    speaker = await _service(request).enroll_speaker(
+        payload.job_id,
+        payload.speaker_label,
+        payload.name,
+        payload.notes,
+    )
+    return JSONResponse(status_code=201, content=speaker.model_dump(mode="json"))
+
+
+@router.delete("/speakers/{speaker_id}")
+async def delete_speaker(speaker_id: uuid.UUID, request: Request) -> Response:
+    """Delete a known speaker and every voiceprint it owns (docs/03 §2, docs/06 §2)."""
+    await _service(request).delete_speaker(speaker_id)
+    return Response(status_code=204)
 
 
 @public_router.get("/healthz")
