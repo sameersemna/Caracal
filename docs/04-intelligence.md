@@ -71,8 +71,9 @@ Rules (in order; each produces a reason string):
 - `speech_ratio < 0.05` → skip diarize/identity/verify/translate; content = "music/ambient" description only.
 - `options.diarize == "off"` or diarizer unavailable → skip diarize/align/voiceprint.
 - `diarize == "auto"` and duration < 20 s → diarize anyway (cheap) but identity uses single-speaker logic.
-- `verify`: `off` → skip; `on` → run; `auto` → run if `depth != "quick"` and (content_profile.checkworthy_domain
-  or any speaker has an unconfirmed name candidate) and ≥1 search provider is configured.
+- `verify`: `off` → skip; `on` → run; `auto` → run unless depth `quick`, music, or no search provider is configured (the planner runs before
+  identity, so it cannot know about unconfirmed names — verdict 32). The verify stage itself skips with "nothing to verify" when
+  `select_targets` finds no target.
 - `translate`: run for `target_langs` (resolved per docs/03 §2) that differ from the dominant language.
 - `depth`: `quick` → summary + languages + subtitles only, search budget 0. `standard` → all, budget 12.
   `deep` → all, budget `SEARCH_MAX_QUERIES_PER_JOB`, chapters at finer granularity, verify up to 15 claims.
