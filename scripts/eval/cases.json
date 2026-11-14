@@ -1,0 +1,111 @@
+[
+  {
+    "id": "ted-levitin",
+    "source": {
+      "url": "https://www.youtube.com/watch?v=8jPQjjsBbIc"
+    },
+    "options": {
+      "language": "en",
+      "diarize": "on",
+      "verify": "on",
+      "depth": "standard"
+    },
+    "expect": {
+      "speaker_name": "Daniel Levitin",
+      "language": "en",
+      "reference_captions": "manual",
+      "wer_max": 0.35
+    }
+  },
+  {
+    "id": "all-ears-english",
+    "source": {
+      "url": "https://www.youtube.com/watch?v=g-l96_aCF-0"
+    },
+    "options": {
+      "language": "en",
+      "diarize": "on",
+      "verify": "on",
+      "depth": "standard"
+    },
+    "expect": {
+      "speaker_name": "Lindsay McMahon",
+      "language": "en"
+    }
+  },
+  {
+    "id": "jfk-ted-splice",
+    "source": {
+      "path": "tests/fixtures/audio/jfk.wav",
+      "splice": {
+        "url": "https://www.youtube.com/watch?v=8jPQjjsBbIc",
+        "ranges": [
+          [20.0, 40.0],
+          [60.0, 75.0]
+        ]
+      }
+    },
+    "options": {
+      "language": "en",
+      "diarize": "on",
+      "verify": "on",
+      "depth": "standard"
+    },
+    "expect": {
+      "speakers_unnamed": true,
+      "identity": {
+        "S1": null,
+        "S2": null
+      },
+      "jfk_candidate_allowed": true,
+      "der_max": 0.35
+    }
+  },
+  {
+    "id": "caliendo-impressions",
+    "source": {
+      "url": "https://www.youtube.com/watch?v=2zxPbb-z5rk"
+    },
+    "options": {
+      "language": "en",
+      "diarize": "on",
+      "verify": "on",
+      "depth": "standard"
+    },
+    "expect": {
+      "no_strong_name": 0.6
+    }
+  },
+  {
+    "id": "soundcloud-instrumental",
+    "source": {
+      "url": "https://soundcloud.com/forss/flickermood"
+    },
+    "options": {
+      "language": "auto",
+      "diarize": "auto",
+      "verify": "off",
+      "depth": "standard"
+    },
+    "expect": {
+      "music_detected": true
+    }
+  },
+  {
+    "id": "german-news",
+    "source": {
+      "url": "https://www.youtube.com/watch?v=OgDZqde_My4"
+    },
+    "options": {
+      "language": "auto",
+      "target_langs": ["en"],
+      "diarize": "on",
+      "verify": "auto",
+      "depth": "standard"
+    },
+    "expect": {
+      "language": "de",
+      "subtitles_include": ["en"]
+    }
+  }
+]
