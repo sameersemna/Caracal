@@ -88,6 +88,8 @@ async def test_live_identity_names_the_single_ted_speaker() -> None:
             stats,
             settings,
             llm=client,
+            content_genre=analysis.context.genre,
+            content_tone=analysis.context.tone,
         )
 
     person_names = {entity.text for entity in analysis.entities if entity.type == "person"}

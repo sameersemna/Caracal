@@ -921,6 +921,36 @@ def _content_entities(value: dict[str, object] | None) -> list[Entity]:
     return entities
 
 
+def _profile_genre(value: dict[str, object] | None) -> str | None:
+    """The plan's ``content_profile.likely_genre`` when the checkpoint carries one."""
+    if value is None:
+        return None
+    profile = value.get("content_profile")
+    if not isinstance(profile, dict):
+        return None
+    genre = profile.get("likely_genre")
+    if not isinstance(genre, str):
+        return None
+    stripped = genre.strip()
+    return stripped or None
+
+
+def _content_context(value: dict[str, object] | None) -> tuple[str | None, list[str]]:
+    """The content stage's ``context.genre`` and ``context.tone``, for the performance rule."""
+    if value is None:
+        return None, []
+    context = value.get("context")
+    if not isinstance(context, dict):
+        return None, []
+    genre_value = context.get("genre")
+    genre = genre_value.strip() if isinstance(genre_value, str) and genre_value.strip() else None
+    tone_value = context.get("tone")
+    tone: list[str] = []
+    if isinstance(tone_value, list):
+        tone = [item.strip() for item in tone_value if isinstance(item, str) and item.strip()]
+    return genre, tone
+
+
 async def stage_identity(ctx: StageContext) -> StageResult:
     """Resolve speaker names from mentions, metadata, hints and voiceprints (docs/04 §7).
 
@@ -944,6 +974,8 @@ async def stage_identity(ctx: StageContext) -> StageResult:
     transcript = _load_transcript(ctx)
     voiceprint = await _done_output(ctx, Stage.VOICEPRINT)
     content = await _done_output(ctx, Stage.CONTENT)
+    plan = await _stage_output(ctx, Stage.PLAN)
+    content_genre, content_tone = _content_context(content)
     metadata = _metadata_mapping(await _ingest_platform(ctx), await _job_title(ctx))
     result = await resolve_identities(
         transcript,
@@ -954,6 +986,9 @@ async def stage_identity(ctx: StageContext) -> StageResult:
         stats,
         ctx.settings,
         llm=ctx.llm,
+        profile_genre=_profile_genre(plan),
+        content_genre=content_genre,
+        content_tone=content_tone,
     )
     logger.info(
         "identity complete",

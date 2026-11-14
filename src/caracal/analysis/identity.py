@@ -7,11 +7,15 @@ deterministic here (docs/04 §7):
 
 * a ``self_intro`` or ``addressed`` mention is kept only when the name really occurs in the
   cited segments and those segments belong to the right speaker;
-* ``referred`` names are never an identity source;
+* ``referred`` and ``in_character`` names are never an identity source — an impressionist's
+  "It's me, John." names the character, not the performer;
 * candidates come from named, weighted sources and are fused with
   ``confidence = 1 - product(1 - score_i)`` capped at 0.98;
-* a name is promoted only when it leads the runner-up by ≥ 0.2, and metadata alone can only
-  promote in the sole-speaker case;
+* a name is promoted only when it leads the runner-up by ≥ 0.2 and its confidence is ≥ 0.6,
+  and metadata alone can only promote in the sole-speaker case;
+* metadata names are linked to a label by evidence, never sprayed from the description;
+* performance content (comedy, sketch, impressions, parody …) halves self-intro/addressed
+  scores and flags the identities as uncertain;
 * descriptions never infer protected attributes — a description that does is replaced by
   the role-only fallback.
 
@@ -66,7 +70,7 @@ IdentityRole = Literal[
     "panelist",
     "other",
 ]
-MentionRelation = Literal["self_intro", "addressed", "referred"]
+MentionRelation = Literal["self_intro", "addressed", "referred", "in_character"]
 CandidateSourceName = Literal["self_intro", "addressed_by_name", "metadata", "voiceprint", "web", "hint"]
 
 #: Every role the prompt may return, in the order the prompt lists them.
@@ -86,6 +90,7 @@ IDENTITY_ROLES: Final[tuple[IdentityRole, ...]] = (
 
 #: Base score per source (docs/04 §7).
 SELF_INTRO_SCORE: Final = 0.85
+SINGLE_NAME_SELF_INTRO_SCORE: Final = 0.55
 ADDRESSED_SCORE: Final = 0.60
 METADATA_SCORE: Final = 0.50
 SOLE_SPEAKER_METADATA_SCORE: Final = 0.75
@@ -94,7 +99,10 @@ BARE_HINT_SCORE: Final = 0.40
 VOICEPRINT_CANDIDATE_FACTOR: Final = 0.60
 MAX_CONFIDENCE: Final = 0.98
 PROMOTION_MARGIN: Final = 0.20
+PROMOTION_MIN_CONFIDENCE: Final = 0.60
 SOLE_SPEAKER_SHARE: Final = 0.90
+PERFORMANCE_SCORE_FACTOR: Final = 0.50
+PERFORMANCE_FLAG: Final = "performance content: speaker identities uncertain"
 
 #: Long transcripts send only each speaker's first segments plus the run-up to their turns.
 MENTION_FIRST_SEGMENTS: Final = 40
@@ -176,6 +184,19 @@ _ROLE_DESCRIPTION: Final[dict[IdentityRole, str]] = {
 
 _META_NAME_FIELDS: Final[tuple[str, ...]] = ("title", "description", "channel", "uploader")
 _SOLE_NAME_FIELDS: Final[frozenset[str]] = frozenset({"title", "uploader", "channel"})
+_CHANNEL_NAME_FIELDS: Final[frozenset[str]] = frozenset({"channel", "uploader"})
+_HOST_ROLES: Final[frozenset[IdentityRole]] = frozenset({"host", "presenter"})
+
+#: Genres/topics whose voices are performances, so a spoken name is not the speaker's own (docs/04 §7).
+_PERFORMANCE_TERMS: Final[tuple[str, ...]] = (
+    "comedy",
+    "sketch",
+    "impression",
+    "parody",
+    "satire",
+    "skit",
+    "prank",
+)
 
 
 class _LlmMention(BaseModel):
@@ -299,6 +320,22 @@ def _name_occurs(name: str, text: str) -> bool:
         return True
     tokens = folded.split()
     return len(tokens) > 1 and len(tokens[0]) >= 2 and f" {tokens[0]} " in haystack
+
+
+def _self_intro_score(name: str) -> float:
+    """A spoken full name is strong evidence; a bare given name is weak (docs/04 §7)."""
+    return SELF_INTRO_SCORE if len(_fold(name).split()) >= 2 else SINGLE_NAME_SELF_INTRO_SCORE
+
+
+def _performance_content(*labels: str | Sequence[str]) -> bool:
+    """Whether any genre or tone label names performance content (docs/04 §7)."""
+    for label in labels:
+        values = (label,) if isinstance(label, str) else label
+        for value in values:
+            text = value.casefold()
+            if any(term in text for term in _PERFORMANCE_TERMS):
+                return True
+    return False
 
 
 def _group_key(name: str) -> str:
@@ -509,59 +546,62 @@ def _sole_labels(stats: Mapping[str, Mapping[str, float | int]]) -> set[str]:
     return {label for label, values in stats.items() if float(values.get("share", 0.0)) >= SOLE_SPEAKER_SHARE}
 
 
-def _owner_label(
-    stats: Mapping[str, Mapping[str, float | int]],
-    roles: Mapping[str, IdentityRole],
-) -> str | None:
-    """The label metadata names most likely belong to: the host, else the most talk time."""
-    hosts = [label for label in stats if roles.get(label) == "host"]
-    if hosts:
-        return hosts[0]
-    if not stats:
-        return None
-    return max(
-        stats,
-        key=lambda label: (
-            float(stats[label].get("talk_time_s", 0.0)),
-            -float(stats[label].get("first_seen_s", 0.0)),
-        ),
-    )
-
-
 def _metadata_candidates(
     entities: Sequence[Entity],
     metadata: Mapping[str, str],
     *,
-    label: str | None,
-    sole: bool,
+    stats: Mapping[str, Mapping[str, float | int]],
+    sole: set[str],
+    roles: Mapping[str, IdentityRole],
+    label_text: Mapping[str, str],
+    addressed_names: Mapping[str, Sequence[str]],
 ) -> list[tuple[str, str, float, list[str]]]:
-    """``(label, name, score, evidence)`` for person entities named in the metadata."""
-    if label is None:
-        return []
+    """``(label, name, score, evidence)`` for person names actually linked to a label.
+
+    A metadata name is a candidate only when the label is the sole speaker, when the name
+    occurs in that label's own speech or in a verified ``addressed`` mention of it, or when
+    the name is the channel/uploader and the label is the host/presenter (docs/04 §7). A
+    description full of guests therefore never sprays every name onto one label.
+    """
     found: list[tuple[str, str, float, list[str]]] = []
-    token_sets: list[set[str]] = []
     for entity in entities:
         if entity.type != "person":
             continue
         matched = [
-            name
-            for name in _META_NAME_FIELDS
-            if name in metadata and _name_occurs(entity.text, metadata[name])
+            field
+            for field in _META_NAME_FIELDS
+            if field in metadata and _name_occurs(entity.text, metadata[field])
         ]
         if not matched:
             continue
-        evidence = [f"meta:{name}" for name in matched]
-        sole_name = any(name in _SOLE_NAME_FIELDS for name in matched)
-        score = SOLE_SPEAKER_METADATA_SCORE if sole and sole_name else METADATA_SCORE
-        found.append((label, entity.text, score, evidence))
-        token_sets.append(set(_fold(entity.text).split()))
-    # "Levitin" and "Daniel Levitin" are the same person; keep only the fuller name.
+        evidence = [f"meta:{field}" for field in matched]
+        sole_name = any(field in _SOLE_NAME_FIELDS for field in matched)
+        channel_name = any(field in _CHANNEL_NAME_FIELDS for field in matched)
+        for label in stats:
+            linked = (
+                label in sole
+                or _name_occurs(entity.text, label_text.get(label, ""))
+                or any(_name_occurs(entity.text, name) for name in addressed_names.get(label, ()))
+                or (channel_name and roles.get(label) in _HOST_ROLES)
+            )
+            if not linked:
+                continue
+            score = SOLE_SPEAKER_METADATA_SCORE if (label in sole and sole_name) else METADATA_SCORE
+            found.append((label, entity.text, score, evidence))
+    return _dedupe_metadata_names(found)
+
+
+def _dedupe_metadata_names(
+    entries: Sequence[tuple[str, str, float, list[str]]],
+) -> list[tuple[str, str, float, list[str]]]:
+    """Keep only the fuller name when one metadata name is a token subset of another."""
+    token_sets = [(label, set(_fold(name).split())) for label, name, _score, _evidence in entries]
     kept: list[tuple[str, str, float, list[str]]] = []
-    for position, entry in enumerate(found):
-        tokens = token_sets[position]
-        if any(tokens < other for other in token_sets):
+    for position, (label, name, score, evidence) in enumerate(entries):
+        tokens = token_sets[position][1]
+        if any(other_label == label and tokens < other_tokens for other_label, other_tokens in token_sets):
             continue
-        kept.append(entry)
+        kept.append((label, name, score, evidence))
     return kept
 
 
@@ -604,15 +644,26 @@ async def _extract(
     hints: Sequence[str],
     report_language: str,
     context_chars: int,
+    profile_genre: str | None,
+    content_genre: str | None,
+    content_tone: Sequence[str],
 ) -> _LlmIdentity:
     """One JSON-mode call: mentions plus the role/description for every label."""
     segments = _mentioned_segments(transcript.segments, context_chars)
     hint_lines = "\n".join(f"[hint:{index}] {hint}" for index, hint in enumerate(hints))
+    context_lines: list[str] = []
+    if profile_genre:
+        context_lines.append(f"[plan:likely_genre] {profile_genre}")
+    if content_genre:
+        context_lines.append(f"[content:genre] {content_genre}")
+    if content_tone:
+        context_lines.append(f"[content:tone] {', '.join(content_tone)}")
     prompt = load_prompt(
         "identity_mentions",
         metadata=wrap_data("metadata", render_metadata(dict(metadata))),
         hints=wrap_data("hints", hint_lines),
         transcript=wrap_data("transcript", render_transcript_lines(segments)),
+        content_context=wrap_data("content_context", "\n".join(context_lines)),
         roles=", ".join(IDENTITY_ROLES),
         report_language=report_language,
     )
@@ -640,16 +691,21 @@ async def resolve_identities(
     settings: Settings,
     *,
     llm: LLMClient,
+    profile_genre: str | None = None,
+    content_genre: str | None = None,
+    content_tone: Sequence[str] = (),
 ) -> IdentityResult:
     """Resolve every diarized label against its candidates (docs/04 §7).
 
     ``stats`` is :func:`caracal.speakers.align.speaker_stats` output; the talk time, share and
-    first appearance in each ``SpeakerIdentity`` come from it. The returned ``flags`` are the
-    "ambiguous identity" warnings the report's review section carries.
+    first appearance in each ``SpeakerIdentity`` come from it. ``profile_genre`` and the content
+    ``genre``/``tone`` only gate the performance-content rule. The returned ``flags`` are the
+    "ambiguous identity" and performance warnings the report's review section carries.
     """
     if not stats:
         return IdentityResult()
 
+    performance = _performance_content(profile_genre or "", content_genre or "", content_tone)
     extracted = await _extract(
         llm,
         transcript=transcript,
@@ -657,6 +713,9 @@ async def resolve_identities(
         hints=hints,
         report_language=settings.CARACAL_REPORT_LANGUAGE,
         context_chars=settings.LLM_CONTEXT_CHARS,
+        profile_genre=profile_genre,
+        content_genre=content_genre,
+        content_tone=content_tone,
     )
     infos = {info.speaker_label: info for info in extracted.speakers if info.speaker_label in stats}
     roles: dict[str, IdentityRole] = {
@@ -666,9 +725,9 @@ async def resolve_identities(
     positions = {segment.id: position for position, segment in enumerate(transcript.segments)}
     starts = _turn_starts(transcript.segments)
     sole = _sole_labels(stats)
-    owner = _owner_label(stats, roles)
 
     groups_by_label: dict[str, dict[str, _Group]] = {label: {} for label in stats}
+    addressed_names: dict[str, list[str]] = {label: [] for label in stats}
 
     for mention in extracted.mentions:
         label = mention.speaker_label
@@ -684,15 +743,22 @@ async def resolve_identities(
         if verified is None:
             continue
         if mention.relation == "self_intro":
-            _add_candidate(groups_by_label[label], mention.name, "self_intro", SELF_INTRO_SCORE, verified)
+            score = (
+                _self_intro_score(mention.name) * PERFORMANCE_SCORE_FACTOR
+                if performance
+                else _self_intro_score(mention.name)
+            )
+            _add_candidate(groups_by_label[label], mention.name, "self_intro", score, verified)
         elif mention.relation == "addressed":
+            score = ADDRESSED_SCORE * PERFORMANCE_SCORE_FACTOR if performance else ADDRESSED_SCORE
             _add_candidate(
                 groups_by_label[label],
                 mention.name,
                 "addressed_by_name",
-                ADDRESSED_SCORE,
+                score,
                 verified,
             )
+            addressed_names[label].append(mention.name)
 
     for label in stats:
         for match in voiceprint_matches.get(label, ()):
@@ -716,11 +782,18 @@ async def resolve_identities(
                     [f"vp:{label}"],
                 )
 
+    label_text = {
+        label: "\n".join(segment.text for segment in transcript.segments if segment.speaker == label)
+        for label in stats
+    }
     for label, name, score, meta_evidence in _metadata_candidates(
         entities,
         metadata,
-        label=owner,
-        sole=owner in sole,
+        stats=stats,
+        sole=sole,
+        roles=roles,
+        label_text=label_text,
+        addressed_names=addressed_names,
     ):
         if label in groups_by_label:
             _add_candidate(groups_by_label[label], name, "metadata", score, meta_evidence)
@@ -731,6 +804,8 @@ async def resolve_identities(
 
     identities: list[SpeakerIdentity] = []
     flags: list[ReviewFlag] = []
+    if performance:
+        flags.append(ReviewFlag(severity="warn", field="speakers", message=PERFORMANCE_FLAG))
     for label, values in stats.items():
         groups = groups_by_label[label]
         _merge_first_names(groups)
@@ -750,7 +825,8 @@ async def resolve_identities(
                 label in sole and top_group.scores.get("metadata", 0.0) >= SOLE_SPEAKER_METADATA_SCORE
             )
             leads = second is None or top.confidence - second.confidence >= PROMOTION_MARGIN
-            if leads and (not metadata_only or metadata_promotable):
+            confident = top.confidence >= PROMOTION_MIN_CONFIDENCE
+            if leads and confident and (not metadata_only or metadata_promotable):
                 promoted = top
             elif len(candidates) >= 2:
                 flags.append(
@@ -818,8 +894,11 @@ __all__ = [
     "MENTION_ADDRESS_LOOKBACK",
     "MENTION_FIRST_SEGMENTS",
     "METADATA_SCORE",
+    "PERFORMANCE_FLAG",
     "PROMOTION_MARGIN",
+    "PROMOTION_MIN_CONFIDENCE",
     "SELF_INTRO_SCORE",
+    "SINGLE_NAME_SELF_INTRO_SCORE",
     "SOLE_SPEAKER_METADATA_SCORE",
     "IdentityResult",
     "IdentityRole",

@@ -86,6 +86,9 @@ async def _resolve(
     hints: Sequence[str] = (),
     entities: Sequence[Entity] = (),
     voiceprints: dict[str, list[VoiceprintMatch]] | None = None,
+    profile_genre: str | None = None,
+    content_genre: str | None = None,
+    content_tone: Sequence[str] = (),
 ) -> tuple[IdentityResult, FakeOllama]:
     fake = FakeOllama([json_response(arguments)])
     http = httpx.AsyncClient(transport=fake.transport())
@@ -100,6 +103,9 @@ async def _resolve(
             stats if stats is not None else _stats(S1=1.0),
             settings,
             llm=client,
+            profile_genre=profile_genre,
+            content_genre=content_genre,
+            content_tone=content_tone,
         )
     finally:
         await http.aclose()
@@ -216,21 +222,31 @@ async def test_self_intro_and_addressed_fuse_to_094(make_settings: MakeSettings)
     settings = make_settings()
     transcript = _transcript(
         [
-            ("S2", "Welcome to the show, Anna."),
-            ("S1", "Ich bin Anna und freue mich hier zu sein."),
+            ("S2", "Welcome to the show, Anna Schmidt."),
+            ("S1", "Ich bin Anna Schmidt und freue mich hier zu sein."),
         ]
     )
     arguments = _args(
         mentions=[
-            {"speaker_label": "S1", "name": "Anna", "relation": "self_intro", "seg_ids": ["seg:1"]},
-            {"speaker_label": "S1", "name": "Anna", "relation": "addressed", "seg_ids": ["seg:0"]},
+            {
+                "speaker_label": "S1",
+                "name": "Anna Schmidt",
+                "relation": "self_intro",
+                "seg_ids": ["seg:1"],
+            },
+            {
+                "speaker_label": "S1",
+                "name": "Anna Schmidt",
+                "relation": "addressed",
+                "seg_ids": ["seg:0"],
+            },
         ]
     )
 
     result, _fake = await _resolve(settings, transcript, arguments, stats=_stats(S1=0.6, S2=0.4))
 
     identity = _identity(result, "S1")
-    assert identity.name == "Anna"
+    assert identity.name == "Anna Schmidt"
     assert len(identity.candidates) == 1
     assert identity.candidates[0].sources == ["self_intro", "addressed_by_name"]
     assert identity.candidates[0].confidence == pytest.approx(0.94)
@@ -241,14 +257,24 @@ async def test_fusion_is_capped_at_098(make_settings: MakeSettings) -> None:
     settings = make_settings()
     transcript = _transcript(
         [
-            ("S2", "Welcome to the show, Anna."),
-            ("S1", "Ich bin Anna und freue mich hier zu sein."),
+            ("S2", "Welcome to the show, Anna Schmidt."),
+            ("S1", "Ich bin Anna Schmidt und freue mich hier zu sein."),
         ]
     )
     arguments = _args(
         mentions=[
-            {"speaker_label": "S1", "name": "Anna", "relation": "self_intro", "seg_ids": ["seg:1"]},
-            {"speaker_label": "S1", "name": "Anna", "relation": "addressed", "seg_ids": ["seg:0"]},
+            {
+                "speaker_label": "S1",
+                "name": "Anna Schmidt",
+                "relation": "self_intro",
+                "seg_ids": ["seg:1"],
+            },
+            {
+                "speaker_label": "S1",
+                "name": "Anna Schmidt",
+                "relation": "addressed",
+                "seg_ids": ["seg:0"],
+            },
         ],
         speakers=[
             {"speaker_label": "S1", "role": "host", "description": "hosts the show"},
@@ -261,7 +287,7 @@ async def test_fusion_is_capped_at_098(make_settings: MakeSettings) -> None:
         transcript,
         arguments,
         stats=_stats(S1=0.6, S2=0.4),
-        hints=["host: Anna"],
+        hints=["host: Anna Schmidt"],
     )
 
     identity = _identity(result, "S1")
@@ -355,7 +381,7 @@ async def test_metadata_only_name_is_a_candidate_but_is_not_promoted(
         transcript,
         arguments,
         stats=_stats(S1=0.7, S2=0.3),
-        metadata={"title": "Interview with Jane Doe"},
+        metadata={"title": "Interview with Jane Doe", "channel": "Jane Doe"},
         entities=entities,
     )
 
@@ -365,8 +391,77 @@ async def test_metadata_only_name_is_a_candidate_but_is_not_promoted(
     assert identity.candidates[0].name == "Jane Doe"
     assert identity.candidates[0].sources == ["metadata"]
     assert identity.candidates[0].confidence == pytest.approx(0.5)
-    assert identity.candidates[0].evidence == ["meta:title"]
+    assert identity.candidates[0].evidence == ["meta:title", "meta:channel"]
     assert result.flags == []
+    assert _identity(result, "S2").candidates == []
+
+
+async def test_description_names_are_not_sprayed_onto_one_speaker(
+    make_settings: MakeSettings,
+) -> None:
+    settings = make_settings()
+    transcript = _transcript(
+        [
+            ("S1", "Welcome back to the show."),
+            ("S2", "It is great to be here."),
+        ]
+    )
+    arguments = _args(
+        speakers=[
+            {"speaker_label": "S1", "role": "host", "description": "hosts the show"},
+            {"speaker_label": "S2", "role": "guest", "description": "appears as a guest"},
+        ]
+    )
+    entities = [
+        Entity(text="Jane Doe", type="person", evidence=["meta:description"]),
+        Entity(text="John Smith", type="person", evidence=["meta:description"]),
+    ]
+
+    result, _fake = await _resolve(
+        settings,
+        transcript,
+        arguments,
+        stats=_stats(S1=0.6, S2=0.4),
+        metadata={"description": "Host Jane Doe talks with John Smith about comedy."},
+        entities=entities,
+    )
+
+    for label in ("S1", "S2"):
+        assert _identity(result, label).candidates == []
+
+
+async def test_metadata_name_links_to_the_label_whose_speech_contains_it(
+    make_settings: MakeSettings,
+) -> None:
+    settings = make_settings()
+    transcript = _transcript(
+        [
+            ("S1", "I am filling in for John Smith today."),
+            ("S2", "Thanks for having me."),
+        ]
+    )
+    arguments = _args(
+        speakers=[
+            {"speaker_label": "S1", "role": "host", "description": "hosts the show"},
+            {"speaker_label": "S2", "role": "guest", "description": "appears as a guest"},
+        ]
+    )
+    entities = [Entity(text="John Smith", type="person", evidence=["meta:description"])]
+
+    result, _fake = await _resolve(
+        settings,
+        transcript,
+        arguments,
+        stats=_stats(S1=0.6, S2=0.4),
+        metadata={"description": "Host Jane Doe talks with John Smith."},
+        entities=entities,
+    )
+
+    host = _identity(result, "S1")
+    assert [candidate.name for candidate in host.candidates] == ["John Smith"]
+    assert host.candidates[0].sources == ["metadata"]
+    assert host.candidates[0].confidence == pytest.approx(0.5)
+    assert host.candidates[0].evidence == ["meta:description"]
     assert _identity(result, "S2").candidates == []
 
 
@@ -443,8 +538,10 @@ async def test_weak_voiceprint_candidate_is_scored_similarity_times_06(
     result, _fake = await _resolve(settings, transcript, _args(), voiceprints=matches)
 
     identity = _identity(result, "S1")
-    assert identity.name == "Jane Doe"
-    assert identity.confidence == pytest.approx(0.33)
+    assert identity.name is None
+    assert identity.confidence == 0.0
+    assert identity.candidates[0].name == "Jane Doe"
+    assert identity.candidates[0].confidence == pytest.approx(0.33)
     assert identity.candidates[0].sources == ["voiceprint"]
     assert identity.known_speaker_id is None
     assert identity.voiceprint_similarity is None
@@ -527,6 +624,7 @@ def test_prompt_forbids_protected_attributes() -> None:
         metadata="<<<DATA:metadata>>>\n<<<END:metadata>>>",
         hints="<<<DATA:hints>>>\n<<<END:hints>>>",
         transcript="<<<DATA:transcript>>>\n<<<END:transcript>>>",
+        content_context="<<<DATA:content_context>>>\n<<<END:content_context>>>",
         roles="host, guest",
         report_language="English",
     )
@@ -535,6 +633,7 @@ def test_prompt_forbids_protected_attributes() -> None:
     assert "gender" in prompt
     assert "male" in prompt and "female" in prompt
     assert "role and the context" in prompt
+    assert "in_character" in prompt
 
 
 def _captured_transcript_block(fake: FakeOllama) -> str:
@@ -675,3 +774,171 @@ async def test_a_first_name_merges_into_the_full_name_it_starts(
     assert identity.name == "Angela Merkel"
     assert identity.candidates[0].sources == ["self_intro", "addressed_by_name"]
     assert identity.candidates[0].confidence == pytest.approx(0.94)
+
+
+async def test_in_character_impression_line_is_never_an_identity_source(
+    make_settings: MakeSettings,
+) -> None:
+    settings = make_settings()
+    transcript = _transcript([("S1", "It's me, John. Welcome back to the broadcast.")])
+    arguments = _args(
+        mentions=[
+            {
+                "speaker_label": "S1",
+                "name": "John",
+                "relation": "in_character",
+                "seg_ids": ["seg:0"],
+            }
+        ]
+    )
+
+    result, _fake = await _resolve(
+        settings,
+        transcript,
+        arguments,
+        stats=_stats(S1=1.0),
+    )
+
+    identity = _identity(result, "S1")
+    assert identity.candidates == []
+    assert identity.name is None
+    assert result.flags == []
+
+
+async def test_single_given_name_self_intro_scores_055_and_is_not_promoted(
+    make_settings: MakeSettings,
+) -> None:
+    settings = make_settings()
+    transcript = _transcript([("S1", "Hi guys, I'm Lindsay, the co-host of All Ears English.")])
+    arguments = _args(
+        mentions=[
+            {
+                "speaker_label": "S1",
+                "name": "Lindsay",
+                "relation": "self_intro",
+                "seg_ids": ["seg:0"],
+            }
+        ]
+    )
+
+    result, _fake = await _resolve(settings, transcript, arguments, stats=_stats(S1=1.0))
+
+    identity = _identity(result, "S1")
+    assert identity.name is None
+    assert identity.confidence == 0.0
+    assert len(identity.candidates) == 1
+    assert identity.candidates[0].name == "Lindsay"
+    assert identity.candidates[0].confidence == pytest.approx(0.55)
+    assert identity.candidates[0].sources == ["self_intro"]
+    assert result.flags == []
+
+
+async def test_full_name_self_intro_still_promotes_at_085(make_settings: MakeSettings) -> None:
+    settings = make_settings()
+    transcript = _transcript([("S1", "Hi, I'm Lindsay McMahon and this is All Ears English.")])
+    arguments = _args(
+        mentions=[
+            {
+                "speaker_label": "S1",
+                "name": "Lindsay McMahon",
+                "relation": "self_intro",
+                "seg_ids": ["seg:0"],
+            }
+        ]
+    )
+
+    result, _fake = await _resolve(settings, transcript, arguments, stats=_stats(S1=1.0))
+
+    identity = _identity(result, "S1")
+    assert identity.name == "Lindsay McMahon"
+    assert identity.confidence == pytest.approx(0.85)
+
+
+async def test_performance_content_halves_the_self_intro_and_flags_it(
+    make_settings: MakeSettings,
+) -> None:
+    settings = make_settings()
+    transcript = _transcript([("S1", "I'm Frank Caliendo and welcome to the show.")])
+    arguments = _args(
+        mentions=[
+            {
+                "speaker_label": "S1",
+                "name": "Frank Caliendo",
+                "relation": "self_intro",
+                "seg_ids": ["seg:0"],
+            }
+        ]
+    )
+
+    result, _fake = await _resolve(
+        settings,
+        transcript,
+        arguments,
+        stats=_stats(S1=1.0),
+        profile_genre="comedy",
+    )
+
+    identity = _identity(result, "S1")
+    assert identity.name is None
+    assert identity.candidates[0].confidence == pytest.approx(0.425)
+    assert [flag.severity for flag in result.flags] == ["warn"]
+    assert [flag.field for flag in result.flags] == ["speakers"]
+    assert result.flags[0].message == "performance content: speaker identities uncertain"
+
+
+async def test_performance_content_halves_the_addressed_score(
+    make_settings: MakeSettings,
+) -> None:
+    settings = make_settings()
+    transcript = _transcript(
+        [
+            ("S1", "thanks, Anna"),
+            ("S2", "It is great to be here."),
+        ]
+    )
+    arguments = _args(
+        mentions=[
+            {
+                "speaker_label": "S2",
+                "name": "Anna",
+                "relation": "addressed",
+                "seg_ids": ["seg:0"],
+            }
+        ]
+    )
+
+    result, _fake = await _resolve(
+        settings,
+        transcript,
+        arguments,
+        stats=_stats(S1=0.6, S2=0.4),
+        content_tone=["sketch comedy"],
+    )
+
+    identity = _identity(result, "S2")
+    assert identity.name is None
+    assert identity.candidates[0].confidence == pytest.approx(0.3)
+    assert result.flags[0].message == "performance content: speaker identities uncertain"
+
+
+async def test_plan_and_content_genre_reach_the_identity_prompt(
+    make_settings: MakeSettings,
+) -> None:
+    settings = make_settings()
+    transcript = _transcript([("S1", "Welcome to the show.")])
+
+    _result, fake = await _resolve(
+        settings,
+        transcript,
+        _args(),
+        profile_genre="comedy",
+        content_genre="stand-up",
+        content_tone=["satirical", "playful"],
+    )
+
+    prompt = fake.body()["messages"][1]["content"]
+    block = re.search(r"<<<DATA:content_context>>>\n(.*?)\n<<<END:content_context>>>", prompt, re.DOTALL)
+    assert block is not None
+    assert "[plan:likely_genre] comedy" in block.group(1)
+    assert "[content:genre] stand-up" in block.group(1)
+    assert "[content:tone] satirical, playful" in block.group(1)

@@ -16,12 +16,15 @@ The roles are: {roles}.
 ## DATA and evidence ids
 
 The metadata block uses ids such as `[meta:title]`. The transcript block uses one line per segment, for example
-`[seg:12] S2 03:14.2 | text`. Caller hints use `[hint:0]`, `[hint:1]`. Cite the id alone (`seg:12`,
-`meta:title`), never the whole rendered line.
+`[seg:12] S2 03:14.2 | text`. Caller hints use `[hint:0]`, `[hint:1]`. The recording-type block uses ids such as
+`[plan:likely_genre]`, `[content:genre]` and `[content:tone]`. Cite the id alone (`seg:12`, `meta:title`), never the
+whole rendered line.
 
 {metadata}
 
 {hints}
+
+{content_context}
 
 {transcript}
 
@@ -41,8 +44,15 @@ or your own knowledge. For every mention give `speaker_label`, `name`, `relation
   *different* label and must be among the three segments directly before this speaker's next turn.
 - `referred`: the name is merely talked about, for example a third person in a story. `referred` names are
   never used as an identity; record them only when the transcript makes the name explicit.
+- `in_character`: the speaker is performing someone else when the name is said — an impression, a parody, a
+  sketch, role-play, a prank call, a voice-over or an ad read, or the speaker is reading or quoting another
+  person's words. For example an impressionist saying "It's me, John." as a famous coach, or an actor in a
+  sketch introducing a character, is `in_character`, never `self_intro`. Use the recording type above as a
+  signal: comedy, sketch, impression, parody, satire, skit and prank content is usually performed. `in_character`
+  names are never used as an identity; record them so the extractor can set them aside.
 
-Cite the segment or segments that actually contain the name. If you are unsure of the spelling, copy what the
+A `self_intro` is a name the speaker gives for **themselves**, in their own voice, outside any performance. Cite
+the segment or segments that actually contain the name. If you are unsure of the spelling, copy what the
 transcript says.
 
 ### speakers

@@ -1462,6 +1462,69 @@ async def test_identity_stage_resolves_mentions_and_voiceprints_from_checkpoints
     assert result.output["flags"] == []
 
 
+async def test_identity_stage_passes_the_plan_genre_and_content_context(
+    make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    _identity_checkpoints(files)
+    _write_output(
+        files,
+        Stage.PLAN,
+        {
+            "run": {"identity": True},
+            "reasons": {},
+            "content_profile": {
+                "likely_genre": "comedy",
+                "expected_speakers": 2,
+                "needs_identity": True,
+                "checkworthy_domain": False,
+            },
+            "budgets": {"search_queries": 0, "llm_calls": 10, "claims": 0},
+            "music_detected": False,
+            "languages": None,
+        },
+    )
+    _write_output(
+        files,
+        Stage.CONTENT,
+        {
+            "entities": [],
+            "context": {"genre": "stand-up", "tone": ["satirical", "playful"]},
+        },
+    )
+
+    fake = FakeOllama([json_response(_identity_arguments())])
+    http = httpx.AsyncClient(transport=fake.transport())
+    client = LLMClient(settings, http)
+    try:
+        result = await stage_identity(_context(settings, repos, files, job_id=job.id, llm=client))
+    finally:
+        await http.aclose()
+
+    assert result.status == "done"
+    assert result.output["flags"] == [
+        {
+            "severity": "warn",
+            "field": "speakers",
+            "message": "performance content: speaker identities uncertain",
+        }
+    ]
+    speakers = result.output["speakers"]
+    assert isinstance(speakers, list)
+    by_label = {speaker["label"]: speaker for speaker in speakers}
+    assert by_label["S1"]["name"] is None
+    assert by_label["S1"]["candidates"][0]["confidence"] == pytest.approx(0.425)
+
+    prompt = fake.body()["messages"][1]["content"]
+    assert "[plan:likely_genre] comedy" in prompt
+    assert "[content:genre] stand-up" in prompt
+    assert "[content:tone] satirical, playful" in prompt
+
+
 async def test_identity_stage_is_skipped_by_the_plan(make_settings: MakeSettings, tmp_path: Path) -> None:
     settings = make_settings(CARACAL_DATA_DIR=tmp_path)
     repos = make_fake_repos()
