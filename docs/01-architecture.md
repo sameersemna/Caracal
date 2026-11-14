@@ -23,7 +23,7 @@ One package, three entry points (`[project.scripts] caracal = "caracal.cli:main"
 
 ## 2. Stack (pinned in pyproject; verify APIs with context7 before use)
 
-Python 3.12, uv. Runtime: `fastapi`, `uvicorn[standard]`, `mcp` (official SDK, FastMCP), `pydantic` v2,
+Python 3.12, uv. Runtime: `fastapi`, `uvicorn[standard]`, `mcp` 2.3.0 (official SDK; server class `MCPServer` — FastMCP was renamed in 2.x), `pydantic` v2,
 `pydantic-settings`, `httpx`, `sqlalchemy[asyncio]` 2.x core (no ORM models needed) + `asyncpg`, `alembic`,
 `pgvector`, `redis` (asyncio), `yt-dlp`, `python-multipart`. **No arq/RQ/Celery** (they ignore `REDIS_PREFIX`).
 Speaker extra (`[project.optional-dependencies] speakers`): `pyannote.audio` 4.x, `torch`, `torchaudio`.
@@ -43,10 +43,11 @@ src/caracal/
   log.py                 get_logger(name); JSON lines to stderr; redact()
   errors.py              CaracalError(code, message, details) + ErrorCode enum (docs/03 §4)
   app.py                 create_app(settings) -> FastAPI
+  services.py            JobService: the one implementation of every capability; REST routes and MCP tools are thin adapters over it (docs/03 §0)
   api/auth.py            bearer-token dependency
   api/routes.py          /v1 router
   api/schemas.py         request/response pydantic models (docs/03 §2)
-  mcp/server.py          build_mcp(settings) -> FastMCP ; tool functions (docs/03 §3)
+  mcp/server.py          build_mcp(service, settings) -> mcp.server.mcpserver.MCPServer (mcp 2.x — FastMCP no longer exists); tool functions (docs/03 §3)
   db/engine.py           make_engine(settings), session helpers
   db/tables.py           SQLAlchemy Core Table objects (docs/05 §1)
   db/repo.py             Protocols + Postgres impls: JobRepo, UploadRepo, ReportRepo, SegmentRepo (T0.2), SpeakerRepo (T2.3)

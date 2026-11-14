@@ -8,6 +8,7 @@ No other module reads `os.environ` (enforced by `scripts/check_rules.py`). Secre
 | `CARACAL_HOST` | str | `127.0.0.1` | `0.0.0.0` for LAN |
 | `CARACAL_PORT` | int | `11404` | |
 | `CARACAL_API_TOKEN` | SecretStr | — **required** | bearer token for REST and HTTP MCP; min 32 chars |
+| `CARACAL_ALLOWED_HOSTS` | csv | `` | extra `host[:port]` values accepted by the MCP transport's Host/Origin check, besides localhost/127.0.0.1 and the `CARACAL_PUBLIC_BASE_URL` host (the SDK answers **421 Invalid Host header** otherwise — measured) |
 | `CARACAL_PUBLIC_BASE_URL` | str | `http://127.0.0.1:11404` | used to build download links in MCP results |
 | `CARACAL_DATA_DIR` | path | `./data` | artifacts root (docs/05 §3) |
 | `CARACAL_RETENTION_DAYS` | int | `30` | media files deleted after N days; reports kept |
