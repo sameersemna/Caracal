@@ -80,7 +80,8 @@ def parse_whisper_response(payload: object) -> WhisperResult:
                 if not isinstance(raw_word, dict):
                     continue
                 item = cast(dict[str, Any], raw_word)
-                text = str(item.get("word", "")).strip()
+                raw_text = str(item.get("word", ""))
+                text = raw_text.strip()
                 if not text:
                     continue
                 words.append(
@@ -89,6 +90,7 @@ def parse_whisper_response(payload: object) -> WhisperResult:
                         start=_as_float(item.get("start")),
                         end=_as_float(item.get("end")),
                         prob=_as_float(item.get("probability")),
+                        space_before=bool(words) and raw_text[:1].isspace(),
                     )
                 )
         segments.append(

@@ -197,3 +197,24 @@ async def test_health_reports_the_root_status() -> None:
     fake_error = FakeWhisper([httpx.ConnectError("offline")])
     async with httpx.AsyncClient(transport=fake_error.transport()) as http:
         assert await WhisperClient("http://whisper.test", http, timeout_s=5.0).health() is False
+
+
+async def test_word_space_before_records_whisper_whitespace() -> None:
+    """The parser keeps whisper's leading-space signal; the first word of a segment has none."""
+    fake = FakeWhisper.from_fixtures("jfk")
+    async with httpx.AsyncClient(transport=fake.transport()) as http:
+        client = WhisperClient("http://whisper.test", http, timeout_s=5.0)
+        result = await client.transcribe(AUDIO)
+
+    first = result.segments[0]
+    assert [(word.text, word.space_before) for word in first.words] == [
+        ("And", False),
+        ("so", True),
+        ("my", True),
+        ("fellow", True),
+        ("Americans", True),
+        (",", False),  # attached punctuation: no space before it
+    ]
+    assert all(segment.words[0].space_before is False for segment in result.segments)
+    assert result.segments[1].words[1].space_before is True
+    assert first.to_dict()["words"][1]["space_before"] is True

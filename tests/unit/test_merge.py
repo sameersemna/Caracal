@@ -3,23 +3,31 @@
 from __future__ import annotations
 
 import json
+import re
+from collections import Counter
+from dataclasses import replace
 
 import pytest
 from tests.fakes.whisper import load_fixture
 
-from caracal.asr import Segment, Transcript, WhisperResult, Word
+from caracal.asr import Segment, Transcript, WhisperResult, Word, join_words
 from caracal.asr.merge import merge_chunks
 from caracal.asr.whisper import parse_whisper_response
 from caracal.audio.chunking import Chunk
 from caracal.errors import CaracalError, ErrorCode
+
+_PAIR_CHUNKS = (Chunk(index=0, start_s=0.0, end_s=61.0), Chunk(index=1, start_s=60.0, end_s=120.0))
+_PAIR_CUT = (60.0 + 61.0) / 2.0
+# Whisper's known spacing artefacts: a detached contraction suffix or detached punctuation.
+_ARTEFACT_RE = re.compile(r" '(re|s|t|ve|ll|d|m)\b| [,.?!;:]")
 
 
 def _real(name: str) -> WhisperResult:
     return parse_whisper_response(load_fixture(name))
 
 
-def _word(text: str, start: float, end: float) -> Word:
-    return Word(text=text, start=start, end=end, prob=0.9)
+def _word(text: str, start: float, end: float, *, space_before: bool = True) -> Word:
+    return Word(text=text, start=start, end=end, prob=0.9, space_before=space_before)
 
 
 def _segment(
@@ -215,3 +223,116 @@ def test_models_serialise_to_json() -> None:
     assert payload["segments"][0]["words"][0]["text"] == "And"
     assert payload["dropped"] == {"no_speech": 0, "repetition": 0, "empty": 0}
     assert payload["segments"][0]["lang_prob"] == pytest.approx(0.9352319240570068)
+
+
+def _owned_words(
+    segment: Segment,
+    shift: float,
+    lower_cut: float | None,
+    upper_cut: float | None,
+) -> tuple[Word, ...]:
+    """The words this chunk owns for ``segment``, computed independently of ``merge``."""
+    shifted = tuple(replace(word, start=word.start + shift, end=word.end + shift) for word in segment.words)
+    return tuple(
+        word
+        for word in shifted
+        if (lower_cut is None or (word.start + word.end) / 2.0 >= lower_cut)
+        and (upper_cut is None or (word.start + word.end) / 2.0 < upper_cut)
+    )
+
+
+def _pair_sources() -> list[tuple[Segment, float, float | None, float | None]]:
+    """(raw segment, shift, lower cut, upper cut) for the recorded two-chunk pair."""
+    sources: list[tuple[Segment, float, float | None, float | None]] = []
+    for result, chunk in zip([_real("talk_c0"), _real("talk_c1")], _PAIR_CHUNKS, strict=True):
+        lower_cut = _PAIR_CUT if chunk.index > 0 else None
+        upper_cut = _PAIR_CUT if chunk.index == 0 else None
+        sources.extend((segment, chunk.start_s, lower_cut, upper_cut) for segment in result.segments)
+    return sources
+
+
+def test_untrimmed_segments_keep_whisper_text_verbatim() -> None:
+    """Every segment that loses no words keeps whisper's own text, punctuation intact."""
+    untrimmed = [
+        segment
+        for segment, shift, lower_cut, upper_cut in _pair_sources()
+        if segment.words and len(_owned_words(segment, shift, lower_cut, upper_cut)) == len(segment.words)
+    ]
+    assert len(untrimmed) == 47  # 49 raw segments; only the two at the 60.5 s seam are trimmed
+
+    transcript = merge_chunks([_real("talk_c0"), _real("talk_c1")], list(_PAIR_CHUNKS))
+    merged = Counter(segment.text for segment in transcript.segments)
+    verbatim = Counter(segment.text.strip() for segment in untrimmed)
+
+    assert len(transcript.segments) == 49
+    assert not verbatim - merged  # every untrimmed text survived verbatim
+    assert sum((merged - verbatim).values()) == 2  # only the two seam segments were rebuilt
+    assert "A few years ago, I broke into my own house." in merged
+    assert "I couldn't go back to my friend Jeff's house for the night" not in merged
+
+
+def test_merge_does_not_add_punctuation_spacing_artefacts() -> None:
+    """The rebuilt text has no more detached punctuation/contractions than whisper's own."""
+    raw_texts = [segment.text.strip() for name in ("talk_c0", "talk_c1") for segment in _real(name).segments]
+    transcript = merge_chunks([_real("talk_c0"), _real("talk_c1")], list(_PAIR_CHUNKS))
+
+    raw_hits = [text for text in raw_texts if _ARTEFACT_RE.search(text)]
+    merged_hits = [segment.text for segment in transcript.segments if _ARTEFACT_RE.search(segment.text)]
+
+    assert raw_hits == ["and ..."]
+    assert len(merged_hits) <= len(raw_hits)
+    detached = re.compile(r" '(re|s|t|ve|ll|d|m)\b")
+    assert not any(detached.search(segment.text) for segment in transcript.segments)
+
+
+def test_trimmed_segment_is_rebuilt_with_whisper_spacing() -> None:
+    """A synthetic seam cut after "'m": only the kept words are joined, keeping "I'm" attached."""
+    chunks = [Chunk(index=0, start_s=0.0, end_s=10.0), Chunk(index=1, start_s=7.0, end_s=20.0)]  # cut 8.5
+    segment = _segment(
+        0,
+        5.0,
+        10.0,
+        "I'm here,",
+        words=(
+            _word("I", 5.0, 6.0, space_before=False),
+            _word("'m", 6.0, 7.0, space_before=False),
+            _word("here", 8.0, 9.0, space_before=True),
+            _word(",", 9.0, 9.5, space_before=False),
+        ),
+    )
+    transcript = merge_chunks([_result((segment,)), _result(())], chunks)
+
+    assert [(trimmed.text, trimmed.start, trimmed.end) for trimmed in transcript.segments] == [
+        ("I'm", 5.0, 7.0)
+    ]
+    assert [word.text for word in transcript.segments[0].words] == ["I", "'m"]
+
+
+def test_untrimmed_synthetic_segment_keeps_its_original_text() -> None:
+    """No cut at all: the segment text is not rerendered from words."""
+    segment = _segment(
+        0,
+        5.0,
+        10.0,
+        "I'm here,",
+        words=(
+            _word("I", 5.0, 6.0, space_before=False),
+            _word("'m", 6.0, 7.0, space_before=False),
+            _word("here", 8.0, 9.0, space_before=True),
+            _word(",", 9.0, 9.5, space_before=False),
+        ),
+    )
+    transcript = merge_chunks([_result((segment,))], [Chunk(index=0, start_s=0.0, end_s=10.0)])
+
+    assert [kept.text for kept in transcript.segments] == ["I'm here,"]
+
+
+def test_join_words_keeps_contractions_and_attached_punctuation() -> None:
+    words = (
+        _word("I", 0.0, 0.1, space_before=False),
+        _word("'m", 0.1, 0.2, space_before=False),
+        _word("here", 0.2, 0.3, space_before=True),
+        _word(",", 0.3, 0.4, space_before=False),
+    )
+    assert join_words(words) == "I'm here,"
+    assert join_words(()) == ""

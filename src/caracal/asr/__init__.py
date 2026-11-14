@@ -1,11 +1,14 @@
 """ASR data model and the whisper language table (docs/01 §3, docs/04 §4).
 
 Every model is a frozen dataclass with :meth:`to_dict` so a stage checkpoint can be written
-as JSON without a custom encoder. Whisper text and word text are stored stripped.
+as JSON without a custom encoder. Whisper text and word text are stored stripped;
+:attr:`Word.space_before` keeps whisper's leading-whitespace signal so a rebuilt segment can
+reproduce the original punctuation and contraction spacing.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 # Whisper's own language table: ISO 639-1/3 code -> English display name. The inverse is
@@ -123,13 +126,19 @@ def language_code_for_name(name: str) -> str | None:
 
 @dataclass(frozen=True, slots=True)
 class Word:
-    """One transcribed word with its timing and acoustic confidence."""
+    """One transcribed word with its timing and acoustic confidence.
+
+    ``space_before`` is whisper's own spacing signal: ``True`` when the raw token started
+    with whitespace, ``False`` for the first word of a segment and for tokens such as
+    ``"'t"`` or ``","`` that are attached to the preceding word.
+    """
 
     text: str
     start: float
     end: float
     prob: float
     speaker: str | None = None
+    space_before: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "text", self.text.strip())
@@ -141,8 +150,24 @@ class Word:
             "end": self.end,
             "prob": self.prob,
             "speaker": self.speaker,
+            "space_before": self.space_before,
         }
         return payload
+
+
+def join_words(words: Sequence[Word]) -> str:
+    """Rebuild text from words using whisper's spacing signal.
+
+    One space is inserted before a word only when :attr:`Word.space_before` is ``True``,
+    so contractions (``"'t"``) and attached punctuation (``","``) survive the rebuild.
+    The result is stripped; the first kept word never receives a leading space.
+    """
+    parts: list[str] = []
+    for word in words:
+        if parts and word.space_before:
+            parts.append(" ")
+        parts.append(word.text)
+    return "".join(parts).strip()
 
 
 @dataclass(frozen=True, slots=True)

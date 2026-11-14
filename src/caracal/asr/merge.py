@@ -11,7 +11,7 @@ import unicodedata
 from collections.abc import Sequence
 from dataclasses import replace
 
-from caracal.asr import Segment, Transcript, WhisperResult
+from caracal.asr import Segment, Transcript, WhisperResult, join_words
 from caracal.audio.chunking import Chunk
 from caracal.errors import CaracalError, ErrorCode
 
@@ -44,7 +44,11 @@ def _kept_segment(
     lower_cut: float | None,
     upper_cut: float | None,
 ) -> Segment | None:
-    """Shift a segment, keep the words owned by this chunk and rebuild the text."""
+    """Shift a segment, keep the words owned by this chunk and preserve its text.
+
+    A segment that loses no words keeps whisper's own ``text`` verbatim; only a trimmed
+    segment is rebuilt from its words with :func:`join_words`.
+    """
     shifted = tuple(replace(word, start=word.start + shift, end=word.end + shift) for word in segment.words)
     if not shifted:
         midpoint = _midpoint(segment.start, segment.end) + shift
@@ -67,11 +71,12 @@ def _kept_segment(
     )
     if not kept:
         return None
+    text = segment.text.strip() if len(kept) == len(shifted) else join_words(kept)
     return replace(
         segment,
         start=min(word.start for word in kept),
         end=max(word.end for word in kept),
-        text=" ".join(word.text for word in kept).strip(),
+        text=text,
         words=kept,
     )
 
