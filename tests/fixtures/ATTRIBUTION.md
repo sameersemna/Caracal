@@ -2,3 +2,9 @@
 
 - `audio/jfk.wav` — excerpt of J. F. Kennedy inaugural address (1961), US Government work, public domain. Copied from the whisper.cpp repository samples.
 - `whisper/jfk.json` — real response of the local whisper.cpp server (ggml-large-v3) for `jfk.wav`, `verbose_json`, `language=auto`, recorded 2026-11-14.
+- `whisper/talk_c0.json`, `talk_c1.json` — real whisper.cpp (large-v3) output for 0–61 s and 60–120 s (1 s overlap) of the TED talk
+  "How to stay calm when you know you'll be stressed" by Daniel Levitin (YouTube 8jPQjjsBbIc, CC BY-NC-ND 4.0), recorded 2026-11-14.
+  `talk_c0_forced_de.json` — same chunk with `language=de` forced (shows `language` echoes the request while `detected_language*` keep the detection).
+- `whisper/silence20.json` — 20 s of digital silence (0 segments; detected "en" at only 0.32).
+- `captions/talk_en_manual.vtt`, `captions/talk_en_auto.vtt` — the same talk's YouTube manual and auto (`en-orig`, word-timed, rolling) captions,
+  trimmed to cues starting before 125 s. Same licence.

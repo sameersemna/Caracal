@@ -64,6 +64,7 @@ src/caracal/
   asr/whisper.py         WhisperClient.transcribe(wav, language, translate=False) -> WhisperResult
   asr/merge.py           merge_chunks(results, chunks) -> Transcript (dedupe overlap)
   asr/langid.py          language_spans(transcript) -> list[LangSpan]
+  asr/captions.py        parse_vtt(text) -> list[CaptionWord]; caption_agreement(transcript, caption_words) -> float
   speakers/diarize.py    Diarizer.run(wav) -> list[Turn], embeddings per label
   speakers/align.py      assign_speakers(transcript, turns) -> Transcript (word.speaker set)
   speakers/voiceprint.py match(embedding) -> list[VoiceMatch]; enroll(label, job_id, name)

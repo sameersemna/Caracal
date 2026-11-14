@@ -1,0 +1,2127 @@
+{
+    "task": "transcribe",
+    "language": "english",
+    "duration": 60.0,
+    "text": " I couldn't go back to my friend Jeff's house for the night\n because I had an early flight to Europe the next morning\n and I needed to get my passport and my suitcase.\n So, desperate and freezing cold,\n I found a large rock and I broke through the basement\n window,\n cleared out the shards of glass,\n I crawled through,\n I found a piece of cardboard and taped it up over the\n opening,\n figuring that in the morning, on the way to the airport,\n I could call my contractor and ask him to fix it.\n This was going to be expensive,\n but probably no more expensive than a middle-of-the-night\n locksmith,\n so I figured under the circumstances I was coming out even.\n Now, I'm a neuroscientist by training,\n and I know a little bit about how the brain performs under\n stress.\n It releases cortisol, that raises your heart rate,\n it modulates adrenaline levels,\n and it clouds your thinking.\n So the next morning, when I woke up,\n on too little sleep,\n worrying about the hole in the window,\n and the mental note that I had to\n",
+    "segments": [
+        {
+            "id": 0,
+            "text": " I couldn't go back to my friend Jeff's house for the night",
+            "start": 0.0,
+            "end": 2.74,
+            "tokens": [
+                286,
+                2809,
+                380,
+                352,
+                646,
+                281,
+                452,
+                1277,
+                7506,
+                311,
+                1782,
+                337,
+                264,
+                1818
+            ],
+            "words": [
+                {
+                    "word": " I",
+                    "start": 0.0,
+                    "end": 0.06,
+                    "t_dtw": -1,
+                    "probability": 0.871955156326294
+                },
+                {
+                    "word": " couldn",
+                    "start": 0.06,
+                    "end": 0.41000000000000003,
+                    "t_dtw": -1,
+                    "probability": 0.9961963891983032
+                },
+                {
+                    "word": "'t",
+                    "start": 0.53,
+                    "end": 0.55,
+                    "t_dtw": -1,
+                    "probability": 0.9997997283935547
+                },
+                {
+                    "word": " go",
+                    "start": 0.55,
+                    "end": 0.65,
+                    "t_dtw": -1,
+                    "probability": 0.9962419867515564
+                },
+                {
+                    "word": " back",
+                    "start": 0.71,
+                    "end": 0.92,
+                    "t_dtw": -1,
+                    "probability": 0.9951708316802979
+                },
+                {
+                    "word": " to",
+                    "start": 0.92,
+                    "end": 1.04,
+                    "t_dtw": -1,
+                    "probability": 0.9982163310050964
+                },
+                {
+                    "word": " my",
+                    "start": 1.04,
+                    "end": 1.16,
+                    "t_dtw": -1,
+                    "probability": 0.9913836717605591
+                },
+                {
+                    "word": " friend",
+                    "start": 1.16,
+                    "end": 1.51,
+                    "t_dtw": -1,
+                    "probability": 0.9984771609306335
+                },
+                {
+                    "word": " Jeff",
+                    "start": 1.6,
+                    "end": 1.76,
+                    "t_dtw": -1,
+                    "probability": 0.9085673689842224
+                },
+                {
+                    "word": "'s",
+                    "start": 1.82,
+                    "end": 1.9000000000000001,
+                    "t_dtw": -1,
+                    "probability": 0.9953075051307678
+                },
+                {
+                    "word": " house",
+                    "start": 1.9000000000000001,
+                    "end": 2.2600000000000002,
+                    "t_dtw": -1,
+                    "probability": 0.9979555010795593
+                },
+                {
+                    "word": " for",
+                    "start": 2.31,
+                    "end": 2.4,
+                    "t_dtw": -1,
+                    "probability": 0.9760462641716003
+                },
+                {
+                    "word": " the",
+                    "start": 2.4,
+                    "end": 2.52,
+                    "t_dtw": -1,
+                    "probability": 0.9979726672172546
+                },
+                {
+                    "word": " night",
+                    "start": 2.52,
+                    "end": 2.72,
+                    "t_dtw": -1,
+                    "probability": 0.9996491074562073
+                }
+            ],
+            "temperature": 0.0,
+            "avg_logprob": -0.018178701400756836,
+            "no_speech_prob": 0.14251786470413208
+        },
+        {
+            "id": 1,
+            "text": " because I had an early flight to Europe the next morning",
+            "start": 2.74,
+            "end": 5.3,
+            "tokens": [
+                570,
+                286,
+                632,
+                364,
+                2440,
+                7018,
+                281,
+                3315,
+                264,
+                958,
+                2446
+            ],
+            "words": [
+                {
+                    "word": " because",
+                    "start": 2.74,
+                    "end": 3.12,
+                    "t_dtw": -1,
+                    "probability": 0.9994146227836609
+                },
+                {
+                    "word": " I",
+                    "start": 3.12,
+                    "end": 3.12,
+                    "t_dtw": -1,
+                    "probability": 0.9996052384376526
+                },
+                {
+                    "word": " had",
+                    "start": 3.27,
+                    "end": 3.33,
+                    "t_dtw": -1,
+                    "probability": 0.999641478061676
+                },
+                {
+                    "word": " an",
+                    "start": 3.33,
+                    "end": 3.39,
+                    "t_dtw": -1,
+                    "probability": 0.9995537996292114
+                },
+                {
+                    "word": " early",
+                    "start": 3.5100000000000002,
+                    "end": 3.69,
+                    "t_dtw": -1,
+                    "probability": 0.9999370574951172
+                },
+                {
+                    "word": " flight",
+                    "start": 3.75,
+                    "end": 4.0,
+                    "t_dtw": -1,
+                    "probability": 0.9997292160987854
+                },
+                {
+                    "word": " to",
+                    "start": 4.1,
+                    "end": 4.15,
+                    "t_dtw": -1,
+                    "probability": 0.9991973042488098
+                },
+                {
+                    "word": " Europe",
+                    "start": 4.15,
+                    "end": 4.48,
+                    "t_dtw": -1,
+                    "probability": 0.9994851350784302
+                },
+                {
+                    "word": " the",
+                    "start": 4.48,
+                    "end": 4.64,
+                    "t_dtw": -1,
+                    "probability": 0.994704008102417
+                },
+                {
+                    "word": " next",
+                    "start": 4.64,
+                    "end": 4.86,
+                    "t_dtw": -1,
+                    "probability": 0.9998378753662109
+                },
+                {
+                    "word": " morning",
+                    "start": 4.86,
+                    "end": 5.3,
+                    "t_dtw": -1,
+                    "probability": 0.9996262192726135
+                }
+            ],
+            "temperature": 0.0,
+            "avg_logprob": -0.0007735888357274234,
+            "no_speech_prob": 0.14251786470413208
+        },
+        {
+            "id": 2,
+            "text": " and I needed to get my passport and my suitcase.",
+            "start": 5.3,
+            "end": 7.28,
+            "tokens": [
+                293,
+                286,
+                2978,
+                281,
+                483,
+                452,
+                24694,
+                293,
+                452,
+                34545,
+                13
+            ],
+            "words": [
+                {
+                    "word": " and",
+                    "start": 5.3,
+                    "end": 5.44,
+                    "t_dtw": -1,
+                    "probability": 0.9998931884765625
+                },
+                {
+                    "word": " I",
+                    "start": 5.44,
+                    "end": 5.48,
+                    "t_dtw": -1,
+                    "probability": 0.9999237060546875
+                },
+                {
+                    "word": " needed",
+                    "start": 5.65,
+                    "end": 5.65,
+                    "t_dtw": -1,
+                    "probability": 0.9999065399169922
+                },
+                {
+                    "word": " to",
+                    "start": 5.83,
+                    "end": 5.8500000000000005,
+                    "t_dtw": -1,
+                    "probability": 0.9999885559082031
+                },
+                {
+                    "word": " get",
+                    "start": 5.8500000000000005,
+                    "end": 5.95,
+                    "t_dtw": -1,
+                    "probability": 0.9999847412109375
+                },
+                {
+                    "word": " my",
+                    "start": 6.01,
+                    "end": 6.08,
+                    "t_dtw": -1,
+                    "probability": 0.9999809265136719
+                },
+                {
+                    "word": " passport",
+                    "start": 6.08,
+                    "end": 6.46,
+                    "t_dtw": -1,
+                    "probability": 0.9999790191650391
+                },
+                {
+                    "word": " and",
+                    "start": 6.46,
+                    "end": 6.5600000000000005,
+                    "t_dtw": -1,
+                    "probability": 0.9866582751274109
+                },
+                {
+                    "word": " my",
+                    "start": 6.66,
+                    "end": 6.69,
+                    "t_dtw": -1,
+                    "probability": 0.9999561309814453
+                },
+                {
+                    "word": " suitcase",
+                    "start": 6.69,
+                    "end": 7.07,
+                    "t_dtw": -1,
+                    "probability": 0.999908447265625
+                },
+                {
+                    "word": ".",
+                    "start": 7.07,
+                    "end": 7.26,
+                    "t_dtw": -1,
+                    "probability": 0.9965954422950745
+                }
+            ],
+            "temperature": 0.0,
+            "avg_logprob": -0.0014433860778808594,
+            "no_speech_prob": 0.14251786470413208
+        },
+        {
+            "id": 3,
+            "text": " So, desperate and freezing cold,",
+            "start": 7.28,
+            "end": 10.56,
+            "tokens": [
+                407,
+                11,
+                17601,
+                293,
+                20200,
+                3554,
+                11
+            ],
+            "words": [
+                {
+                    "word": " So",
+                    "start": 7.28,
+                    "end": 7.49,
+                    "t_dtw": -1,
+                    "probability": 0.9999885559082031
+                },
+                {
+                    "word": ",",
+                    "start": 7.49,
+                    "end": 7.7,
+                    "t_dtw": -1,
+                    "probability": 0.6429657936096191
+                },
+                {
+                    "word": " desperate",
+                    "start": 7.82,
+                    "end": 8.68,
+                    "t_dtw": -1,
+                    "probability": 0.9998188018798828
+                },
+                {
+                    "word": " and",
+                    "start": 8.68,
+                    "end": 9.0,
+                    "t_dtw": -1,
+                    "probability": 0.9996872544288635
+                },
+                {
+                    "word": " freezing",
+                    "start": 9.0,
+                    "end": 9.870000000000001,
+                    "t_dtw": -1,
+                    "probability": 0.9999713897705078
+                },
+                {
+                    "word": " cold",
+                    "start": 9.870000000000001,
+                    "end": 10.3,
+                    "t_dtw": -1,
+                    "probability": 0.9999732971191406
+                },
+                {
+                    "word": ",",
+                    "start": 10.3,
+                    "end": 10.56,
+                    "t_dtw": -1,
+                    "probability": 0.999456524848938
+                }
+            ],
+            "temperature": 0.0,
+            "avg_logprob": -0.055346012115478516,
+            "no_speech_prob": 0.14251786470413208
+        },
+        {
+            "id": 4,
+            "text": " I found a large rock and I broke through the basement",
+            "start": 10.56,
+            "end": 13.82,
+            "tokens": [
+                286,
+                1352,
+                257,
+                2416,
+                3727,
+                293,
+                286,
+                6902,
+                807,
+                264,
+                16893
+            ],
+            "words": [
+                {
+                    "word": " I",
+                    "start": 10.56,
+                    "end": 10.67,
+                    "t_dtw": -1,
+                    "probability": 1.0
+                },
+                {
+                    "word": " found",
+                    "start": 11.09,
+                    "end": 11.22,
+                    "t_dtw": -1,
+                    "probability": 0.9999942779541016
+                },
+                {
+                    "word": " a",
+                    "start": 11.27,
+                    "end": 11.32,
+                    "t_dtw": -1,
+                    "probability": 0.9999885559082031
+                },
+                {
+                    "word": " large",
+                    "start": 11.33,
+                    "end": 11.82,
+                    "t_dtw": -1,
+                    "probability": 0.9999294281005859
+                },
+                {
+                    "word": " rock",
+                    "start": 11.92,
+                    "end": 12.33,
+                    "t_dtw": -1,
+                    "probability": 0.9999771118164062
+                },
+                {
+                    "word": " and",
+                    "start": 12.38,
+                    "end": 12.5,
+                    "t_dtw": -1,
+                    "probability": 0.690474271774292
+                },
+                {
+                    "word": " I",
+                    "start": 12.5,
+                    "end": 12.52,
+                    "t_dtw": -1,
+                    "probability": 0.9998283386230469
+                },
+                {
+                    "word": " broke",
+                    "start": 12.66,
+                    "end": 12.82,
+                    "t_dtw": -1,
+                    "probability": 0.9999904632568359
+                },
+                {
+                    "word": " through",
+                    "start": 12.94,
+                    "end": 13.22,
+                    "t_dtw": -1,
+                    "probability": 0.9999885559082031
+                },
+                {
+                    "word": " the",
+                    "start": 13.22,
+                    "end": 13.280000000000001,
+                    "t_dtw": -1,
+                    "probability": 0.9999656677246094
+                },
+                {
+                    "word": " basement",
+                    "start": 13.38,
+                    "end": 13.82,
+                    "t_dtw": -1,
+                    "probability": 0.9999675750732422
+                }
+            ],
+            "temperature": 0.0,
+            "avg_logprob": -0.0337042361497879,
+            "no_speech_prob": 0.14251786470413208
+        },
+        {
+            "id": 5,
+            "text": " window,",
+            "start": 13.82,
+            "end": 14.3,
+            "tokens": [
+                4910,
+                11
+            ],
+            "words": [
+                {
+                    "word": " window",
+                    "start": 13.82,
+                    "end": 14.15,
+                    "t_dtw": -1,
+                    "probability": 0.9999771118164062
+                },
+                {
+                    "word": ",",
+                    "start": 14.15,
+                    "end": 14.3,
+                    "t_dtw": -1,
+                    "probability": 0.9986885786056519
+                }
+            ],
+            "temperature": 0.0,
+            "avg_logprob": -0.00044504800462163985,
+            "no_speech_prob": 0.0
+        },
+        {
+            "id": 6,
+            "text": " cleared out the shards of glass,",
+            "start": 14.3,
+            "end": 16.14,
+            "tokens": [
+                19725,
+                484,
+                264,
+                402,
+                2287,
+                295,
+                4276,
+                11
+            ],
+            "words": [
+                {
+                    "word": " cleared",
+                    "start": 14.48,
+                    "end": 14.65,
+                    "t_dtw": -1,
+                    "probability": 0.9999351501464844
+                },
+                {
+                    "word": " out",
+                    "start": 14.83,
+                    "end": 14.94,
+                    "t_dtw": -1,
+                    "probability": 1.0
+                },
+                {
+                    "word": " the",
+                    "start": 14.94,
+                    "end": 15.13,
+                    "t_dtw": -1,
+                    "probability": 0.9999961853027344
+                },
+                {
+                    "word": " sh",
+                    "start": 15.13,
+                    "end": 15.24,
+                    "t_dtw": -1,
+                    "probability": 0.9999141693115234
+                },
+                {
+                    "word": "ards",
+                    "start": 15.31,
+                    "end": 15.52,
+                    "t_dtw": -1,
+                    "probability": 0.9998893737792969
+                },
+                {
+                    "word": " of",
+                    "start": 15.52,
+                    "end": 15.56,
+                    "t_dtw": -1,
+                    "probability": 1.0
+                },
+                {
+                    "word": " glass",
+                    "start": 15.66,
+                    "end": 15.97,
+                    "t_dtw": -1,
+                    "probability": 0.999969482421875
+                },
+                {
+                    "word": ",",
+                    "start": 15.97,
+                    "end": 16.14,
+                    "t_dtw": -1,
+                    "probability": 0.8545169830322266
+                }
+            ],
+            "temperature": 0.0,
+            "avg_logprob": -0.017501618713140488,
+            "no_speech_prob": 0.14251786470413208
+        },
+        {
+            "id": 7,
+            "text": " I crawled through,",
+            "start": 16.14,
+            "end": 17.48,
+            "tokens": [
+                286,
+                13999,
+                1493,
+                807,
+                11
+            ],
+            "words": [
+                {
+                    "word": " I",
+                    "start": 16.14,
+                    "end": 16.21,
+                    "t_dtw": -1,
+                    "probability": 0.9999351501464844
+                },
+                {
+                    "word": " craw",
+                    "start": 16.21,
+                    "end": 16.52,
+                    "t_dtw": -1,
+                    "probability": 0.9997978210449219
+                },
+                {
+                    "word": "led",
+                    "start": 16.67,
+                    "end": 16.740000000000002,
+                    "t_dtw": -1,
+                    "probability": 0.9999809265136719
+                },
+                {
+                    "word": " through",
+                    "start": 16.78,
+                    "end": 17.3,
+                    "t_dtw": -1,
+                    "probability": 0.9999904632568359
+                },
+                {
+                    "word": ",",
+                    "start": 17.3,
+                    "end": 17.400000000000002,
+                    "t_dtw": -1,
+                    "probability": 0.9999580383300781
+                }
+            ],
+            "temperature": 0.0,
+            "avg_logprob": -5.626678466796875e-05,
+            "no_speech_prob": 0.14251786470413208
+        },
+        {
+            "id": 8,
+            "text": " I found a piece of cardboard and taped it up over the",
+            "start": 17.48,
+            "end": 20.43,
+            "tokens": [
+                286,
+                1352,
+                257,
+                2522,
+                295,
+                22248,
+                293,
+                45673,
+                309,
+                493,
+                670,
+                264
+            ],
+            "words": [
+                {
+                    "word": " I",
+                    "start": 17.48,
+                    "end": 17.55,
+                    "t_dtw": -1,
+                    "probability": 0.9999961853027344
+                },
+                {
+                    "word": " found",
+                    "start": 17.55,
+                    "end": 17.900000000000002,
+                    "t_dtw": -1,
+                    "probability": 0.9999980926513672
+                },
+                {
+                    "word": " a",
+                    "start": 17.97,
+                    "end": 17.97,
+                    "t_dtw": -1,
+                    "probability": 0.9999656677246094
+                },
+                {
+                    "word": " piece",
+                    "start": 18.01,
+                    "end": 18.32,
+                    "t_dtw": -1,
+                    "probability": 0.9999923706054688
+                },
+                {
+                    "word": " of",
+                    "start": 18.32,
+                    "end": 18.42,
+                    "t_dtw": -1,
+                    "probability": 1.0
+                },
+                {
+                    "word": " cardboard",
+                    "start": 18.490000000000002,
+                    "end": 19.1,
+                    "t_dtw": -1,
+                    "probability": 0.9999599456787109
+                },
+                {
+                    "word": " and",
+                    "start": 19.1,
+                    "end": 19.240000000000002,
+                    "t_dtw": -1,
+                    "probability": 0.9521141648292542
+                },
+                {
+                    "word": " taped",
+                    "start": 19.3,
+                    "end": 19.64,
+                    "t_dtw": -1,
+                    "probability": 0.99993896484375
+                },
+                {
+                    "word": " it",
+                    "start": 19.64,
+                    "end": 19.740000000000002,
+                    "t_dtw": -1,
+                    "probability": 0.9999923706054688
+                },
+                {
+                    "word": " up",
+                    "start": 19.79,
+                    "end": 19.900000000000002,
+                    "t_dtw": -1,
+                    "probability": 0.9999866485595703
+                },
+                {
+                    "word": " over",
+                    "start": 19.900000000000002,
+                    "end": 20.17,
+                    "t_dtw": -1,
+                    "probability": 0.9967018961906433
+                },
+                {
+                    "word": " the",
+                    "start": 20.17,
+                    "end": 20.35,
+                    "t_dtw": -1,
+                    "probability": 0.9999961853027344
+                }
+            ],
+            "temperature": 0.0,
+            "avg_logprob": -0.004378954414278269,
+            "no_speech_prob": 0.14251786470413208
+        },
+        {
+            "id": 9,
+            "text": " opening,",
+            "start": 20.43,
+            "end": 20.88,
+            "tokens": [
+                5193,
+                11
+            ],
+            "words": [
+                {
+                    "word": " opening",
+                    "start": 20.43,
+                    "end": 20.88,
+                    "t_dtw": -1,
+                    "probability": 0.5678548812866211
+                },
+                {
+                    "word": ",",
+                    "start": 20.88,
+                    "end": 20.88,
+                    "t_dtw": -1,
+                    "probability": 0.9808958172798157
+                }
+            ],
+            "temperature": 0.0,
+            "avg_logprob": -0.19505946338176727,
+            "no_speech_prob": 0.0
+        },
+        {
+            "id": 10,
+            "text": " figuring that in the morning, on the way to the airport,",
+            "start": 20.88,
+            "end": 23.66,
+            "tokens": [
+                15213,
+                300,
+                294,
+                264,
+                2446,
+                11,
+                322,
+                264,
+                636,
+                281,
+                264,
+                10155,
+                11
+            ],
+            "words": [
+                {
+                    "word": " figuring",
+                    "start": 21.23,
+                    "end": 21.47,
+                    "t_dtw": -1,
+                    "probability": 0.9999370574951172
+                },
+                {
+                    "word": " that",
+                    "start": 21.47,
+                    "end": 21.76,
+                    "t_dtw": -1,
+                    "probability": 1.0
+                },
+                {
+                    "word": " in",
+                    "start": 21.76,
+                    "end": 21.900000000000002,
+                    "t_dtw": -1,
+                    "probability": 0.9952107071876526
+                },
+                {
+                    "word": " the",
+                    "start": 21.900000000000002,
+                    "end": 22.12,
+                    "t_dtw": -1,
+                    "probability": 0.9999961853027344
+                },
+                {
+                    "word": " morning",
+                    "start": 22.12,
+                    "end": 22.64,
+                    "t_dtw": -1,
+                    "probability": 0.9999923706054688
+                },
+                {
+                    "word": ",",
+                    "start": 22.64,
+                    "end": 22.82,
+                    "t_dtw": -1,
+                    "probability": 0.8054006695747375
+                },
+                {
+                    "word": " on",
+                    "start": 22.82,
+                    "end": 22.830000000000002,
+                    "t_dtw": -1,
+                    "probability": 0.9786962270736694
+                },
+                {
+                    "word": " the",
+                    "start": 22.98,
+                    "end": 23.0,
+                    "t_dtw": -1,
+                    "probability": 0.9999809265136719
+                },
+                {
+                    "word": " way",
+                    "start": 23.0,
+                    "end": 23.11,
+                    "t_dtw": -1,
+                    "probability": 0.9999847412109375
+                },
+                {
+                    "word": " to",
+                    "start": 23.11,
+                    "end": 23.14,
+                    "t_dtw": -1,
+                    "probability": 0.9999885559082031
+                },
+                {
+                    "word": " the",
+                    "start": 23.19,
+                    "end": 23.29,
+                    "t_dtw": -1,
+                    "probability": 0.9999961853027344
+                },
+                {
+                    "word": " airport",
+                    "start": 23.29,
+                    "end": 23.55,
+                    "t_dtw": -1,
+                    "probability": 0.9999752044677734
+                },
+                {
+                    "word": ",",
+                    "start": 23.55,
+                    "end": 23.6,
+                    "t_dtw": -1,
+                    "probability": 0.9999465942382812
+                }
+            ],
+            "temperature": 0.0,
+            "avg_logprob": -0.017353739589452744,
+            "no_speech_prob": 0.14251786470413208
+        },
+        {
+            "id": 11,
+            "text": " I could call my contractor and ask him to fix it.",
+            "start": 23.66,
+            "end": 26.64,
+            "tokens": [
+                286,
+                727,
+                818,
+                452,
+                26463,
+                293,
+                1029,
+                796,
+                281,
+                3191,
+                309,
+                13
+            ],
+            "words": [
+                {
+                    "word": " I",
+                    "start": 23.66,
+                    "end": 23.73,
+                    "t_dtw": -1,
+                    "probability": 0.9999961853027344
+                },
+                {
+                    "word": " could",
+                    "start": 23.73,
+                    "end": 24.07,
+                    "t_dtw": -1,
+                    "probability": 0.9999885559082031
+                },
+                {
+                    "word": " call",
+                    "start": 24.19,
+                    "end": 24.38,
+                    "t_dtw": -1,
+                    "probability": 0.9999561309814453
+                },
+                {
+                    "word": " my",
+                    "start": 24.38,
+                    "end": 24.52,
+                    "t_dtw": -1,
+                    "probability": 0.9998970031738281
+                },
+                {
+                    "word": " contractor",
+                    "start": 24.54,
+                    "end": 25.17,
+                    "t_dtw": -1,
+                    "probability": 0.9996224045753479
+                },
+                {
+                    "word": " and",
+                    "start": 25.26,
+                    "end": 25.42,
+                    "t_dtw": -1,
+                    "probability": 0.9991382360458374
+                },
+                {
+                    "word": " ask",
+                    "start": 25.46,
+                    "end": 25.62,
+                    "t_dtw": -1,
+                    "probability": 0.9999351501464844
+                },
+                {
+                    "word": " him",
+                    "start": 25.76,
+                    "end": 25.87,
+                    "t_dtw": -1,
+                    "probability": 0.9999771118164062
+                },
+                {
+                    "word": " to",
+                    "start": 25.87,
+                    "end": 25.97,
+                    "t_dtw": -1,
+                    "probability": 0.9999580383300781
+                },
+                {
+                    "word": " fix",
+                    "start": 26.04,
+                    "end": 26.22,
+                    "t_dtw": -1,
+                    "probability": 0.9995099306106567
+                },
+                {
+                    "word": " it",
+                    "start": 26.22,
+                    "end": 26.36,
+                    "t_dtw": -1,
+                    "probability": 0.9999198913574219
+                },
+                {
+                    "word": ".",
+                    "start": 26.36,
+                    "end": 26.64,
+                    "t_dtw": -1,
+                    "probability": 0.9999885559082031
+                }
+            ],
+            "temperature": 0.0,
+            "avg_logprob": -0.0001625647855689749,
+            "no_speech_prob": 0.14251786470413208
+        },
+        {
+            "id": 12,
+            "text": " This was going to be expensive,",
+            "start": 26.64,
+            "end": 27.88,
+            "tokens": [
+                639,
+                390,
+                516,
+                281,
+                312,
+                5124,
+                11
+            ],
+            "words": [
+                {
+                    "word": " This",
+                    "start": 26.64,
+                    "end": 26.82,
+                    "t_dtw": -1,
+                    "probability": 0.7893424034118652
+                },
+                {
+                    "word": " was",
+                    "start": 26.82,
+                    "end": 26.95,
+                    "t_dtw": -1,
+                    "probability": 0.9995537996292114
+                },
+                {
+                    "word": " going",
+                    "start": 27.17,
+                    "end": 27.17,
+                    "t_dtw": -1,
+                    "probability": 0.9982677102088928
+                },
+                {
+                    "word": " to",
+                    "start": 27.17,
+                    "end": 27.26,
+                    "t_dtw": -1,
+                    "probability": 1.0
+                },
+                {
+                    "word": " be",
+                    "start": 27.27,
+                    "end": 27.29,
+                    "t_dtw": -1,
+                    "probability": 1.0
+                },
+                {
+                    "word": " expensive",
+                    "start": 27.41,
+                    "end": 27.740000000000002,
+                    "t_dtw": -1,
+                    "probability": 0.9999637603759766
+                },
+                {
+                    "word": ",",
+                    "start": 27.78,
+                    "end": 27.88,
+                    "t_dtw": -1,
+                    "probability": 0.9989972114562988
+                }
+            ],
+            "temperature": 0.0,
+            "avg_logprob": -0.029971837997436523,
+            "no_speech_prob": 0.14251786470413208
+        },
+        {
+            "id": 13,
+            "text": " but probably no more expensive than a middle-of-the-night",
+            "start": 28.2,
+            "end": 30.830000000000002,
+            "tokens": [
+                457,
+                1391,
+                572,
+                544,
+                5124,
+                813,
+                257,
+                2808,
+                12,
+                2670,
+                12,
+                3322,
+                12,
+                6402
+            ],
+            "words": [
+                {
+                    "word": " but",
+                    "start": 28.2,
+                    "end": 28.36,
+                    "t_dtw": -1,
+                    "probability": 0.9999580383300781
+                },
+                {
+                    "word": " probably",
+                    "start": 28.73,
+                    "end": 28.79,
+                    "t_dtw": -1,
+                    "probability": 0.9999961853027344
+                },
+                {
+                    "word": " no",
+                    "start": 28.79,
+                    "end": 28.85,
+                    "t_dtw": -1,
+                    "probability": 0.99993896484375
+                },
+                {
+                    "word": " more",
+                    "start": 28.91,
+                    "end": 29.1,
+                    "t_dtw": -1,
+                    "probability": 0.9999961853027344
+                },
+                {
+                    "word": " expensive",
+                    "start": 29.1,
+                    "end": 29.6,
+                    "t_dtw": -1,
+                    "probability": 0.999969482421875
+                },
+                {
+                    "word": " than",
+                    "start": 29.6,
+                    "end": 29.810000000000002,
+                    "t_dtw": -1,
+                    "probability": 0.9870968461036682
+                },
+                {
+                    "word": " a",
+                    "start": 29.810000000000002,
+                    "end": 29.86,
+                    "t_dtw": -1,
+                    "probability": 0.8821418285369873
+                },
+                {
+                    "word": " middle",
+                    "start": 29.86,
+                    "end": 30.16,
+                    "t_dtw": -1,
+                    "probability": 0.9999351501464844
+                },
+                {
+                    "word": "-",
+                    "start": 30.22,
+                    "end": 30.22,
+                    "t_dtw": -1,
+                    "probability": 0.9978851079940796
+                },
+                {
+                    "word": "of",
+                    "start": 30.3,
+                    "end": 30.32,
+                    "t_dtw": -1,
+                    "probability": 0.9999809265136719
+                },
+                {
+                    "word": "-",
+                    "start": 30.32,
+                    "end": 30.37,
+                    "t_dtw": -1,
+                    "probability": 0.9999961853027344
+                },
+                {
+                    "word": "the",
+                    "start": 30.37,
+                    "end": 30.51,
+                    "t_dtw": -1,
+                    "probability": 0.9999485015869141
+                },
+                {
+                    "word": "-",
+                    "start": 30.57,
+                    "end": 30.57,
+                    "t_dtw": -1,
+                    "probability": 1.0
+                },
+                {
+                    "word": "night",
+                    "start": 30.580000000000002,
+                    "end": 30.830000000000002,
+                    "t_dtw": -1,
+                    "probability": 0.9994298815727234
+                }
+            ],
+            "temperature": 0.0,
+            "avg_logprob": -0.00942382775247097,
+            "no_speech_prob": 1.332594368186335e-09
+        },
+        {
+            "id": 14,
+            "text": " locksmith,",
+            "start": 30.830000000000002,
+            "end": 31.44,
+            "tokens": [
+                20703,
+                41708,
+                11
+            ],
+            "words": [
+                {
+                    "word": " locks",
+                    "start": 30.830000000000002,
+                    "end": 31.07,
+                    "t_dtw": -1,
+                    "probability": 0.9993917346000671
+                },
+                {
+                    "word": "mith",
+                    "start": 31.150000000000002,
+                    "end": 31.3,
+                    "t_dtw": -1,
+                    "probability": 0.9999828338623047
+                },
+                {
+                    "word": ",",
+                    "start": 31.3,
+                    "end": 31.44,
+                    "t_dtw": -1,
+                    "probability": 0.6916816830635071
+                }
+            ],
+            "temperature": 0.0,
+            "avg_logprob": -0.09231376647949219,
+            "no_speech_prob": 0.0
+        },
+        {
+            "id": 15,
+            "text": " so I figured under the circumstances I was coming out even.",
+            "start": 31.44,
+            "end": 35.2,
+            "tokens": [
+                370,
+                286,
+                8932,
+                833,
+                264,
+                9121,
+                286,
+                390,
+                1348,
+                484,
+                754,
+                13
+            ],
+            "words": [
+                {
+                    "word": " so",
+                    "start": 31.44,
+                    "end": 31.580000000000002,
+                    "t_dtw": -1,
+                    "probability": 0.9999961853027344
+                },
+                {
+                    "word": " I",
+                    "start": 31.580000000000002,
+                    "end": 31.650000000000002,
+                    "t_dtw": -1,
+                    "probability": 1.0
+                },
+                {
+                    "word": " figured",
+                    "start": 31.970000000000002,
+                    "end": 32.160000000000004,
+                    "t_dtw": -1,
+                    "probability": 0.9999866485595703
+                },
+                {
+                    "word": " under",
+                    "start": 32.21,
+                    "end": 32.52,
+                    "t_dtw": -1,
+                    "probability": 0.5710121989250183
+                },
+                {
+                    "word": " the",
+                    "start": 32.52,
+                    "end": 32.7,
+                    "t_dtw": -1,
+                    "probability": 1.0
+                },
+                {
+                    "word": " circumstances",
+                    "start": 32.8,
+                    "end": 33.69,
+                    "t_dtw": -1,
+                    "probability": 0.9999980926513672
+                },
+                {
+                    "word": " I",
+                    "start": 33.69,
+                    "end": 33.75,
+                    "t_dtw": -1,
+                    "probability": 0.6362961530685425
+                },
+                {
+                    "word": " was",
+                    "start": 33.82,
+                    "end": 33.980000000000004,
+                    "t_dtw": -1,
+                    "probability": 1.0
+                },
+                {
+                    "word": " coming",
+                    "start": 33.980000000000004,
+                    "end": 34.42,
+                    "t_dtw": -1,
+                    "probability": 0.9999980926513672
+                },
+                {
+                    "word": " out",
+                    "start": 34.42,
+                    "end": 34.64,
+                    "t_dtw": -1,
+                    "probability": 1.0
+                },
+                {
+                    "word": " even",
+                    "start": 34.64,
+                    "end": 34.93,
+                    "t_dtw": -1,
+                    "probability": 0.9946698546409607
+                },
+                {
+                    "word": ".",
+                    "start": 34.93,
+                    "end": 35.2,
+                    "t_dtw": -1,
+                    "probability": 0.9999942779541016
+                }
+            ],
+            "temperature": 0.0,
+            "avg_logprob": -0.0782928466796875,
+            "no_speech_prob": 1.332594368186335e-09
+        },
+        {
+            "id": 16,
+            "text": " Now, I'm a neuroscientist by training,",
+            "start": 35.2,
+            "end": 38.92,
+            "tokens": [
+                823,
+                11,
+                286,
+                478,
+                257,
+                28813,
+                5412,
+                468,
+                538,
+                3097,
+                11
+            ],
+            "words": [
+                {
+                    "word": " Now",
+                    "start": 35.2,
+                    "end": 35.53,
+                    "t_dtw": -1,
+                    "probability": 0.9999885559082031
+                },
+                {
+                    "word": ",",
+                    "start": 35.730000000000004,
+                    "end": 35.75,
+                    "t_dtw": -1,
+                    "probability": 0.9998245239257812
+                },
+                {
+                    "word": " I",
+                    "start": 35.75,
+                    "end": 35.85,
+                    "t_dtw": -1,
+                    "probability": 0.9999904632568359
+                },
+                {
+                    "word": "'m",
+                    "start": 35.910000000000004,
+                    "end": 36.08,
+                    "t_dtw": -1,
+                    "probability": 0.9998550415039062
+                },
+                {
+                    "word": " a",
+                    "start": 36.08,
+                    "end": 36.14,
+                    "t_dtw": -1,
+                    "probability": 1.0
+                },
+                {
+                    "word": " neuros",
+                    "start": 36.21,
+                    "end": 36.86,
+                    "t_dtw": -1,
+                    "probability": 0.9997139573097229
+                },
+                {
+                    "word": "cient",
+                    "start": 36.86,
+                    "end": 37.410000000000004,
+                    "t_dtw": -1,
+                    "probability": 0.99993896484375
+                },
+                {
+                    "word": "ist",
+                    "start": 37.410000000000004,
+                    "end": 37.74,
+                    "t_dtw": -1,
+                    "probability": 0.9999980926513672
+                },
+                {
+                    "word": " by",
+                    "start": 37.74,
+                    "end": 37.92,
+                    "t_dtw": -1,
+                    "probability": 0.9999961853027344
+                },
+                {
+                    "word": " training",
+                    "start": 38.02,
+                    "end": 38.9,
+                    "t_dtw": -1,
+                    "probability": 0.9999961853027344
+                },
+                {
+                    "word": ",",
+                    "start": 38.9,
+                    "end": 38.92,
+                    "t_dtw": -1,
+                    "probability": 0.5044935345649719
+                }
+            ],
+            "temperature": 0.0,
+            "avg_logprob": -0.05707486346364021,
+            "no_speech_prob": 1.332594368186335e-09
+        },
+        {
+            "id": 17,
+            "text": " and I know a little bit about how the brain performs under",
+            "start": 38.92,
+            "end": 41.96,
+            "tokens": [
+                293,
+                286,
+                458,
+                257,
+                707,
+                857,
+                466,
+                577,
+                264,
+                3567,
+                26213,
+                833
+            ],
+            "words": [
+                {
+                    "word": " and",
+                    "start": 38.92,
+                    "end": 39.11,
+                    "t_dtw": -1,
+                    "probability": 1.0
+                },
+                {
+                    "word": " I",
+                    "start": 39.11,
+                    "end": 39.17,
+                    "t_dtw": -1,
+                    "probability": 1.0
+                },
+                {
+                    "word": " know",
+                    "start": 39.43,
+                    "end": 39.43,
+                    "t_dtw": -1,
+                    "probability": 1.0
+                },
+                {
+                    "word": " a",
+                    "start": 39.45,
+                    "end": 39.49,
+                    "t_dtw": -1,
+                    "probability": 1.0
+                },
+                {
+                    "word": " little",
+                    "start": 39.49,
+                    "end": 39.87,
+                    "t_dtw": -1,
+                    "probability": 1.0
+                },
+                {
+                    "word": " bit",
+                    "start": 39.93,
+                    "end": 40.07,
+                    "t_dtw": -1,
+                    "probability": 1.0
+                },
+                {
+                    "word": " about",
+                    "start": 40.07,
+                    "end": 40.4,
+                    "t_dtw": -1,
+                    "probability": 0.9999427795410156
+                },
+                {
+                    "word": " how",
+                    "start": 40.4,
+                    "end": 40.59,
+                    "t_dtw": -1,
+                    "probability": 0.9999809265136719
+                },
+                {
+                    "word": " the",
+                    "start": 40.59,
+                    "end": 40.78,
+                    "t_dtw": -1,
+                    "probability": 1.0
+                },
+                {
+                    "word": " brain",
+                    "start": 40.78,
+                    "end": 41.11,
+                    "t_dtw": -1,
+                    "probability": 1.0
+                },
+                {
+                    "word": " performs",
+                    "start": 41.11,
+                    "end": 41.63,
+                    "t_dtw": -1,
+                    "probability": 0.9998416900634766
+                },
+                {
+                    "word": " under",
+                    "start": 41.63,
+                    "end": 41.96,
+                    "t_dtw": -1,
+                    "probability": 0.9999980926513672
+                }
+            ],
+            "temperature": 0.0,
+            "avg_logprob": -1.9709268599399365e-05,
+            "no_speech_prob": 1.332594368186335e-09
+        },
+        {
+            "id": 18,
+            "text": " stress.",
+            "start": 41.96,
+            "end": 42.62,
+            "tokens": [
+                4244,
+                13
+            ],
+            "words": [
+                {
+                    "word": " stress",
+                    "start": 41.96,
+                    "end": 42.35,
+                    "t_dtw": -1,
+                    "probability": 0.9999961853027344
+                },
+                {
+                    "word": ".",
+                    "start": 42.35,
+                    "end": 42.62,
+                    "t_dtw": -1,
+                    "probability": 0.9999980926513672
+                }
+            ],
+            "temperature": 0.0,
+            "avg_logprob": -1.9073486328125e-06,
+            "no_speech_prob": 0.0
+        },
+        {
+            "id": 19,
+            "text": " It releases cortisol, that raises your heart rate,",
+            "start": 42.62,
+            "end": 46.02,
+            "tokens": [
+                467,
+                16952,
+                45618,
+                11,
+                300,
+                19658,
+                428,
+                1917,
+                3314,
+                11
+            ],
+            "words": [
+                {
+                    "word": " It",
+                    "start": 42.62,
+                    "end": 42.77,
+                    "t_dtw": -1,
+                    "probability": 1.0
+                },
+                {
+                    "word": " releases",
+                    "start": 43.15,
+                    "end": 43.37,
+                    "t_dtw": -1,
+                    "probability": 0.9999809265136719
+                },
+                {
+                    "word": " cortisol",
+                    "start": 43.39,
+                    "end": 43.88,
+                    "t_dtw": -1,
+                    "probability": 0.9999942779541016
+                },
+                {
+                    "word": ",",
+                    "start": 43.980000000000004,
+                    "end": 44.12,
+                    "t_dtw": -1,
+                    "probability": 0.9097933769226074
+                },
+                {
+                    "word": " that",
+                    "start": 44.12,
+                    "end": 44.38,
+                    "t_dtw": -1,
+                    "probability": 0.9933313727378845
+                },
+                {
+                    "word": " raises",
+                    "start": 44.42,
+                    "end": 44.87,
+                    "t_dtw": -1,
+                    "probability": 0.9999446868896484
+                },
+                {
+                    "word": " your",
+                    "start": 44.87,
+                    "end": 45.17,
+                    "t_dtw": -1,
+                    "probability": 1.0
+                },
+                {
+                    "word": " heart",
+                    "start": 45.17,
+                    "end": 45.49,
+                    "t_dtw": -1,
+                    "probability": 0.9999942779541016
+                },
+                {
+                    "word": " rate",
+                    "start": 45.57,
+                    "end": 45.84,
+                    "t_dtw": -1,
+                    "probability": 0.9999866485595703
+                },
+                {
+                    "word": ",",
+                    "start": 45.84,
+                    "end": 46.02,
+                    "t_dtw": -1,
+                    "probability": 0.9999504089355469
+                }
+            ],
+            "temperature": 0.0,
+            "avg_logprob": -0.009216135367751122,
+            "no_speech_prob": 1.332594368186335e-09
+        },
+        {
+            "id": 20,
+            "text": " it modulates adrenaline levels,",
+            "start": 46.02,
+            "end": 48.980000000000004,
+            "tokens": [
+                309,
+                1072,
+                26192,
+                35649,
+                4358,
+                11
+            ],
+            "words": [
+                {
+                    "word": " it",
+                    "start": 46.02,
+                    "end": 46.22,
+                    "t_dtw": -1,
+                    "probability": 1.0
+                },
+                {
+                    "word": " mod",
+                    "start": 46.37,
+                    "end": 46.37,
+                    "t_dtw": -1,
+                    "probability": 0.9998645782470703
+                },
+                {
+                    "word": "ulates",
+                    "start": 46.56,
+                    "end": 47.13,
+                    "t_dtw": -1,
+                    "probability": 0.9999332427978516
+                },
+                {
+                    "word": " adrenaline",
+                    "start": 47.160000000000004,
+                    "end": 48.15,
+                    "t_dtw": -1,
+                    "probability": 0.9999351501464844
+                },
+                {
+                    "word": " levels",
+                    "start": 48.15,
+                    "end": 48.74,
+                    "t_dtw": -1,
+                    "probability": 0.9999980926513672
+                },
+                {
+                    "word": ",",
+                    "start": 48.84,
+                    "end": 48.980000000000004,
+                    "t_dtw": -1,
+                    "probability": 0.9230899810791016
+                }
+            ],
+            "temperature": 0.0,
+            "avg_logprob": -0.011471067555248737,
+            "no_speech_prob": 1.332594368186335e-09
+        },
+        {
+            "id": 21,
+            "text": " and it clouds your thinking.",
+            "start": 48.980000000000004,
+            "end": 50.26,
+            "tokens": [
+                293,
+                309,
+                12193,
+                428,
+                1953,
+                13
+            ],
+            "words": [
+                {
+                    "word": " and",
+                    "start": 48.980000000000004,
+                    "end": 49.120000000000005,
+                    "t_dtw": -1,
+                    "probability": 1.0
+                },
+                {
+                    "word": " it",
+                    "start": 49.120000000000005,
+                    "end": 49.21,
+                    "t_dtw": -1,
+                    "probability": 1.0
+                },
+                {
+                    "word": " clouds",
+                    "start": 49.5,
+                    "end": 49.5,
+                    "t_dtw": -1,
+                    "probability": 0.9999504089355469
+                },
+                {
+                    "word": " your",
+                    "start": 49.51,
+                    "end": 49.63,
+                    "t_dtw": -1,
+                    "probability": 0.9999885559082031
+                },
+                {
+                    "word": " thinking",
+                    "start": 49.75,
+                    "end": 50.07,
+                    "t_dtw": -1,
+                    "probability": 0.9999961853027344
+                },
+                {
+                    "word": ".",
+                    "start": 50.120000000000005,
+                    "end": 50.24,
+                    "t_dtw": -1,
+                    "probability": 1.0
+                }
+            ],
+            "temperature": 0.0,
+            "avg_logprob": -9.264264917874243e-06,
+            "no_speech_prob": 1.332594368186335e-09
+        },
+        {
+            "id": 22,
+            "text": " So the next morning, when I woke up,",
+            "start": 50.26,
+            "end": 53.9,
+            "tokens": [
+                407,
+                264,
+                958,
+                2446,
+                11,
+                562,
+                286,
+                12852,
+                493,
+                11
+            ],
+            "words": [
+                {
+                    "word": " So",
+                    "start": 50.26,
+                    "end": 50.47,
+                    "t_dtw": -1,
+                    "probability": 0.9999961853027344
+                },
+                {
+                    "word": " the",
+                    "start": 50.79,
+                    "end": 50.79,
+                    "t_dtw": -1,
+                    "probability": 0.947263240814209
+                },
+                {
+                    "word": " next",
+                    "start": 50.800000000000004,
+                    "end": 51.21,
+                    "t_dtw": -1,
+                    "probability": 1.0
+                },
+                {
+                    "word": " morning",
+                    "start": 51.27,
+                    "end": 51.95,
+                    "t_dtw": -1,
+                    "probability": 0.9999980926513672
+                },
+                {
+                    "word": ",",
+                    "start": 51.95,
+                    "end": 52.18,
+                    "t_dtw": -1,
+                    "probability": 0.9999771118164062
+                },
+                {
+                    "word": " when",
+                    "start": 52.18,
+                    "end": 52.7,
+                    "t_dtw": -1,
+                    "probability": 0.9163607954978943
+                },
+                {
+                    "word": " I",
+                    "start": 52.7,
+                    "end": 52.83,
+                    "t_dtw": -1,
+                    "probability": 1.0
+                },
+                {
+                    "word": " woke",
+                    "start": 52.83,
+                    "end": 53.34,
+                    "t_dtw": -1,
+                    "probability": 0.9999790191650391
+                },
+                {
+                    "word": " up",
+                    "start": 53.35,
+                    "end": 53.61,
+                    "t_dtw": -1,
+                    "probability": 1.0
+                },
+                {
+                    "word": ",",
+                    "start": 53.61,
+                    "end": 53.9,
+                    "t_dtw": -1,
+                    "probability": 0.9701709747314453
+                }
+            ],
+            "temperature": 0.0,
+            "avg_logprob": -0.015623265877366066,
+            "no_speech_prob": 1.332594368186335e-09
+        },
+        {
+            "id": 23,
+            "text": " on too little sleep,",
+            "start": 53.9,
+            "end": 55.18,
+            "tokens": [
+                322,
+                886,
+                707,
+                2817,
+                11
+            ],
+            "words": [
+                {
+                    "word": " on",
+                    "start": 53.9,
+                    "end": 54.04,
+                    "t_dtw": -1,
+                    "probability": 0.6000798344612122
+                },
+                {
+                    "word": " too",
+                    "start": 54.04,
+                    "end": 54.25,
+                    "t_dtw": -1,
+                    "probability": 0.9986676573753357
+                },
+                {
+                    "word": " little",
+                    "start": 54.43,
+                    "end": 54.67,
+                    "t_dtw": -1,
+                    "probability": 0.9999160766601562
+                },
+                {
+                    "word": " sleep",
+                    "start": 54.67,
+                    "end": 55.0,
+                    "t_dtw": -1,
+                    "probability": 0.9999942779541016
+                },
+                {
+                    "word": ",",
+                    "start": 55.04,
+                    "end": 55.160000000000004,
+                    "t_dtw": -1,
+                    "probability": 0.9999542236328125
+                }
+            ],
+            "temperature": 0.0,
+            "avg_logprob": -0.08536020666360855,
+            "no_speech_prob": 1.332594368186335e-09
+        },
+        {
+            "id": 24,
+            "text": " worrying about the hole in the window,",
+            "start": 55.18,
+            "end": 58.14,
+            "tokens": [
+                18788,
+                466,
+                264,
+                5458,
+                294,
+                264,
+                4910,
+                11
+            ],
+            "words": [
+                {
+                    "word": " worrying",
+                    "start": 55.71,
+                    "end": 55.94,
+                    "t_dtw": -1,
+                    "probability": 0.9999675750732422
+                },
+                {
+                    "word": " about",
+                    "start": 55.95,
+                    "end": 56.410000000000004,
+                    "t_dtw": -1,
+                    "probability": 1.0
+                },
+                {
+                    "word": " the",
+                    "start": 56.410000000000004,
+                    "end": 56.69,
+                    "t_dtw": -1,
+                    "probability": 0.9999961853027344
+                },
+                {
+                    "word": " hole",
+                    "start": 56.69,
+                    "end": 57.07,
+                    "t_dtw": -1,
+                    "probability": 0.9999179840087891
+                },
+                {
+                    "word": " in",
+                    "start": 57.07,
+                    "end": 57.13,
+                    "t_dtw": -1,
+                    "probability": 0.9999961853027344
+                },
+                {
+                    "word": " the",
+                    "start": 57.28,
+                    "end": 57.49,
+                    "t_dtw": -1,
+                    "probability": 1.0
+                },
+                {
+                    "word": " window",
+                    "start": 57.56,
+                    "end": 58.14,
+                    "t_dtw": -1,
+                    "probability": 0.9999904632568359
+                },
+                {
+                    "word": ",",
+                    "start": 58.14,
+                    "end": 58.14,
+                    "t_dtw": -1,
+                    "probability": 0.7086707949638367
+                }
+            ],
+            "temperature": 0.0,
+            "avg_logprob": -0.03827730938792229,
+            "no_speech_prob": 1.332594368186335e-09
+        },
+        {
+            "id": 25,
+            "text": " and the mental note that I had to",
+            "start": 58.2,
+            "end": 60.0,
+            "tokens": [
+                293,
+                264,
+                4973,
+                3637,
+                300,
+                286,
+                632,
+                281
+            ],
+            "words": [
+                {
+                    "word": " and",
+                    "start": 58.550000000000004,
+                    "end": 58.550000000000004,
+                    "t_dtw": -1,
+                    "probability": 0.9359434247016907
+                },
+                {
+                    "word": " the",
+                    "start": 58.730000000000004,
+                    "end": 58.85,
+                    "t_dtw": -1,
+                    "probability": 0.981423556804657
+                },
+                {
+                    "word": " mental",
+                    "start": 58.93,
+                    "end": 59.22,
+                    "t_dtw": -1,
+                    "probability": 0.9411724805831909
+                },
+                {
+                    "word": " note",
+                    "start": 59.22,
+                    "end": 59.46,
+                    "t_dtw": -1,
+                    "probability": 0.9081108570098877
+                },
+                {
+                    "word": " that",
+                    "start": 59.56,
+                    "end": 59.71,
+                    "t_dtw": -1,
+                    "probability": 0.7337600588798523
+                },
+                {
+                    "word": " I",
+                    "start": 59.79,
+                    "end": 59.79,
+                    "t_dtw": -1,
+                    "probability": 0.995328426361084
+                },
+                {
+                    "word": " had",
+                    "start": 59.800000000000004,
+                    "end": 59.96,
+                    "t_dtw": -1,
+                    "probability": 0.9997978210449219
+                },
+                {
+                    "word": " to",
+                    "start": 60.0,
+                    "end": 60.0,
+                    "t_dtw": -1,
+                    "probability": 0.9829409718513489
+                }
+            ],
+            "temperature": 0.0,
+            "avg_logprob": -0.057363320142030716,
+            "no_speech_prob": 8.6823126466129e-10
+        }
+    ],
+    "detected_language": "english",
+    "detected_language_probability": 0.9967907071113586,
+    "language_probabilities": {
+        "en": 0.9967907071113586
+    }
+}
