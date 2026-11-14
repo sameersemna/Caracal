@@ -1,0 +1,166 @@
+"""Artifact paths and atomic writes for one job (docs/05 §3, docs/06 S10).
+
+Every path is derived from :class:`~uuid.UUID` and the configured data directory, so a caller
+can never inject ``..`` or an absolute path through a job-supplied value. The only
+job-supplied path components are a validated language tag, a subtitle extension from a fixed
+set and a stage name from :class:`caracal.pipeline.stages.Stage`.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import cast
+from uuid import UUID
+
+from caracal.errors import CaracalError, ErrorCode
+
+_LANG_RE = re.compile(r"^[a-z]{2,3}(-[A-Za-z]{2,4})?$|^source$")
+_SUBTITLE_EXTS = frozenset({"srt", "vtt"})
+
+
+def _invalid(message: str, value: object) -> CaracalError:
+    return CaracalError(ErrorCode.INVALID_INPUT, message, {"value": str(value)})
+
+
+def _validate_lang(lang: str) -> None:
+    if not isinstance(lang, str) or _LANG_RE.fullmatch(lang) is None:
+        raise _invalid("invalid language tag", lang)
+
+
+def _validate_stage(name: str) -> None:
+    # Imported lazily: stages.py needs JobFiles for StageContext, so a module-level import
+    # here would create a cycle.
+    from caracal.pipeline.stages import Stage
+
+    try:
+        Stage(name)
+    except ValueError as exc:
+        raise _invalid("invalid stage name", name) from exc
+
+
+def _atomic_write(path: Path, data: bytes) -> None:
+    """Write ``data`` to ``path`` via a same-directory temporary file and ``os.replace``."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    temporary_path = Path(temporary)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+    except BaseException:
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
+@dataclass(frozen=True)
+class JobFiles:
+    """Every filesystem artifact for one job, rooted under ``data_dir/jobs/<job_id>``."""
+
+    data_dir: Path
+    job_id: UUID
+
+    @property
+    def root(self) -> Path:
+        return self.data_dir / "jobs" / str(self.job_id)
+
+    @property
+    def source_dir(self) -> Path:
+        return self.root / "source"
+
+    @property
+    def audio_wav(self) -> Path:
+        return self.root / "audio.wav"
+
+    @property
+    def chunks_dir(self) -> Path:
+        return self.root / "chunks"
+
+    def chunk(self, index: int) -> Path:
+        if index < 0:
+            raise _invalid("chunk index must be non-negative", index)
+        return self.chunks_dir / f"{index:03d}.wav"
+
+    @property
+    def captions_dir(self) -> Path:
+        return self.root / "captions"
+
+    def captions(self, lang: str) -> Path:
+        _validate_lang(lang)
+        return self.captions_dir / f"{lang}.vtt"
+
+    @property
+    def stages_dir(self) -> Path:
+        return self.root / "stages"
+
+    def stage(self, name: str) -> Path:
+        _validate_stage(name)
+        return self.stages_dir / f"{name}.json"
+
+    @property
+    def transcript_json(self) -> Path:
+        return self.root / "transcript.json"
+
+    @property
+    def transcript_txt(self) -> Path:
+        return self.root / "transcript.txt"
+
+    @property
+    def subtitles_dir(self) -> Path:
+        return self.root / "subtitles"
+
+    def subtitle(self, lang: str, ext: str) -> Path:
+        _validate_lang(lang)
+        if ext not in _SUBTITLE_EXTS:
+            raise _invalid("invalid subtitle extension", ext)
+        return self.subtitles_dir / f"{lang}.{ext}"
+
+    @property
+    def report_json(self) -> Path:
+        return self.root / "report.json"
+
+    @property
+    def report_md(self) -> Path:
+        return self.root / "report.md"
+
+    def ensure(self) -> None:
+        """Create every directory this job can write into."""
+        for directory in (
+            self.root,
+            self.source_dir,
+            self.chunks_dir,
+            self.captions_dir,
+            self.stages_dir,
+            self.subtitles_dir,
+        ):
+            directory.mkdir(parents=True, exist_ok=True)
+
+    def write_json(self, path: Path, obj: object) -> None:
+        """Serialise ``obj`` as UTF-8 JSON and write it atomically."""
+        data = json.dumps(obj, ensure_ascii=False, indent=2).encode("utf-8")
+        _atomic_write(path, data)
+
+    def write_text(self, path: Path, text: str) -> None:
+        """Write ``text`` as UTF-8 atomically."""
+        _atomic_write(path, text.encode("utf-8"))
+
+    def read_json(self, path: Path) -> object | None:
+        """Read a JSON artifact; return ``None`` when it does not exist yet."""
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        try:
+            return cast("object", json.loads(raw))
+        except json.JSONDecodeError as exc:
+            raise CaracalError(
+                ErrorCode.INTERNAL,
+                "artifact is not valid JSON",
+                {"path": path.name},
+            ) from exc
