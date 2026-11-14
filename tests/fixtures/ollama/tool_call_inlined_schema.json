@@ -1,0 +1,45 @@
+{
+  "request_note": "recorded 2026-11-14 from ollama.com gemma4:31b",
+  "message": {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+      {
+        "id": "call_97jmivzv",
+        "function": {
+          "index": 0,
+          "name": "record_analysis",
+          "arguments": {
+            "confidence": 1,
+            "entities": [
+              {
+                "evidence": [
+                  "seg:0"
+                ],
+                "text": "Angela Merkel",
+                "type": "PERSON"
+              },
+              {
+                "evidence": [
+                  "seg:1"
+                ],
+                "text": "Berlin",
+                "type": "LOCATION"
+              },
+              {
+                "evidence": [
+                  "seg:1"
+                ],
+                "text": "Siemens",
+                "type": "ORGANIZATION"
+              }
+            ],
+            "language": "German",
+            "speaker_name": "Angela Merkel"
+          }
+        }
+      }
+    ]
+  },
+  "done_reason": "stop"
+}

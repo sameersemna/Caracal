@@ -71,6 +71,7 @@ src/caracal/
   speakers/voiceprint.py match(embedding) -> list[VoiceMatch]; enroll(label, job_id, name)
   llm/client.py          LLMClient.call_tool(...), .chat(...)  (docs/04 §1)
   llm/jsonx.py           extract_json(text) -> dict  (fence/prose tolerant)
+  llm/schema.py          prepare_schema(model) (inline $refs, enum hints), coerce(value, schema) (measured necessity, docs/04 §1)
   llm/prompts/*.md       one prompt file per stage (loaded by name)
   search/base.py         SearchProvider protocol, SearchHit
   search/brave.py  search/exa.py  search/router.py (fallback + Redis cache)

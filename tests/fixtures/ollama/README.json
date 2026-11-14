@@ -1,0 +1,5 @@
+{
+  "transcript": "[seg:0 S1 00:00] Guten Abend, ich bin Angela Merkel.\n[seg:1 S1 00:04] Heute in Berlin sprechen wir mit Siemens über den Haushalt 2024.",
+  "system": "Only state what the evidence supports. Cite evidence ids. You MUST answer by calling the tool record_analysis exactly once.",
+  "model_schema_python": "Out(language: str, speaker_name: str|None, entities: list[Entity(text, type: person|org|place|date|other, evidence: list[str])], confidence: float 0..1)"
+}

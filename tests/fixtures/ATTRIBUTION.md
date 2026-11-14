@@ -8,3 +8,6 @@
 - `whisper/silence20.json` — 20 s of digital silence (0 segments; detected "en" at only 0.32).
 - `captions/talk_en_manual.vtt`, `captions/talk_en_auto.vtt` — the same talk's YouTube manual and auto (`en-orig`, word-timed, rolling) captions,
   trimmed to cues starting before 125 s. Same licence.
+- `ollama/*.json` — real responses of Ollama cloud `gemma4:31b` (2026-11-14) for the German test transcript in `ollama/README.json`:
+  tool call with pydantic `$defs` schema (invented field names, upper-case enums), tool call with inlined schema (correct fields, enum
+  synonyms such as `location`), `format:"json"` without tools (fenced JSON), `format:<schema>` without tools (ignored → markdown).

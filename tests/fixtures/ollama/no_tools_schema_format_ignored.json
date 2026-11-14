@@ -1,0 +1,8 @@
+{
+  "request_note": "recorded 2026-11-14 from ollama.com gemma4:31b",
+  "message": {
+    "role": "assistant",
+    "content": "```json\n{\n  \"language\": \"de\",\n  \"speaker_name\": \"Angela Merkel\",\n  \"entities\": [\n    {\n      \"text\": \"Angela Merkel\",\n      \"type\": \"Person\",\n      \"evidence\": \"ich bin Angela Merkel\"\n    },\n    {\n      \"text\": \"Berlin\",\n      \"type\": \"Location\",\n      \"evidence\": \"Heute in Berlin\"\n    },\n    {\n      \"text\": \"Siemens\",\n      \"type\": \"Organization\",\n      \"evidence\": \"sprechen wir mit Siemens\"\n    },\n    {\n      \"text\": \"2024\",\n      \"type\": \"Date\",\n      \"evidence\": \"Haushalt 2024\"\n    }\n  ],\n  \"confidence\": 1.0\n}\n```"
+  },
+  "done_reason": "stop"
+}

@@ -12,15 +12,25 @@ class LLMClient:
     async def chat(self, *, prompt: str, system: str, temperature: float = 0.3, max_tokens: int = 2048) -> str
 ```
 
+**Measured 2026-11-14 (cloud `gemma4:31b`, 5 + 12 trials):** with pydantic's default schema (`$defs`/`$ref`) the model invents field
+names and upper-cases enums; with the schema **inlined** it uses the right fields and cites evidence, but still emits enum *synonyms*
+(`location` for `place`, `PERSON`) — **0 / 17 raw outputs validated**. Inlining + enum lists in field descriptions + a **coercion pass**
+(case-insensitive enums + synonym map) → **12 / 12 valid on the first attempt** (2.2 s for 12 parallel calls). Local `gemma4:31b` fallback:
+same errors, 42.8 s cold start. Fixtures: `tests/fixtures/ollama/`.
+
 `call_tool` algorithm:
+0. **Schema preparation** (cached per model class): `model_json_schema()` → inline every `$ref` from `$defs`, drop `title`, append
+   `Must be exactly one of: a, b, c.` to the description of every `enum`/`Literal` field.
 1. POST `<root>/api/chat` of the primary endpoint (docs/02: cloud direct with bearer key if `OLLAMA_CLOUD_API_KEY`
    is set, else the local daemon with `LLM_LOCAL_PROXY_MODEL`) with `stream:false`, `keep_alive`, `options:{temperature, num_predict}`, and one tool
    `{"type":"function","function":{"name":tool_name,"description":..., "parameters": model_cls.model_json_schema()}}`.
    The system prompt ends with: `You MUST answer by calling the tool <tool_name> exactly once.`
-2. If `message.tool_calls[0].function.arguments` exists (a dict, or a JSON string → parse), validate with
-   `model_cls.model_validate`. Success → return.
-3. Otherwise (no tool call / validation error): **repair attempt** — send the previous assistant content plus the
-   validation error text, asking for corrected JSON only; parse with `llm/jsonx.extract_json` (strips ``` fences,
+2. If `message.tool_calls[0].function.arguments` exists (a dict, or a JSON string → parse): run the **coercion pass** guided by the
+   prepared schema — enums matched case-insensitively and through a synonym map (global defaults + per-call `synonyms`), numeric strings →
+   numbers, `"null"`/`""` → `None` for optional fields, a scalar → `[scalar]` where an array is expected, numbers clamped to
+   `minimum`/`maximum` — then `model_cls.model_validate`. Success → return (record `coerced: bool` in call metadata).
+3. Otherwise (no tool call / validation error): **repair attempt** — append the assistant message and a `role: "tool"` message with the
+   first 5 validation errors (`loc`, `msg`, no input values), asking to call the tool again; if the reply has no tool call, take its content parse with `llm/jsonx.extract_json` (strips ``` fences,
    finds the outermost `{...}`), validate. Max 2 repair attempts.
 4. Transport errors / 5xx / timeout → retry with backoff (1 s, 4 s). Two consecutive primary failures → use
    `LLM_FALLBACK_MODEL` on `OLLAMA_LOCAL_URL` for this call and log `llm.fallback`. HTTP 401/403 from the cloud is
