@@ -17,11 +17,20 @@ from typing import Any
 from caracal.pipeline.stages import JobOptions, Stage
 from caracal.storage import JobFiles
 from tests.contract.conftest import AUTH, Harness
+from tests.contract.test_api_report import _report
 
 URL = "https://example.com/talk"
 PROTOCOL_VERSION = "2026-07-28"
 REQUIRED_TOOLS = frozenset(
-    {"list_jobs", "get_job", "list_speakers", "enroll_speaker", "delete_speaker", "cancel_job"}
+    {
+        "list_jobs",
+        "get_job",
+        "get_report",
+        "list_speakers",
+        "enroll_speaker",
+        "delete_speaker",
+        "cancel_job",
+    }
 )
 
 
@@ -128,6 +137,7 @@ async def test_every_tool_returns_a_json_rpc_result_over_streamable_http(
     h = make_harness(settings_overrides={"CARACAL_ALLOWED_HOSTS": "testserver"})
     done_id = await _job(h, status="done")
     _write_diarize(h, done_id, {"S1": _unit(0.97)})
+    await h.repos.reports.put(done_id, _report(done_id).model_dump(mode="json"), "1.0")
     queued_id = await _job(h, status="queued")
     called: set[str] = set()
 
@@ -144,6 +154,11 @@ async def test_every_tool_returns_a_json_rpc_result_over_streamable_http(
             called.add("get_job")
             assert job["job_id"] == str(done_id)
             assert job["status"] == "done"
+
+            report = await _call(client, 31, "get_report", {"job_id": str(done_id)})
+            called.add("get_report")
+            assert report["summary"]["one_line"] == "A short talk."
+            assert report["quality"]["stages"] == {"assemble": "done"}
 
             empty = await _call(client, 4, "list_speakers", {})
             called.add("list_speakers")

@@ -44,6 +44,7 @@ from caracal.pipeline.stages import (
     m1_registry,
     m2_registry,
     stage_align,
+    stage_assemble,
     stage_chunk,
     stage_content,
     stage_diarize,
@@ -1037,6 +1038,104 @@ def test_m2_registry_wires_diarize_and_align_and_keeps_m1_stages() -> None:
     assert registry[Stage.ALIGN] is stage_align
     assert registry[Stage.TRANSCRIBE] is stage_transcribe
     assert registry[Stage.SUBTITLES] is stage_subtitles
+    assert registry[Stage.ASSEMBLE] is stage_assemble
+
+
+# --- T2.7 assemble ---------------------------------------------------------------------
+
+
+async def test_stage_assemble_writes_report_json_markdown_and_store(
+    make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    await repos.jobs.set_title(job.id, "TED talk")
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    transcript = _transcript(["hello world", "goodbye world"])
+    files.write_json(files.transcript_json, transcript.to_dict())
+    _write_output(
+        files,
+        Stage.NORMALIZE,
+        {
+            "probe": {"format_name": "webm", "sample_rate": 48000, "channels": 2},
+            "stats": {
+                "duration_s": 2.0,
+                "speech_ratio": 0.9,
+                "loudness_lufs": -18.0,
+                "quality": "good",
+                "silences": [],
+            },
+        },
+    )
+    _write_output(
+        files,
+        Stage.LANGID,
+        {
+            "languages": [
+                {
+                    "code": "en",
+                    "name": "English",
+                    "share": 1.0,
+                    "spans": [{"start": 0.0, "end": 2.0}],
+                    "confidence": 0.99,
+                }
+            ],
+            "caption_agreement": 0.9,
+            "caption_lang": "en",
+        },
+    )
+
+    result = await stage_assemble(_context(settings, repos, files, job_id=job.id))
+
+    assert result.status == "done"
+    assert set(result.output["sections"]) == {
+        "languages",
+        "speakers",
+        "chapters",
+        "topics",
+        "entities",
+        "key_quotes",
+        "claims",
+        "verification",
+        "translations",
+        "evidence_index",
+    }
+    assert result.output["sections"]["languages"] == 1
+    assert result.output["dropped_uncited"] == 0
+    assert isinstance(result.output["review_flags"], int)
+
+    stored = await repos.reports.get(job.id)
+    assert stored is not None
+    assert stored["schema_version"] == "1.0"
+    assert stored["source"]["title"] == "TED talk"
+    assert stored["quality"]["stages"]["assemble"] == "done"
+    assert files.report_json.is_file()
+    assert files.report_md.read_text(encoding="utf-8").startswith("# TED talk")
+
+
+async def test_stage_assemble_never_fails_because_a_section_is_missing(
+    make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+
+    result = await stage_assemble(_context(settings, repos, files, job_id=job.id))
+
+    assert result.status == "done"
+    stored = await repos.reports.get(job.id)
+    assert stored is not None
+    assert stored["languages"] == []
+    assert stored["summary"]["one_line"] == ""
+    assert stored["transcript_ref"] == {
+        "segments": 0,
+        "words": 0,
+        "links": stored["transcript_ref"]["links"],
+    }
 
 
 # --- T2.5 planner and content ----------------------------------------------------------

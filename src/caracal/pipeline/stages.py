@@ -31,7 +31,7 @@ from caracal.asr import (
     WhisperResult,
     Word,
 )
-from caracal.asr.captions import caption_agreement, parse_vtt
+from caracal.asr.captions import CaptionWord, caption_agreement, parse_vtt
 from caracal.asr.langid import languages_summary, refine_spans
 from caracal.asr.merge import merge_chunks
 from caracal.asr.whisper import WhisperClient
@@ -45,7 +45,9 @@ from caracal.ingest.direct import download_direct
 from caracal.ingest.ssrf import Resolver
 from caracal.llm.client import LLMClient
 from caracal.log import get_logger
-from caracal.report.model import Entity
+from caracal.report.assemble import assemble_report
+from caracal.report.model import SCHEMA_VERSION, Entity
+from caracal.report.render_md import render_markdown
 from caracal.speakers.align import assign_speakers, retime_outside_speech, speaker_stats
 from caracal.speakers.diarize import Diarizer, Turn
 from caracal.speakers.voiceprint import classify
@@ -1187,6 +1189,96 @@ async def stage_subtitles(ctx: StageContext) -> StageResult:
     return StageResult(status="done", output=output)
 
 
+def _transcript_if_present(ctx: StageContext) -> Transcript | None:
+    """The merged transcript, or ``None`` when transcription never produced one."""
+    if not ctx.files.transcript_json.is_file():
+        return None
+    return _load_transcript(ctx)
+
+
+async def _caption_words(ctx: StageContext) -> list[CaptionWord] | None:
+    """The platform caption words the ingest stage saved, if any (docs/04 §4)."""
+    ingest = await _stage_output(ctx, Stage.INGEST)
+    if ingest is None:
+        return None
+    for raw in _as_list(ingest.get("captions", []), "ingest"):
+        entry = _as_dict(raw, "ingest")
+        caption_path = _job_path(ctx, _as_str(entry.get("path"), "ingest"))
+        if caption_path.is_file():
+            return parse_vtt(caption_path.read_text(encoding="utf-8"))
+    return None
+
+
+def _section_counts(report: object) -> dict[str, int]:
+    """How many items each report section carries, for the assemble checkpoint."""
+    counts = {
+        "languages": len(cast("list[object]", getattr(report, "languages", []))),
+        "speakers": len(cast("list[object]", getattr(report, "speakers", []))),
+        "chapters": len(cast("list[object]", getattr(report, "chapters", []))),
+        "topics": len(cast("list[object]", getattr(report, "topics", []))),
+        "entities": len(cast("list[object]", getattr(report, "entities", []))),
+        "key_quotes": len(cast("list[object]", getattr(report, "key_quotes", []))),
+        "claims": len(cast("list[object]", getattr(report, "claims", []))),
+        "verification": len(cast("list[object]", getattr(report, "verification", []))),
+        "translations": len(cast("list[object]", getattr(report, "translations", []))),
+        "evidence_index": len(cast("dict[str, object]", getattr(report, "evidence_index", {}))),
+    }
+    return counts
+
+
+async def stage_assemble(ctx: StageContext) -> StageResult:
+    """Assemble, validate and persist the final report (docs/04 §9, T2.7).
+
+    Missing sections never fail the job: :func:`assemble_report` maps them to empty sections
+    and a recorded stage status. The report JSON is the source of truth for both front doors;
+    the Markdown rendering is written beside it and the JSON is stored through ``ReportRepo``.
+    """
+    job = await ctx.repos.jobs.get(ctx.job_id)
+    if job is None:
+        raise CaracalError(ErrorCode.NOT_FOUND, "job not found", {"job_id": str(ctx.job_id)})
+
+    checkpoints: dict[str, dict[str, object] | None] = {}
+    for stage in Stage:
+        checkpoints[stage.value] = await ctx.load(stage)
+    rows = await ctx.repos.jobs.list_stages(ctx.job_id)
+    statuses = {row.name: row.status for row in rows}
+    statuses[Stage.ASSEMBLE.value] = "done"
+
+    transcript = _transcript_if_present(ctx)
+    caption_words = await _caption_words(ctx)
+    report = assemble_report(
+        checkpoints,
+        job=job,
+        settings=ctx.settings,
+        transcript=transcript,
+        caption_words=caption_words,
+        stage_statuses=statuses,
+    )
+
+    payload = report.model_dump(mode="json")
+    ctx.files.write_json(ctx.files.report_json, payload)
+    ctx.files.write_text(ctx.files.report_md, render_markdown(report))
+    await ctx.repos.reports.put(ctx.job_id, payload, SCHEMA_VERSION)
+    sections = _section_counts(report)
+    logger.info(
+        "assemble complete",
+        extra={
+            "job_id": str(ctx.job_id),
+            "sections": sum(sections.values()),
+            "dropped_uncited": report.quality.dropped_uncited,
+            "review_flags": len(report.quality.review_flags),
+        },
+    )
+    return StageResult(
+        status="done",
+        output={
+            "sections": sections,
+            "dropped_uncited": report.quality.dropped_uncited,
+            "review_flags": len(report.quality.review_flags),
+        },
+    )
+
+
 async def _stub_stage(ctx: StageContext) -> StageResult:
     return StageResult(status="skipped", reason="not implemented in M0")
 
@@ -1220,11 +1312,12 @@ _M2_STAGES: dict[Stage, StageFn] = {
     Stage.IDENTITY: stage_identity,
     Stage.VERIFY: stage_verify,
     Stage.TRANSLATE: stage_translate,
+    Stage.ASSEMBLE: stage_assemble,
 }
 
 
 def m2_registry() -> dict[Stage, StageFn]:
-    """The production M2 registry: M1 plus diarization, alignment and voiceprint matching."""
+    """The production M2 registry: M1 plus diarization, content/identity and assembly."""
     return {stage: _M2_STAGES.get(stage, _m1_stub_stage) for stage in Stage}
 
 
@@ -1245,6 +1338,7 @@ __all__ = [
     "m1_registry",
     "m2_registry",
     "stage_align",
+    "stage_assemble",
     "stage_chunk",
     "stage_content",
     "stage_diarize",

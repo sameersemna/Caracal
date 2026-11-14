@@ -18,6 +18,7 @@ from mcp.client import Client
 from caracal.pipeline.stages import JobOptions, Stage
 from caracal.storage import JobFiles
 from tests.contract.conftest import AUTH, Harness
+from tests.contract.test_api_report import _report
 
 _URL = "https://example.com/talk"
 
@@ -49,6 +50,7 @@ AVAILABLE: tuple[Row, ...] = (
         ("get_transcript",),
     ),
     Row("cancel / delete", (("DELETE", "/v1/jobs/{job_id}"),), ("cancel_job",)),
+    Row("report", (("GET", "/v1/jobs/{job_id}/report"),), ("get_report",)),
     Row(
         "speakers",
         (
@@ -61,7 +63,6 @@ AVAILABLE: tuple[Row, ...] = (
 )
 
 PENDING: tuple[Row, ...] = (
-    Row("report", (("GET", "/v1/jobs/{job_id}/report"),), ("get_report",), "T2.7"),
     Row("translate", (("POST", "/v1/jobs/{job_id}/translate"),), ("translate_job",), "T3.3"),
     Row("ask", (("POST", "/v1/jobs/{job_id}/ask"),), ("ask_about_audio",), "T3.5"),
     Row("full-text search", (("GET", "/v1/search"),), ("search_transcripts",), "T3.5"),
@@ -146,6 +147,12 @@ async def _done_job(h: Harness) -> uuid.UUID:
     return job.id
 
 
+async def _stored_job(h: Harness) -> uuid.UUID:
+    job_id = await _done_job(h)
+    await h.repos.reports.put(job_id, _report(job_id).model_dump(mode="json"), "1.0")
+    return job_id
+
+
 async def _mcp_call(h: Harness, name: str, arguments: dict[str, Any]) -> Any:
     server = h.app.state.mcp_server
     async with Client(server) as client:
@@ -215,6 +222,18 @@ async def test_transcript_json_returns_equal_data(make_harness: Callable[..., Ha
     mcp = await _mcp_call(h, "get_transcript", {"job_id": str(job_id), "format": "json"})
     async with h.client() as client:
         rest = await client.get(f"/v1/jobs/{job_id}/transcript", headers=AUTH)
+
+    assert rest.status_code == 200
+    assert mcp.structured_content == rest.json()
+
+
+async def test_report_json_returns_equal_data(make_harness: Callable[..., Harness]) -> None:
+    h = make_harness()
+    job_id = await _stored_job(h)
+
+    mcp = await _mcp_call(h, "get_report", {"job_id": str(job_id)})
+    async with h.client() as client:
+        rest = await client.get(f"/v1/jobs/{job_id}/report", headers=AUTH)
 
     assert rest.status_code == 200
     assert mcp.structured_content == rest.json()

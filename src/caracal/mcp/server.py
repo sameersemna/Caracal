@@ -30,6 +30,8 @@ from caracal.api.schemas import (
 from caracal.config import Settings
 from caracal.errors import CaracalError
 from caracal.pipeline.stages import JobOptions
+from caracal.report.model import Report, ReportSummary
+from caracal.report.render_md import render_markdown
 from caracal.services import MAX_BASE64_DECODED_BYTES, JobService, ident_hash_for_mcp
 
 HTTP_INLINE_BASE64_BYTES = 750 * 1024
@@ -53,6 +55,7 @@ class AnalyzeResult(BaseModel):
     job_id: uuid.UUID
     status: str
     summary: AnalyzeSummary | None = None
+    report_summary: ReportSummary | None = None
     links: JobLinks | None = None
     progress: JobProgress | None = None
     hint: str | None = None
@@ -69,6 +72,14 @@ class TranscriptResult(RootModel[dict[str, Any]]):
     For ``format="json"`` the root *is* the transcript payload, identical to
     ``GET /v1/jobs/{id}/transcript``. Text/SRT/VTT formats use ``format``, ``lang`` and
     ``content`` keys.
+    """
+
+
+class ReportResult(RootModel[dict[str, Any]]):
+    """``get_report`` output: the report object (optionally filtered) or Markdown text.
+
+    A root model keeps ``structuredContent`` a JSON object for both formats, exactly like
+    :class:`TranscriptResult`; for ``format="json"`` the root is the same payload REST returns.
     """
 
 
@@ -192,10 +203,12 @@ def build_mcp(
                 summary = await service.analyze_summary(created.job_id)
             except CaracalError as exc:
                 raise _tool_error(exc) from exc
+            report_summary = await service.report_summary(created.job_id)
             return AnalyzeResult(
                 job_id=created.job_id,
                 status="done",
                 summary=summary,
+                report_summary=report_summary,
                 links=service.links(created.job_id),
             )
         return _pending(created.job_id, status)
@@ -232,6 +245,37 @@ def build_mcp(
             return await service.list_jobs(status, limit, cursor)
         except CaracalError as exc:
             raise _tool_error(exc) from exc
+
+    @server.tool(
+        description=(
+            "Read a finished job's evidence-backed audio intelligence report: source and "
+            "audio facts, languages, speakers, summary, context, chapters, topics, entities, "
+            "quotes, claims and quality flags. format=json returns the report object; pass "
+            "sections (a subset of top-level report keys such as summary, context, chapters, "
+            "entities) to return only those. format=markdown returns {format, content}. Use "
+            "it after get_job reports done; until the report is assembled it fails with "
+            "job_not_ready — poll get_job first."
+        )
+    )
+    async def get_report(
+        job_id: str,
+        sections: list[str] | None = None,
+        format: Literal["json", "markdown"] = "json",
+    ) -> ReportResult:
+        parsed = _job_uuid(job_id)
+        try:
+            report = await service.report(parsed)
+        except CaracalError as exc:
+            raise _tool_error(exc) from exc
+        if format == "markdown":
+            return ReportResult(root={"format": "markdown", "content": render_markdown(report)})
+        payload = report.model_dump(mode="json")
+        if sections is not None:
+            unknown = [name for name in sections if name not in Report.model_fields]
+            if unknown:
+                raise ToolError("invalid_input: unknown report section(s): " + ", ".join(unknown))
+            payload = {name: payload[name] for name in sections}
+        return ReportResult(root=payload)
 
     @server.tool(
         description=(
