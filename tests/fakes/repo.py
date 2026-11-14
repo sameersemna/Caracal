@@ -1,9 +1,10 @@
 """In-memory implementations of the repository protocols (docs/07 §4).
 
 These fakes are exercised by the *same* contract suite as the Postgres implementations in
-``tests/repo_contract.py``. Search results match on all query terms (the ``simple`` text-search
-configuration) and the limit is applied identically; only the *ranking order* is approximated,
-by counting matching terms, because reproducing ``ts_rank`` would duplicate Postgres internals.
+``tests/repo_contract.py``. Search results match on all query terms, except that ``OR``
+separates alternatives exactly as ``websearch_to_tsquery('simple', ...)`` does, and the limit
+and ``job_id`` filter are applied identically. Only the *ranking order* is approximated, by
+counting matching terms, because reproducing ``ts_rank`` would duplicate Postgres internals.
 """
 
 from __future__ import annotations
@@ -41,6 +42,8 @@ from caracal.errors import CaracalError, ErrorCode
 from tests.repo_contract import Repos
 
 _TOKEN_RE = re.compile(r"[a-z0-9_]+")
+_SEARCH_OR_RE = re.compile(r"\s+or\s+", re.IGNORECASE)
+_SEARCH_OPERATORS = frozenset({"or", "and", "not"})
 _ENDED_STAGE_STATUSES = frozenset({"done", "skipped", "failed"})
 _MAX_PAGE = 100
 
@@ -380,28 +383,44 @@ class FakeSegmentRepo:
             raise CaracalError(ErrorCode.NOT_FOUND, "job not found", {"job_id": str(job_id)})
         self._store.segments[job_id] = list(segments)
 
-    async def search(self, query: str, *, limit: int = 20) -> list[SearchHit]:
-        terms = _tokens(query)
-        if not terms:
+    async def search(
+        self,
+        query: str,
+        *,
+        job_id: uuid.UUID | None = None,
+        limit: int = 20,
+    ) -> list[SearchHit]:
+        # websearch_to_tsquery('simple', ...) treats ``OR`` as a disjunction and every other
+        # whitespace-separated term as a conjunction. Reproduce that shape, not its ranking.
+        groups = [
+            [term for term in _tokens(group) if term not in _SEARCH_OPERATORS]
+            for group in _SEARCH_OR_RE.split(query)
+        ]
+        groups = [group for group in groups if group]
+        if not groups:
             return []
         page_size = max(1, min(_MAX_PAGE, limit))
         hits: list[SearchHit] = []
-        for job_id, rows in self._store.segments.items():
-            job = self._store.jobs.get(job_id)
+        for owner_id, rows in self._store.segments.items():
+            if job_id is not None and owner_id != job_id:
+                continue
+            job = self._store.jobs.get(owner_id)
             if job is None:
                 continue
             for row in rows:
                 words = set(_tokens(row.text))
-                if not all(term in words for term in terms):
+                matched = [group for group in groups if all(term in words for term in group)]
+                if not matched:
                     continue
                 lowered = row.text.lower()
-                rank = float(sum(lowered.count(term) for term in terms))
+                rank = float(sum(lowered.count(term) for group in matched for term in group))
                 hits.append(
                     SearchHit(
-                        job_id=job_id,
+                        job_id=owner_id,
                         title=job.title,
                         seg_id=row.seg_id,
                         start_s=row.start_s,
+                        speaker=row.speaker,
                         text=row.text,
                         rank=rank,
                     )

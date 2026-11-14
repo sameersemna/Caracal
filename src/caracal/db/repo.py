@@ -113,6 +113,7 @@ class SearchHit:
     title: str | None
     seg_id: int
     start_s: float
+    speaker: str | None
     text: str
     rank: float
 
@@ -391,7 +392,13 @@ class SegmentRepo(Protocol):
 
     async def replace_for_job(self, job_id: uuid.UUID, segments: Sequence[SegmentRow]) -> None: ...
 
-    async def search(self, query: str, *, limit: int = 20) -> SearchHitList: ...
+    async def search(
+        self,
+        query: str,
+        *,
+        job_id: uuid.UUID | None = None,
+        limit: int = 20,
+    ) -> SearchHitList: ...
 
 
 class SpeakerRepo(Protocol):
@@ -763,7 +770,13 @@ class PostgresSegmentRepo:
             if rows:
                 await connection.execute(sa.insert(segments_table), rows)
 
-    async def search(self, query: str, *, limit: int = 20) -> SearchHitList:
+    async def search(
+        self,
+        query: str,
+        *,
+        job_id: uuid.UUID | None = None,
+        limit: int = 20,
+    ) -> SearchHitList:
         page_size = _clamp_limit(limit)
         tsquery = sa.func.websearch_to_tsquery("simple", query)
         rank = sa.func.ts_rank(segments_table.c.tsv, tsquery).label("rank")
@@ -773,6 +786,7 @@ class PostgresSegmentRepo:
                 jobs.c.title,
                 segments_table.c.seg_id,
                 segments_table.c.start_s,
+                segments_table.c.speaker,
                 segments_table.c.text,
                 rank,
             )
@@ -781,6 +795,8 @@ class PostgresSegmentRepo:
             .order_by(rank.desc(), segments_table.c.job_id, segments_table.c.seg_id)
             .limit(page_size)
         )
+        if job_id is not None:
+            statement = statement.where(segments_table.c.job_id == job_id)
         async with session_scope(self._engine) as connection:
             rows = (await connection.execute(statement)).mappings().all()
         return [
@@ -789,6 +805,7 @@ class PostgresSegmentRepo:
                 title=row["title"],
                 seg_id=row["seg_id"],
                 start_s=row["start_s"],
+                speaker=row["speaker"],
                 text=row["text"],
                 rank=float(row["rank"]),
             )

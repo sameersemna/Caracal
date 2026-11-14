@@ -41,3 +41,13 @@ upload directory is keyed by the storage id stored in `uploads.path` and that co
 **Evidence:** docs/01 §3 one-liner vs card 19 requirement 3 and requirement 4; the implemented module exposes `classify`, `enroll`, `EnrollmentDeps` and no `match()`.
 
 **Suggested resolution:** update the docs/01 §3 row to `classify(similarity, settings); enroll(deps, job_id, label, name, notes)` and state that the stage performs the `nearest(k=3)` search, or reword it as prose (the module's public API is what the card binds).
+
+## 2026-11-14 T3.5 — `GET /v1/search` is an object with `speaker`, not the bare list in docs/03 §2
+
+**What:** docs/03 §2's REST table returns a bare list `[{"job_id","title","seg_id","start","text","rank"}]`, while docs/03 §3 requires every MCP tool to return a JSON object and round-38 card T3.5 §4 explicitly specifies `{"items": [{job_id, title, seg_id, start, speaker, text, rank}]}` for REST and MCP alike.
+
+**Where:** docs/03 §2 (`GET /v1/search` row); `src/caracal/api/routes.py`, `src/caracal/api/schemas.py`.
+
+**Evidence:** card 38 requirement 4 ("object, not list") and docs/03 §3 ("Every tool returns a JSON object ... structuredContent must be an object"); the implemented response is `SearchResults{items: [SearchItem]}`.
+
+**Suggested resolution:** update the docs/03 §2 row to the object shape and add `speaker` to the item fields.

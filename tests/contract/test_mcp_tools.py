@@ -18,12 +18,14 @@ from typing import Any
 import pytest
 from mcp.client import Client
 
+from caracal.db.repo import SegmentRow
 from caracal.mcp.server import build_mcp
 from caracal.pipeline.stages import JobOptions, Stage
 from caracal.queue import publish_event
 from caracal.services import JobService
 from caracal.storage import JobFiles
 from tests.contract.conftest import AUTH, Harness
+from tests.contract.test_api_qa_search import _ScriptedLlm
 from tests.contract.test_api_report import _report
 
 URL = "https://example.com/talk"
@@ -162,6 +164,8 @@ async def test_every_registered_tool_declares_an_object_output_schema(
         "get_transcript",
         "get_report",
         "translate_job",
+        "ask_about_audio",
+        "search_transcripts",
         "list_speakers",
         "enroll_speaker",
         "delete_speaker",
@@ -652,3 +656,105 @@ async def test_speaker_tool_descriptions_state_the_biometric_consent_rule(
     for name in ("list_speakers", "enroll_speaker", "delete_speaker"):
         assert "biometric" in descriptions[name].lower(), name
         assert "consent" in descriptions[name].lower(), name
+
+
+async def _qa_job(
+    h: Harness,
+    *,
+    status: str = "done",
+    texts: list[str] | None = None,
+    title: str = "A talk",
+) -> uuid.UUID:
+    record = await h.repos.jobs.create(
+        source_kind="platform",
+        source_url=URL,
+        title=title,
+        options=JobOptions().model_dump(),
+    )
+    if status != "queued":
+        await h.repos.jobs.set_status(record.id, status)
+    if status == "done":
+        await h.repos.reports.put(record.id, _report(record.id).model_dump(mode="json"), "1.0")
+    await h.repos.segments.replace_for_job(
+        record.id,
+        [
+            SegmentRow(record.id, index, float(index), float(index) + 1.0, "S1", "en", text)
+            for index, text in enumerate(texts or ["stress one", "stress two", "stress three"])
+        ],
+    )
+    return record.id
+
+
+async def test_ask_about_audio_returns_a_cited_answer(
+    make_harness: Callable[..., Harness],
+) -> None:
+    h = make_harness()
+    job_id = await _qa_job(h)
+    service = _service(h)
+    service.llm = _ScriptedLlm(
+        answer={
+            "answer": "The talk is about stress.",
+            "confidence": 0.9,
+            "citations": [{"seg_id": "seg:1"}],
+        },
+    )
+
+    async with Client(build_mcp(service, h.settings)) as client:
+        result = await client.call_tool(
+            "ask_about_audio",
+            {"job_id": str(job_id), "question": "stress"},
+        )
+
+    assert result.is_error is False
+    payload = result.structured_content
+    assert payload is not None
+    assert payload["answer"] == "The talk is about stress."
+    assert payload["citations"] == [{"seg_id": "seg:1", "start": 1.0, "text": "stress two"}]
+    assert payload["evidence"] == ["seg:1"]
+
+
+async def test_search_transcripts_returns_an_object_of_done_jobs(
+    make_harness: Callable[..., Harness],
+) -> None:
+    h = make_harness()
+    done_id = await _qa_job(h, texts=["stress alpha", "stress beta"], title="Finished")
+    await _qa_job(h, status="running", texts=["stress ignored"], title="Running")
+
+    async with Client(build_mcp(_service(h), h.settings)) as client:
+        result = await client.call_tool("search_transcripts", {"query": "stress", "limit": 20})
+
+    assert result.is_error is False
+    payload = result.structured_content
+    assert payload is not None
+    assert set(payload) == {"items"}
+    assert {item["job_id"] for item in payload["items"]} == {str(done_id)}
+    assert payload["items"][0]["speaker"] == "S1"
+    assert payload["items"][0]["rank"] > 0
+
+
+async def test_qa_tools_return_mcp_errors_for_invalid_requests(
+    make_harness: Callable[..., Harness],
+) -> None:
+    h = make_harness()
+    queued_id = await _qa_job(h, status="queued")
+
+    async with Client(build_mcp(_service(h), h.settings)) as client:
+        not_ready = await client.call_tool(
+            "ask_about_audio",
+            {"job_id": str(queued_id), "question": "stress"},
+        )
+        too_long = await client.call_tool(
+            "ask_about_audio",
+            {"job_id": str(queued_id), "question": "x" * 1001},
+        )
+        blank = await client.call_tool("search_transcripts", {"query": "   "})
+        bad_limit = await client.call_tool("search_transcripts", {"query": "stress", "limit": 0})
+
+    assert not_ready.is_error is True
+    assert "job_not_ready" in _text(not_ready)
+    assert too_long.is_error is True
+    assert "invalid_input" in _text(too_long)
+    assert blank.is_error is True
+    assert "invalid_input" in _text(blank)
+    assert bad_limit.is_error is True
+    assert "invalid_input" in _text(bad_limit)

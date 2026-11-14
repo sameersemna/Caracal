@@ -24,6 +24,7 @@ from caracal.api.schemas import (
     JobSourceIn,
     JobStatus,
     KnownSpeaker,
+    SearchResults,
     SpeakerDeleted,
     SpeakerList,
     TranslateQueued,
@@ -31,7 +32,7 @@ from caracal.api.schemas import (
 from caracal.config import Settings
 from caracal.errors import CaracalError
 from caracal.pipeline.stages import JobOptions
-from caracal.report.model import Report, ReportSummary
+from caracal.report.model import Answer, Report, ReportSummary
 from caracal.report.render_md import render_markdown
 from caracal.services import MAX_BASE64_DECODED_BYTES, JobService, ident_hash_for_mcp
 
@@ -325,6 +326,44 @@ def build_mcp(
         parsed = _job_uuid(job_id)
         try:
             return await service.translate_job(parsed, target_langs)
+        except CaracalError as exc:
+            raise _tool_error(exc) from exc
+
+    @server.tool(
+        description=(
+            "Answer a question about one finished analysis job. Give the job_id and a "
+            "question (at most 1000 characters); the answer is returned in the language of "
+            "the question with citations into the job's transcript, each carrying the real "
+            "segment id, start time and text. It searches the job's transcript, widening the "
+            "search with transcript-language keywords when the literal match is thin, and "
+            "always includes the report summary/context and chapter titles as background. If "
+            "the transcript does not support an answer it returns exactly 'Not found in the "
+            "audio.' with confidence 0. The job must be done; before that it fails with "
+            "job_not_ready — poll get_job first."
+        )
+    )
+    async def ask_about_audio(job_id: str, question: str) -> Answer:
+        parsed = _job_uuid(job_id)
+        try:
+            return await service.ask_about_audio(parsed, question)
+        except CaracalError as exc:
+            raise _tool_error(exc) from exc
+
+    @server.tool(
+        description=(
+            "Full-text search across the transcripts of every finished job (Postgres "
+            "full-text, websearch syntax such as quoted phrases or OR). Use it to find which "
+            "recording mentioned a term before creating a new job; an empty query is "
+            "invalid. Returns an object with items, each carrying job_id, title, seg_id, "
+            "start, speaker, text and rank; results come only from done jobs. limit is 1-50 "
+            "(default 20)."
+        )
+    )
+    async def search_transcripts(query: str, limit: int = 20) -> SearchResults:
+        if not 1 <= limit <= 50:
+            raise ToolError("invalid_input: limit must be between 1 and 50")
+        try:
+            return await service.search_transcripts(query, limit)
         except CaracalError as exc:
             raise _tool_error(exc) from exc
 

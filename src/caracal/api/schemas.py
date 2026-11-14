@@ -251,3 +251,33 @@ class SpeakerDeleted(BaseModel):
 
     deleted: bool = True
     voiceprints_removed: int
+
+
+class AskIn(BaseModel):
+    """The ``POST /v1/jobs/{id}/ask`` body (docs/03 §2, docs/04 §12)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    question: str = Field(min_length=1, max_length=1000)
+
+
+class SearchItem(BaseModel):
+    """One transcript search hit, with the owning job and its speaker (docs/03 §2)."""
+
+    job_id: uuid.UUID
+    title: str | None = None
+    seg_id: int
+    start: float
+    speaker: str | None = None
+    text: str
+    rank: float
+
+
+class SearchResults(BaseModel):
+    """``GET /v1/search`` and MCP ``search_transcripts`` output.
+
+    A wrapper object, not a bare array: MCP ``structuredContent`` must be a JSON object, so
+    REST and MCP serialise identically (docs/03 §3).
+    """
+
+    items: list[SearchItem]

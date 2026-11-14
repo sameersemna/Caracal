@@ -14,9 +14,11 @@ import uuid
 from collections.abc import Callable
 from typing import Any
 
+from caracal.db.repo import SegmentRow
 from caracal.pipeline.stages import JobOptions, Stage
 from caracal.storage import JobFiles
 from tests.contract.conftest import AUTH, Harness
+from tests.contract.test_api_qa_search import _ScriptedLlm
 from tests.contract.test_api_report import _report
 
 URL = "https://example.com/talk"
@@ -27,6 +29,8 @@ REQUIRED_TOOLS = frozenset(
         "get_job",
         "get_report",
         "translate_job",
+        "ask_about_audio",
+        "search_transcripts",
         "list_speakers",
         "enroll_speaker",
         "delete_speaker",
@@ -140,6 +144,23 @@ async def test_every_tool_returns_a_json_rpc_result_over_streamable_http(
     _write_diarize(h, done_id, {"S1": _unit(0.97)})
     await h.repos.reports.put(done_id, _report(done_id).model_dump(mode="json"), "1.0")
     queued_id = await _job(h, status="queued")
+    for job_id, status in ((done_id, "done"), (queued_id, "queued")):
+        await h.repos.segments.replace_for_job(
+            job_id,
+            [
+                SegmentRow(job_id, index, float(index), float(index) + 1.0, "S1", "en", text)
+                for index, text in enumerate(
+                    ["stress one", "stress two", "stress three"] if status == "done" else ["stress ignored"]
+                )
+            ],
+        )
+    h.app.state.service.llm = _ScriptedLlm(
+        answer={
+            "answer": "The talk is about stress.",
+            "confidence": 0.9,
+            "citations": [{"seg_id": "seg:0"}],
+        },
+    )
     called: set[str] = set()
 
     async with h.app.router.lifespan_context(h.app):
@@ -170,6 +191,25 @@ async def test_every_tool_returns_a_json_rpc_result_over_streamable_http(
             called.add("translate_job")
             assert translated["job_id"] == str(done_id)
             assert translated["status"] == "queued"
+
+            answered = await _call(
+                client,
+                33,
+                "ask_about_audio",
+                {"job_id": str(done_id), "question": "stress"},
+            )
+            called.add("ask_about_audio")
+            assert answered["answer"] == "The talk is about stress."
+            assert answered["citations"] == [{"seg_id": "seg:0", "start": 0.0, "text": "stress one"}]
+
+            found = await _call(
+                client,
+                34,
+                "search_transcripts",
+                {"query": "stress", "limit": 20},
+            )
+            called.add("search_transcripts")
+            assert {item["job_id"] for item in found["items"]} == {str(done_id)}
 
             empty = await _call(client, 4, "list_speakers", {})
             called.add("list_speakers")

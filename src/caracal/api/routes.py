@@ -18,11 +18,12 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from python_multipart.multipart import parse_options_header
 
 from caracal.api.auth import bearer_token, require_auth
-from caracal.api.schemas import EnrollSpeakerIn, JobCreate, SpeakerList, TranslateIn
+from caracal.api.schemas import AskIn, EnrollSpeakerIn, JobCreate, SearchResults, SpeakerList, TranslateIn
 from caracal.db.tables import JOB_TERMINAL_STATUSES
 from caracal.errors import CaracalError, ErrorCode
 from caracal.ingest.upload import MultipartFileStream
 from caracal.log import get_logger
+from caracal.report.model import Answer
 from caracal.services import JobService
 
 if TYPE_CHECKING:
@@ -206,6 +207,12 @@ async def translate_job(job_id: uuid.UUID, payload: TranslateIn, request: Reques
     return JSONResponse(status_code=202, content=result.model_dump(mode="json"))
 
 
+@router.post("/jobs/{job_id}/ask")
+async def ask_about_audio(job_id: uuid.UUID, payload: AskIn, request: Request) -> Answer:
+    """Answer a question about a finished job, with transcript citations (docs/03 §2)."""
+    return await _service(request).ask_about_audio(job_id, payload.question)
+
+
 async def job_event_stream(
     settings: Settings,
     deps: AppDeps,
@@ -311,6 +318,16 @@ async def delete_speaker(speaker_id: uuid.UUID, request: Request) -> Response:
     """Delete a known speaker and every voiceprint it owns (docs/03 §2, docs/06 §2)."""
     await _service(request).delete_speaker(speaker_id)
     return Response(status_code=204)
+
+
+@router.get("/search")
+async def search_transcripts(
+    request: Request,
+    q: str = Query(..., min_length=1),
+    limit: int = Query(default=20, ge=1, le=50),
+) -> SearchResults:
+    """Full-text search across every finished job's transcript (docs/03 §2)."""
+    return await _service(request).search_transcripts(q, limit)
 
 
 @public_router.get("/healthz")

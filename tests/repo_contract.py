@@ -418,6 +418,35 @@ async def case_segments_replace_and_search(repos: Repos) -> None:
     await expect_error(ErrorCode.NOT_FOUND, repos.segments.replace_for_job(uuid.uuid4(), []))
 
 
+async def case_segments_search_job_filter_and_speaker(repos: Repos) -> None:
+    first = await repos.jobs.create(source_kind="direct", title="First job", options={})
+    second = await repos.jobs.create(source_kind="direct", title="Second job", options={})
+    await repos.segments.replace_for_job(
+        first.id,
+        [
+            SegmentRow(first.id, 0, 0.0, 1.0, "S1", "en", "alpha shared"),
+            SegmentRow(first.id, 1, 1.0, 2.0, None, "en", "alpha other"),
+        ],
+    )
+    await repos.segments.replace_for_job(
+        second.id,
+        [SegmentRow(second.id, 0, 0.0, 1.0, "S2", "en", "alpha shared elsewhere")],
+    )
+
+    everything = await repos.segments.search("alpha")
+    assert {hit.job_id for hit in everything} == {first.id, second.id}
+
+    filtered = await repos.segments.search("alpha", job_id=first.id)
+    assert [hit.seg_id for hit in filtered] == [0, 1]
+    assert {hit.job_id for hit in filtered} == {first.id}
+    assert {hit.title for hit in filtered} == {"First job"}
+    assert [hit.speaker for hit in filtered] == ["S1", None]
+
+    limited = await repos.segments.search("alpha", job_id=first.id, limit=1)
+    assert len(limited) == 1
+    assert await repos.segments.search("alpha", job_id=uuid.uuid4()) == []
+
+
 def _embedding(*head: float) -> list[float]:
     """A 256-d vector whose leading components are ``head`` and whose rest is zero."""
     vector = [0.0] * 256
@@ -566,6 +595,7 @@ CASES: tuple[Callable[[Repos], Awaitable[None]], ...] = (
     case_upload_create_honours_the_given_id,
     case_report_upsert,
     case_segments_replace_and_search,
+    case_segments_search_job_filter_and_speaker,
     case_speaker_name_normalisation_merges,
     case_speaker_nearest_best_per_speaker,
     case_speaker_delete_cascades_and_counts,
