@@ -344,7 +344,10 @@ class LLMClient:
         original = arguments
         coerced_value = coerce(arguments, prepared, synonyms=synonyms)
         try:
-            value = model_cls.model_validate(coerced_value)
+            # Aliased fields arrive under their wire name (the LLM-facing name) and the
+            # coercion pass only knows that name, so accept both the alias and the field
+            # name (docs/04 §1: pydantic aliases are the escape hatch for reserved names).
+            value = model_cls.model_validate(coerced_value, by_alias=True, by_name=True)
         except ValidationError as exc:
             raise _InvalidOutput(_validation_errors(exc)) from exc
         return value, coerced_value != original
