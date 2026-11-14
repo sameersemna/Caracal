@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from collections.abc import Callable
 from typing import Any
 
 import pytest
 
-from caracal.cli import main
-from caracal.config import get_settings
+from caracal.cli import _run_worker, main
+from caracal.config import Settings, get_settings
+from caracal.db.repo import PostgresJobRepo
 from caracal.log import get_logger
 
 SUBCOMMANDS = ("serve", "worker", "mcp-stdio", "migrate", "doctor")
@@ -32,7 +35,7 @@ def test_help_lists_all_subcommands(capsys: pytest.CaptureFixture[str]) -> None:
         assert name in captured.out
 
 
-@pytest.mark.parametrize("command", ["serve", "worker", "mcp-stdio"])
+@pytest.mark.parametrize("command", ["serve", "mcp-stdio"])
 def test_unimplemented_subcommands_exit_two_with_stderr_message(
     command: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -40,6 +43,72 @@ def test_unimplemented_subcommands_exit_two_with_stderr_message(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == f"{command}: available from a later milestone\n"
+
+
+def test_worker_command_runs_the_worker(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _set_required(monkeypatch)
+    calls: list[Settings] = []
+
+    async def fake_run_worker(settings: Settings) -> int:
+        calls.append(settings)
+        return 0
+
+    monkeypatch.setattr("caracal.cli._run_worker", fake_run_worker)
+
+    assert main(["worker"]) == 0
+    assert len(calls) == 1
+    assert calls[0].CARACAL_PORT == 11404
+    assert capsys.readouterr().out == ""
+
+
+def test_run_worker_builds_datastores_and_stops_cleanly(
+    make_settings: Callable[..., Settings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = make_settings()
+
+    class FakeRedis:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    class FakeEngine:
+        def __init__(self) -> None:
+            self.disposed = False
+
+        async def dispose(self) -> None:
+            self.disposed = True
+
+    built: dict[str, Any] = {}
+
+    class FakeWorker:
+        def __init__(self, settings: Settings, redis: Any, repos: Any) -> None:
+            self.worker_id = "fake-worker"
+            built["settings"] = settings
+            built["redis"] = redis
+            built["repos"] = repos
+
+        async def run(self, stop: asyncio.Event) -> None:
+            built["ran"] = True
+            stop.set()
+
+    fake_redis = FakeRedis()
+    fake_engine = FakeEngine()
+    monkeypatch.setattr("caracal.cli.redis_asyncio.from_url", lambda url: fake_redis)
+    monkeypatch.setattr("caracal.cli.make_engine", lambda settings: fake_engine)
+    monkeypatch.setattr("caracal.cli.Worker", FakeWorker)
+
+    assert asyncio.run(_run_worker(settings)) == 0
+
+    assert built["ran"] is True
+    assert built["settings"] is settings
+    assert built["redis"] is fake_redis
+    assert isinstance(built["repos"].jobs, PostgresJobRepo)
+    assert fake_redis.closed is True
+    assert fake_engine.disposed is True
 
 
 def test_no_command_prints_usage_and_exits_two(capsys: pytest.CaptureFixture[str]) -> None:

@@ -146,6 +146,7 @@ def test_defaults_match_docs_02(make_settings: MakeSettings) -> None:
     assert settings.VOICEPRINT_CANDIDATE_THRESHOLD == pytest.approx(0.55)
     assert settings.SEARCH_MAX_QUERIES_PER_JOB == 24
     assert settings.SEARCH_CACHE_TTL_S == 86400
+    assert settings.CARACAL_RATE_LIMIT_PER_MIN == 30
     assert settings.CARACAL_WORKER_CONCURRENCY == 2
     assert settings.CARACAL_JOB_TIMEOUT_S == 10800
     assert settings.CARACAL_MAX_UPLOAD_MB == 2048
@@ -259,6 +260,14 @@ def test_unknown_database_scheme_is_rejected(make_settings: MakeSettings, scheme
 
 def test_db_schema_defaults_to_public(make_settings: MakeSettings) -> None:
     assert make_settings().CARACAL_DB_SCHEMA == "public"
+
+
+def test_rate_limit_per_min_is_read_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CARACAL_API_TOKEN", "e" * 32)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@h:5432/caracal")
+    monkeypatch.setenv("REDIS_URL", "redis://:p@h:6379/0")
+    monkeypatch.setenv("CARACAL_RATE_LIMIT_PER_MIN", "12")
+    assert Settings(_env_file=None).CARACAL_RATE_LIMIT_PER_MIN == 12
 
 
 @pytest.mark.parametrize(
