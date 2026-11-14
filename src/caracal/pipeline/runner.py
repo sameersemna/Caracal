@@ -17,6 +17,7 @@ from caracal.config import Settings
 from caracal.db.tables import JOB_TERMINAL_STATUSES
 from caracal.errors import CaracalError, ErrorCode
 from caracal.ingest.ssrf import Resolver
+from caracal.llm.client import LLMClient
 from caracal.pipeline.stages import (
     CRITICAL_STAGES,
     JobOptions,
@@ -57,6 +58,7 @@ class RunnerDeps:
     # Process-wide stage clients, built once by the worker (docs/01 §4). They stay optional
     # so the M0 stub registry can run without any network-capable objects.
     whisper: WhisperClient | None = None
+    llm: LLMClient | None = None
     diarizer: Diarizer | None = None
     resolver: Resolver | None = None
     redis: Redis | None = None
@@ -183,6 +185,7 @@ async def run_pipeline(
         load=load,
         progress=progress,
         whisper=deps.whisper,
+        llm=deps.llm,
         diarizer=deps.diarizer,
         resolver=deps.resolver,
         redis=deps.redis,

@@ -60,6 +60,17 @@ def text_message(content: str) -> dict[str, Any]:
     return {"role": "assistant", "content": content}
 
 
+def json_message(arguments: object, *, fenced: bool = False) -> dict[str, Any]:
+    """An assistant text message carrying JSON (optionally inside a ```json fence)."""
+    payload = json.dumps(arguments, ensure_ascii=False)
+    return text_message(f"```json\n{payload}\n```" if fenced else payload)
+
+
+def json_response(arguments: object, *, fenced: bool = False) -> httpx.Response:
+    """The JSON-mode reply gemma4 returns: a JSON object in the message content."""
+    return message_response(json_message(arguments, fenced=fenced))
+
+
 def message_response(message: dict[str, Any], *, status_code: int = 200) -> httpx.Response:
     return httpx.Response(status_code, json={"message": message, "done": True})
 
@@ -134,6 +145,8 @@ __all__ = [
     "FakeOllama",
     "error_response",
     "fixture_response",
+    "json_message",
+    "json_response",
     "load_fixture",
     "message_response",
     "text_message",

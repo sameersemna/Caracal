@@ -20,7 +20,7 @@ from typing import Any
 import httpx
 import pytest
 from tests.fakes.diarizer import FakeDiarizer
-from tests.fakes.ollama import FakeOllama, message_response, tool_call_message
+from tests.fakes.ollama import FakeOllama, json_response
 from tests.fakes.redis import RecordingRedis
 from tests.fakes.repo import make_fake_repos
 from tests.fakes.resolver import FakeResolver
@@ -1204,7 +1204,7 @@ async def test_stage_content_writes_a_content_checkpoint_with_llm_meta(
             "confidence": 0.7,
         },
     }
-    fake = FakeOllama([message_response(tool_call_message(arguments, name="record_content"))])
+    fake = FakeOllama([json_response(arguments)])
     http = httpx.AsyncClient(transport=fake.transport())
     client = LLMClient(settings, http)
     try:
@@ -1213,6 +1213,8 @@ async def test_stage_content_writes_a_content_checkpoint_with_llm_meta(
         await http.aclose()
 
     assert result.status == "done"
+    assert fake.body()["format"] == "json"
+    assert "tools" not in fake.body()
     summary = result.output["summary"]
     assert isinstance(summary, dict)
     assert summary["one_line"] == "Two short lines."

@@ -1,10 +1,13 @@
 """Evidence-cited content analysis with map-reduce over long transcripts (docs/04 §6).
 
 The LLM sees the transcript as citable lines (``[seg:12] S2 03:14.2 | text``) and metadata as
-``[meta:title] ...``, so every item it returns can be checked against an artifact. Everything
-deterministic happens here: window splitting, entity de-duplication, chapter time validation
-and quote fuzzy-matching. Items whose evidence does not resolve are dropped before the
-report is ever assembled (the citation validator runs again there).
+``[meta:title] ...``, so every item it returns can be checked against an artifact. Every call
+uses JSON mode: the measured gemma4 behaviour makes big multi-section tool calls incomplete or
+empty (docs/04 §1). When a section the transcript supports comes back empty, one sub-schema
+call asks for only the missing sections and merges them. Everything deterministic happens
+here: window splitting, entity de-duplication, chapter time derivation and quote
+fuzzy-matching. Items whose evidence does not resolve are dropped before the report is ever
+assembled (the citation validator runs again there).
 """
 
 from __future__ import annotations
@@ -18,12 +21,12 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, create_model
 
 from caracal.analysis import AnalysisOptions, Depth
 from caracal.asr import Segment, Transcript
 from caracal.config import Settings
-from caracal.llm.client import CallMeta, LLMClient, ToolResult
+from caracal.llm.client import CallMeta, LLMClient, Mode, ToolResult
 from caracal.llm.prompts import load_prompt, render_metadata, render_transcript_lines, wrap_data
 from caracal.report.evidence import normalise_ids
 from caracal.report.model import (
@@ -39,10 +42,16 @@ from caracal.report.model import (
 )
 
 _QUOTE_MATCH_RATIO: Final = 0.85
-_CHAPTER_TOLERANCE_S: Final = 2.0
 _QUICK_CLAIMS: Final = 0
 _STANDARD_CLAIMS: Final = 8
 _DEEP_CLAIMS: Final = 15
+_COMPLETENESS_MIN_SEGMENTS: Final = 20
+_COMPLETENESS_SECTIONS: Final[tuple[str, ...]] = ("chapters", "entities", "claims", "topics")
+_REASK_NOTE: Final = (
+    "\n\n## Missing sections\n\n"
+    "These sections are still missing: {sections}. Record only them; the response schema "
+    "contains just those fields."
+)
 
 
 class _LlmSummary(BaseModel):
@@ -69,12 +78,14 @@ class _LlmContext(BaseModel):
 
 
 class _LlmChapter(BaseModel):
+    """A chapter addressed by segment ids; times are derived from those segments."""
+
     model_config = ConfigDict(extra="ignore")
 
-    start: float | None = None
-    end: float | None = None
     title: str = ""
     summary: str = ""
+    first_seg: str | None = None
+    last_seg: str | None = None
     evidence: list[str] = Field(default_factory=list)
 
 
@@ -98,13 +109,13 @@ class _LlmEntity(BaseModel):
 
 
 class _LlmKeyQuote(BaseModel):
+    """A quote addressed by segment ids only; the time comes from the first cited segment."""
+
     model_config = ConfigDict(extra="ignore")
 
     text: str
-    seg_id: str | None = None
     seg_ids: list[str] = Field(default_factory=list)
     speaker: str | None = None
-    start: float | None = None
     why_notable: str = ""
     evidence: list[str] = Field(default_factory=list)
 
@@ -159,6 +170,8 @@ class ContentLlmMeta(BaseModel):
     coerced: bool = False
     fallback_used: bool = False
     duration_s: float = 0.0
+    completeness: dict[str, int] = Field(default_factory=dict)
+    reasked: list[str] = Field(default_factory=list)
 
 
 class ContentAnalysis(BaseModel):
@@ -232,6 +245,42 @@ def _claim_limit(depth: Depth) -> int:
     return _STANDARD_CLAIMS
 
 
+def _missing_sections(
+    analysis: ContentAnalysis,
+    depth: Depth,
+    segment_count: int,
+) -> list[str]:
+    """Sections the transcript supports but the answer left empty (docs/04 §1, card 25)."""
+    if depth == "quick" or segment_count < _COMPLETENESS_MIN_SEGMENTS:
+        return []
+    return [name for name in _COMPLETENESS_SECTIONS if not getattr(analysis, name)]
+
+
+def _completeness(analysis: ContentAnalysis) -> dict[str, int]:
+    return {name: len(getattr(analysis, name)) for name in _COMPLETENESS_SECTIONS}
+
+
+_MISSING_FIELD_TYPES: dict[str, Any] = {
+    "chapters": list[_LlmChapter],
+    "entities": list[_LlmEntity],
+    "claims": list[_LlmClaim],
+    "topics": list[_LlmTopic],
+}
+_MISSING_MODELS: dict[tuple[str, ...], type[BaseModel]] = {}
+
+
+def _missing_model(sections: Sequence[str]) -> type[BaseModel]:
+    """A cached model containing only the requested sections (the completeness sub-schema)."""
+    key = tuple(sections)
+    cached = _MISSING_MODELS.get(key)
+    if cached is not None:
+        return cached
+    fields: dict[str, Any] = {name: (_MISSING_FIELD_TYPES[name], Field(default_factory=list)) for name in key}
+    model = create_model("LlmMissingSections", __config__=ConfigDict(extra="ignore"), **fields)
+    _MISSING_MODELS[key] = model
+    return model
+
+
 def _chapter_guidance(depth: Depth) -> str:
     if depth == "deep":
         return "Start a new chapter every 2-4 minutes."
@@ -267,29 +316,35 @@ def _context(value: _LlmContext, scope: _EvidenceScope) -> Context:
     )
 
 
+def _segment_ref(scope: _EvidenceScope, raw: str | None) -> Segment | None:
+    """The segment a model-supplied id points at, or ``None`` when it does not resolve."""
+    if not raw:
+        return None
+    cited = scope.cited_segments(scope.valid([raw]))
+    return cited[0] if cited else None
+
+
 def _chapters(
     values: Sequence[_LlmChapter],
     scope: _EvidenceScope,
     duration: float,
 ) -> list[Chapter]:
+    """Derive chapter times from ``first_seg``/``last_seg``; the model never supplies times."""
     chapters: list[Chapter] = []
     for value in values:
-        ids = scope.valid(value.evidence)
+        ids = scope.valid([*value.evidence, value.first_seg or "", value.last_seg or ""])
         cited = scope.cited_segments(ids)
         if not cited:
             continue
-        derived_start = min(segment.start for segment in cited)
-        derived_end = max(segment.end for segment in cited)
-        start = value.start if isinstance(value.start, (int, float)) else derived_start
-        end = value.end if isinstance(value.end, (int, float)) else derived_end
-        if abs(float(start) - derived_start) > _CHAPTER_TOLERANCE_S:
-            start = derived_start
-        if abs(float(end) - derived_end) > _CHAPTER_TOLERANCE_S:
-            end = derived_end
+        first = _segment_ref(scope, value.first_seg) or min(cited, key=lambda segment: segment.start)
+        last = _segment_ref(scope, value.last_seg) or max(cited, key=lambda segment: segment.end)
+        start, end = first.start, last.end
+        if end <= start:
+            # Reversed or identical ids: fall back to the span the cited segments cover.
+            start = min(segment.start for segment in cited)
+            end = max(segment.end for segment in cited)
         start = min(max(float(start), 0.0), duration)
         end = min(max(float(end), 0.0), duration)
-        if end <= start:
-            end = min(duration, start + 1.0)
         if end <= start:
             continue
         chapters.append(
@@ -369,7 +424,7 @@ def _entities(values: Sequence[_LlmEntity], scope: _EvidenceScope) -> list[Entit
 def _quotes(values: Sequence[_LlmKeyQuote], scope: _EvidenceScope) -> list[KeyQuote]:
     quotes: list[KeyQuote] = []
     for value in values:
-        cited_ids = scope.valid([value.seg_id or "", *value.seg_ids, *value.evidence])
+        cited_ids = scope.valid([*value.seg_ids, *value.evidence])
         cited = scope.cited_segments(cited_ids)
         text = value.text.strip()
         if not cited or not text:
@@ -483,6 +538,7 @@ async def _call[ModelT: BaseModel](
     model_cls: type[ModelT],
     tool_name: str,
     tool_description: str,
+    mode: Mode = "json",
 ) -> ToolResult[ModelT]:
     return await llm.call_tool(
         prompt=prompt,
@@ -493,7 +549,51 @@ async def _call[ModelT: BaseModel](
         model_cls=model_cls,
         tool_name=tool_name,
         tool_description=tool_description,
+        mode=mode,
     )
+
+
+async def _missing_sections_call(
+    llm: LLMClient,
+    *,
+    prompt: str,
+    sections: Sequence[str],
+) -> tuple[dict[str, list[Any]], CallMeta]:
+    """Ask once for only the missing sections, through a schema containing just those fields."""
+    reask_prompt = prompt + _REASK_NOTE.format(sections=", ".join(sections))
+    result = await _call(
+        llm,
+        prompt=reask_prompt,
+        model_cls=_missing_model(sections),
+        tool_name="record_missing_sections",
+        tool_description="Record only the requested missing sections.",
+    )
+    return {name: list(getattr(result.value, name)) for name in sections}, result.meta
+
+
+def _merge_missing(raw: _LlmContent, extra: Mapping[str, list[Any]]) -> _LlmContent:
+    updates = {name: [*getattr(raw, name), *extra[name]] for name in extra}
+    return raw.model_copy(update=updates)
+
+
+async def _complete(
+    llm: LLMClient,
+    *,
+    raw: _LlmContent,
+    prompt: str,
+    scope: _EvidenceScope,
+    duration: float,
+    depth: Depth,
+    segment_count: int,
+) -> tuple[ContentAnalysis, list[CallMeta], list[str]]:
+    """Re-ask once for empty sections the transcript supports, then merge them (card 25)."""
+    analysis = _to_analysis(raw, scope, duration, depth)
+    missing = _missing_sections(analysis, depth, segment_count)
+    if not missing:
+        return analysis, [], []
+    extra, meta = await _missing_sections_call(llm, prompt=prompt, sections=missing)
+    merged = _merge_missing(raw, extra)
+    return _to_analysis(merged, scope, duration, depth), [meta], missing
 
 
 async def _window_call(
@@ -553,6 +653,8 @@ async def analyse_content(
     claim_limit = _claim_limit(depth)
     rendered = render_transcript_lines(transcript.segments)
     metals: list[CallMeta] = []
+    reasked: list[str] = []
+    analysis: ContentAnalysis
 
     if len(rendered) <= settings.LLM_CONTEXT_CHARS:
         prompt = load_prompt(
@@ -583,7 +685,16 @@ async def analyse_content(
                 tool_description="Record the summary, context and cited content findings.",
             )
             metals.append(full_result.meta)
-            analysis = _to_analysis(full_result.value, scope, duration, depth)
+            analysis, reask_metals, reasked = await _complete(
+                llm,
+                raw=full_result.value,
+                prompt=prompt,
+                scope=scope,
+                duration=duration,
+                depth=depth,
+                segment_count=len(transcript.segments),
+            )
+            metals.extend(reask_metals)
     else:
         window_segments = _windows(transcript.segments, settings.LLM_CONTEXT_CHARS)
         window_results = await asyncio.gather(
@@ -632,7 +743,16 @@ async def analyse_content(
                 tool_description="Merge the window findings into one cited content analysis.",
             )
             metals.append(full_reduced.meta)
-            analysis = _to_analysis(full_reduced.value, scope, duration, depth)
+            analysis, reask_metals, reasked = await _complete(
+                llm,
+                raw=full_reduced.value,
+                prompt=reduce_prompt,
+                scope=scope,
+                duration=duration,
+                depth=depth,
+                segment_count=len(transcript.segments),
+            )
+            metals.extend(reask_metals)
 
     analysis.llm_meta = ContentLlmMeta(
         calls=len(metals),
@@ -640,6 +760,8 @@ async def analyse_content(
         coerced=any(meta.coerced for meta in metals),
         fallback_used=any(meta.fallback_used for meta in metals),
         duration_s=round(time.monotonic() - started, 3),
+        completeness=_completeness(analysis),
+        reasked=reasked,
     )
     return analysis
 

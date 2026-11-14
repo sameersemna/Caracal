@@ -21,6 +21,7 @@ from caracal.db.repo import JobRepo, ReportRepo, SegmentRepo, SpeakerRepo, Uploa
 from caracal.db.tables import JOB_TERMINAL_STATUSES
 from caracal.errors import CaracalError, ErrorCode
 from caracal.ingest.ssrf import Resolver, SystemResolver
+from caracal.llm.client import LLMClient
 from caracal.log import get_logger
 from caracal.pipeline.runner import RunnerDeps, run_pipeline
 from caracal.pipeline.stages import Repos, Stage, StageFn, m2_registry
@@ -92,6 +93,7 @@ class Worker:
         intervals: WorkerIntervals = _DEFAULT_INTERVALS,
         http: httpx.AsyncClient | None = None,
         whisper: WhisperClient | None = None,
+        llm: LLMClient | None = None,
         resolver: Resolver | None = None,
     ) -> None:
         self.settings = settings
@@ -104,7 +106,8 @@ class Worker:
         self._in_flight: set[asyncio.Task[None]] = set()
 
         # Process-wide stage clients (docs/01 §4): one HTTP client, one whisper client whose
-        # every call takes the Redis single-slot lock, and the DNS resolver used by ingest.
+        # every call takes the Redis single-slot lock, one LLM client sharing the HTTP client,
+        # and the DNS resolver used by ingest.
         self._owns_http = http is None
         self._http = (
             http if http is not None else httpx.AsyncClient(timeout=float(settings.WHISPER_TIMEOUT_S))
@@ -119,6 +122,7 @@ class Worker:
                 lock=lambda: whisper_lock(redis, self.keys),
             )
         )
+        self.llm = llm if llm is not None else LLMClient(settings, self._http)
         self.resolver: Resolver = resolver if resolver is not None else SystemResolver()
         # The pyannote pipeline is loaded lazily on the first diarized job (docs/04 §5).
         self.diarizer = Diarizer(settings)
@@ -346,6 +350,7 @@ class Worker:
             cancel_check=self._cancelled,
             still_owner=still_owner,
             whisper=self.whisper,
+            llm=self.llm,
             diarizer=self.diarizer,
             resolver=self.resolver,
             redis=self.redis,

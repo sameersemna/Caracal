@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Sequence
 from typing import Any
 
 import httpx
-from tests.fakes.ollama import FakeOllama, message_response, tool_call_message
+from tests.fakes.ollama import FakeOllama, json_response
 
 from caracal.analysis import Depth
 from caracal.analysis.content import ContentAnalysis, analyse_content
@@ -67,10 +68,10 @@ def _full_args(**overrides: Any) -> dict[str, Any]:
         },
         "chapters": [
             {
-                "start": 0.0,
-                "end": 10.0,
                 "title": "Introduction",
                 "summary": "The first letters.",
+                "first_seg": "seg:0",
+                "last_seg": "seg:1",
                 "evidence": ["seg:0", "seg:1"],
             }
         ],
@@ -106,8 +107,9 @@ def _full_args(**overrides: Any) -> dict[str, Any]:
     return arguments
 
 
-def _response(arguments: object, *, name: str = "record_content") -> httpx.Response:
-    return message_response(tool_call_message(arguments, name=name))
+def _response(arguments: object) -> httpx.Response:
+    """A JSON-mode reply; content analysis never uses tool mode (card 25)."""
+    return json_response(arguments)
 
 
 def _client(settings: Settings, fake: FakeOllama) -> tuple[httpx.AsyncClient, LLMClient]:
@@ -164,7 +166,10 @@ async def test_single_call_produces_validated_analysis_with_normalised_ids(
 
     assert len(fake.requests) == 1
     body = fake.body()
-    assert body["tools"][0]["function"]["name"] == "record_content"
+    assert body["format"] == "json"
+    assert "tools" not in body
+    schema = json.loads(body["messages"][0]["content"].split("(field names and allowed values):\n", 1)[1])
+    assert set(schema["properties"]) >= {"summary", "context", "chapters", "entities", "claims"}
     prompt = body["messages"][1]["content"]
     assert "[seg:0] S1 00:00.0 | alpha beta gamma delta" in prompt
     assert "[meta:title] A talk" in prompt
@@ -199,7 +204,7 @@ async def test_map_reduce_windows_overlap_by_one_segment_and_reduce_sees_every_p
     )
     fake = FakeOllama(
         [
-            *[_response(arguments, name="record_content_window") for arguments in window_arguments],
+            *[_response(arguments) for arguments in window_arguments],
             _response(reduce_arguments),
         ]
     )
@@ -220,7 +225,8 @@ async def test_map_reduce_windows_overlap_by_one_segment_and_reduce_sees_every_p
     for index in range(5):
         assert f"Entity{index}" in reduce_prompt
     assert "<<<DATA:partials>>>" in reduce_prompt
-    assert fake.body(-1)["tools"][0]["function"]["name"] == "record_content"
+    assert fake.body(-1)["format"] == "json"
+    assert "tools" not in fake.body(-1)
     assert analysis.llm_meta.calls == 6
     assert analysis.llm_meta.attempts == 6
     assert len(analysis.entities) == 1
@@ -228,16 +234,42 @@ async def test_map_reduce_windows_overlap_by_one_segment_and_reduce_sees_every_p
     assert analysis.entities[0].evidence == ["seg:0", "seg:1"]
 
 
-async def test_chapters_are_clamped_rederived_and_overlaps_removed(
+async def test_chapters_are_derived_from_first_and_last_segment_ids(
     make_settings: MakeSettings,
 ) -> None:
     settings = make_settings()
     arguments = _full_args(
         chapters=[
-            {"start": 999.0, "end": 1000.0, "title": "Far away", "summary": "x", "evidence": ["seg:0"]},
-            {"start": 5.0, "end": 9.0, "title": "Overlap", "summary": "y", "evidence": ["seg:0"]},
-            {"start": 100.0, "end": 200.0, "title": "Late", "summary": "z", "evidence": ["seg:2"]},
-            {"start": 0.0, "end": 1.0, "title": "No segment", "summary": "w", "evidence": ["meta:title"]},
+            {
+                "start": 999.0,
+                "end": 1000.0,
+                "title": "Far away",
+                "summary": "x",
+                "first_seg": "seg:0",
+                "last_seg": "seg:0",
+                "evidence": ["seg:0"],
+            },
+            {
+                "title": "Overlap",
+                "summary": "y",
+                "first_seg": "seg:0",
+                "last_seg": "seg:0",
+                "evidence": ["seg:0"],
+            },
+            {
+                "title": "Late",
+                "summary": "z",
+                "first_seg": "seg:2",
+                "last_seg": "seg:2",
+                "evidence": ["seg:2"],
+            },
+            {
+                "title": "No segment",
+                "summary": "w",
+                "first_seg": "seg:9",
+                "last_seg": "seg:9",
+                "evidence": ["meta:title"],
+            },
         ]
     )
     fake = FakeOllama([_response(arguments)])
@@ -245,11 +277,36 @@ async def test_chapters_are_clamped_rederived_and_overlaps_removed(
 
     analysis = await _analyse(settings, fake, transcript)
 
+    # The model's numeric times are ignored: only first_seg/last_seg decide the bounds.
     assert [(chapter.title, chapter.start, chapter.end) for chapter in analysis.chapters] == [
         ("Far away", 0.0, 5.0),
         ("Late", 10.0, 15.0),
     ]
     assert analysis.chapters[0].evidence == ["seg:0"]
+
+
+async def test_chapter_with_reversed_segment_ids_uses_the_cited_span(
+    make_settings: MakeSettings,
+) -> None:
+    settings = make_settings()
+    arguments = _full_args(
+        chapters=[
+            {
+                "title": "Reversed",
+                "summary": "s",
+                "first_seg": "seg:1",
+                "last_seg": "seg:0",
+                "evidence": ["seg:0", "seg:1"],
+            }
+        ]
+    )
+    fake = FakeOllama([_response(arguments)])
+    transcript = _transcript(["one", "two", "three"])
+
+    analysis = await _analyse(settings, fake, transcript)
+
+    assert [(chapter.start, chapter.end) for chapter in analysis.chapters] == [(0.0, 10.0)]
+    assert analysis.chapters[0].evidence == ["seg:0", "seg:1"]
 
 
 async def test_quotes_are_kept_only_when_they_fuzzy_match_the_cited_segments(
@@ -378,3 +435,86 @@ async def test_deep_depth_allows_fifteen_claims_and_asks_for_fine_chapters(
     standard = await _analyse(settings, standard_fake, transcript, depth="standard")
     assert len(standard.claims) == 8
     assert "5-10 minutes" in standard_fake.body()["messages"][1]["content"]
+
+
+async def test_completeness_reasks_only_the_missing_sections_and_merges_them(
+    make_settings: MakeSettings,
+) -> None:
+    settings = make_settings()
+    first = _full_args(chapters=[], entities=[])
+    missing = {
+        "chapters": [
+            {
+                "title": "Opening",
+                "summary": "The first letters.",
+                "first_seg": "seg:0",
+                "last_seg": "seg:2",
+                "evidence": ["seg:0", "seg:2"],
+            }
+        ],
+        "entities": [
+            {
+                "text": "Twenty",
+                "entity_type": "other",
+                "mentions": ["seg:3"],
+                "evidence": ["seg:3"],
+            }
+        ],
+    }
+    fake = FakeOllama([_response(first), _response(missing)])
+    transcript = _transcript([f"line number {index}" for index in range(20)])
+
+    analysis = await _analyse(settings, fake, transcript)
+
+    assert len(fake.requests) == 2
+    reask = fake.body(1)
+    assert reask["format"] == "json"
+    assert "tools" not in reask
+    schema = json.loads(reask["messages"][0]["content"].split("(field names and allowed values):\n", 1)[1])
+    assert set(schema["properties"]) == {"chapters", "entities"}
+    assert "Fill EVERY field" in reask["messages"][1]["content"]
+    assert "These sections are still missing: chapters, entities" in reask["messages"][1]["content"]
+
+    assert [chapter.title for chapter in analysis.chapters] == ["Opening"]
+    assert (analysis.chapters[0].start, analysis.chapters[0].end) == (0.0, 15.0)
+    assert [entity.text for entity in analysis.entities] == ["Twenty"]
+    assert analysis.llm_meta.reasked == ["chapters", "entities"]
+    assert analysis.llm_meta.completeness == {
+        "chapters": 1,
+        "entities": 1,
+        "claims": 1,
+        "topics": 1,
+    }
+    assert analysis.llm_meta.calls == 2
+
+
+async def test_completeness_is_skipped_for_short_transcripts(make_settings: MakeSettings) -> None:
+    settings = make_settings()
+    fake = FakeOllama([_response(_full_args(chapters=[], entities=[]))])
+    transcript = _transcript(["alpha beta", "epsilon zeta", "iota kappa"])
+
+    analysis = await _analyse(settings, fake, transcript)
+
+    assert len(fake.requests) == 1
+    assert analysis.llm_meta.reasked == []
+    assert analysis.llm_meta.completeness["chapters"] == 0
+    assert analysis.llm_meta.completeness["entities"] == 0
+
+
+async def test_completeness_skips_the_reask_when_every_section_is_present(
+    make_settings: MakeSettings,
+) -> None:
+    settings = make_settings()
+    fake = FakeOllama([_response(_full_args())])
+    transcript = _transcript([f"line number {index}" for index in range(20)])
+
+    analysis = await _analyse(settings, fake, transcript)
+
+    assert len(fake.requests) == 1
+    assert analysis.llm_meta.reasked == []
+    assert analysis.llm_meta.completeness == {
+        "chapters": 1,
+        "entities": 1,
+        "claims": 1,
+        "topics": 1,
+    }

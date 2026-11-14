@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import logging
 from typing import Any, Literal
 
@@ -14,6 +15,7 @@ from tests.fakes.ollama import (
     AsyncProbeTransport,
     FakeOllama,
     error_response,
+    json_response,
     load_fixture,
     message_response,
     text_message,
@@ -128,6 +130,7 @@ async def test_request_body_is_cloud_tool_call_with_inlined_schema() -> None:
     assert result.meta.coerced is True
     assert result.meta.fallback_used is False
     assert result.meta.duration_s >= 0.0
+    assert result.meta.mode_used == "tool"
 
 
 async def test_valid_arguments_without_coercion_changes_report_clean_meta() -> None:
@@ -243,6 +246,83 @@ async def test_no_tool_call_fenced_json_is_extracted_and_coerced() -> None:
     ]
     assert result.meta.coerced is True
     assert result.meta.attempts == 1
+
+
+async def test_json_mode_sends_format_json_and_the_schema_in_the_system_prompt() -> None:
+    fake = FakeOllama([json_response(_VALID_MESSAGE, fenced=True)])
+    async with httpx.AsyncClient(transport=fake.transport()) as http:
+        result = await LLMClient(_settings(), http).call_tool(
+            prompt="PROMPT",
+            system="SYS",
+            model_cls=Out,
+            tool_name="record_analysis",
+            tool_description="Record the analysis.",
+            mode="json",
+        )
+
+    body = fake.body()
+    assert body["format"] == "json"
+    assert "tools" not in body
+    system = body["messages"][0]["content"]
+    assert system.startswith("SYS\n")
+    assert "Reply with ONE JSON object only, no prose, matching this JSON Schema exactly" in system
+    schema_text = system.split("(field names and allowed values):\n", 1)[1]
+    schema = json.loads(schema_text)
+    assert set(schema["properties"]) == {"language", "speaker_name", "entities", "confidence"}
+    assert schema["properties"]["confidence"]["maximum"] == 1
+
+    assert result.value.speaker_name == "Angela Merkel"
+    assert result.meta.mode_used == "json"
+    assert result.meta.attempts == 1
+
+
+async def test_json_mode_repair_uses_assistant_and_user_messages() -> None:
+    invalid = {
+        "language": "de",
+        "entities": [{"text": "Berlin", "entity_type": "place", "evidence": ["seg:1"]}],
+    }
+    fake = FakeOllama([json_response(invalid), json_response(_VALID_MESSAGE, fenced=True)])
+    async with httpx.AsyncClient(transport=fake.transport()) as http:
+        result = await LLMClient(_settings(), http).call_tool(
+            prompt="PROMPT",
+            system="SYS",
+            model_cls=Out,
+            tool_name="record_analysis",
+            tool_description="Record the analysis.",
+            mode="json",
+        )
+
+    assert len(fake.requests) == 2
+    body = fake.body()
+    messages = body["messages"]
+    assert [message["role"] for message in messages] == ["system", "user", "assistant", "user"]
+    assert messages[2]["content"] == json.dumps(invalid)
+    repair = messages[3]["content"]
+    assert "Reply with ONE JSON object only" in repair
+    assert "confidence" in repair
+    assert body["format"] == "json"
+    assert "tools" not in body
+    assert result.value.language == "de"
+    assert result.meta.mode_used == "json"
+    assert result.meta.attempts == 2
+
+
+async def test_empty_tool_reply_retries_the_attempt_in_json_mode() -> None:
+    fake = FakeOllama([message_response(text_message("")), json_response(_VALID_MESSAGE)])
+    async with httpx.AsyncClient(transport=fake.transport()) as http:
+        result = await _call(LLMClient(_settings(), http))
+
+    assert len(fake.requests) == 2
+    first = fake.body(0)
+    second = fake.body(1)
+    assert "tools" in first
+    assert "format" not in first
+    assert "tools" not in second
+    assert second["format"] == "json"
+    assert "Reply with ONE JSON object only" in second["messages"][0]["content"]
+    assert result.value.speaker_name == "Angela Merkel"
+    assert result.meta.mode_used == "json"
+    assert result.meta.attempts == 2
 
 
 async def test_two_primary_failures_switch_to_local_fallback() -> None:

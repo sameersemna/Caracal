@@ -117,6 +117,11 @@ async def test_live_planner_and_content_on_the_merged_ted_transcript() -> None:
     assert analysis.context.genre.strip()
     assert len(analysis.entities) >= 3, analysis.entities
     assert any(claim.checkworthy for claim in analysis.claims), analysis.claims
+    assert set(analysis.llm_meta.completeness) == {"chapters", "entities", "claims", "topics"}
+    assert analysis.llm_meta.completeness["entities"] == len(analysis.entities)
+    for section in ("chapters", "entities", "claims", "topics"):
+        if not getattr(analysis, section):
+            assert section in analysis.llm_meta.reasked
 
     allowed = _allowed(transcript)
     for entity in analysis.entities:
