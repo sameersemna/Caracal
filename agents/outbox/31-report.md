@@ -22,6 +22,7 @@ STATUS: DONE
 - `test_high_confidence_needs_two_registrable_domains[single/double]`: same-domain 0.95 capped to 0.6; two domains keep 0.95.
 - `test_budget_exhaustion_marks_the_remaining_targets_unverified`: refused query stops further searches; remaining targets say "search budget exhausted".
 - `test_no_results_is_unverified_without_a_judge_call`: empty hits produce a deterministic unverified verdict and no judge call.
+- `test_hits_are_numbered_globally_across_targets_and_calls`: two targets/two calls yield web:1 then web:2 and the judge's web:1 resolves to the first hit's URL.
 - `test_prompt_injection_hit_stays_inside_a_data_block`: hostile snippet sits between `<<<DATA:web>>>` and `<<<END:web>>>`; judge system prompt labels web text untrusted.
 - `test_apply_web_sources_confirms_and_expands_a_given_name`: direct fusion of a full-name web source gives 0.6175 and web evidence.
 - `test_apply_web_sources_attribution_is_a_candidate_only_and_flags_info`: attribution is a 0.5 web candidate, never promoted, with the info flag.
@@ -50,8 +51,8 @@ STATUS: DONE
   ........................................................................ [ 80%]
   ........................................................................ [ 86%]
   ........................................................................ [ 93%]
-  ......................................................................   [100%]
-  1078 passed in 9.79s
+  .......................................................................  [100%]
+  1079 passed in 9.72s
   GATE: PASS
   ```
 
