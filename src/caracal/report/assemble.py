@@ -11,9 +11,11 @@ Two jobs beyond field mapping live here:
   text (``"TED Talk [meta:title, meta:channel]"``). Prose fields are stripped of those
   bracketed/parenthesised id lists and the ids are merged into the item's ``evidence``; quote
   text is never touched.
-* **Deterministic review** (docs/04 §11, deterministic half only — the LLM review is T3.4):
-  speaker shares, chapter coverage, caption agreement, low-confidence segments and failed
-  stages each become a :class:`ReviewFlag`.
+* **Deterministic review** (docs/04 §11, deterministic half only — the LLM review lives in
+  :mod:`caracal.analysis.review` and its checkpoint's flags are appended here): speaker shares,
+  chapter coverage, caption agreement, low-confidence segments and failed stages each become a
+  :class:`ReviewFlag`. A claim marked ``contradicted`` whose summary repeats it is deliberately
+  *not* a deterministic check — only the LLM can judge it (card T3.4).
 """
 
 from __future__ import annotations
@@ -71,6 +73,8 @@ _SPACE_BEFORE_PUNCT_RE: Final[re.Pattern[str]] = re.compile(r"[ \t]+([,.;:!?])")
 _MULTISPACE_RE: Final[re.Pattern[str]] = re.compile(r"[ \t]{2,}")
 
 _CHAPTER_COVERAGE_MIN: Final = 0.8
+#: Below this many segments a chapter timeline is not meaningful (verdict 29: music clips).
+_CHAPTER_COVERAGE_MIN_SEGMENTS: Final = 20
 _SPEAKER_SHARE_TOLERANCE: Final = 0.05
 _CAPTION_AGREEMENT_MIN: Final = 0.6
 _LOW_CONFIDENCE_LOGPROB: Final = -1.0
@@ -495,24 +499,43 @@ def _review_flags(
     content: Mapping[str, Any] | None,
     identity: Mapping[str, Any] | None,
 ) -> list[ReviewFlag]:
-    """Flags the plan/content stages and the speakers' final owner produced.
+    """Flags the plan/content stages, the speakers' final owner and the LLM review produced.
 
     The verify checkpoint already carries the identity flags forward (plus the recomputed
     ambiguity and the web attribution notes), so when it exists it replaces the identity
-    checkpoint's flags instead of duplicating them.
+    checkpoint's flags instead of duplicating them. The review stage runs *before* assemble
+    (the enum order is unchanged) and writes its flags to its own checkpoint; reading them
+    here is how they reach the final report.
     """
     plan = _output(checkpoints, "plan")
     verify = _output(checkpoints, "verify")
+    review = _output(checkpoints, "review")
     # A skipped checkpoint persists an empty output; only a verify run that actually wrote
     # its refined flags replaces the identity flags.
     verify_flags = verify if verify is not None and "flags" in verify else None
     flags: list[ReviewFlag] = []
-    for source in (plan, content, verify_flags if verify_flags is not None else identity):
+    sources = [plan, content, verify_flags if verify_flags is not None else identity]
+    if review is not None:
+        sources.append(review)
+    for source in sources:
         if source is None:
             continue
         flags.extend(_flag_list(source.get("review_flags")))
         flags.extend(_flag_list(source.get("flags")))
     return flags
+
+
+def _dedupe_flags(flags: Sequence[ReviewFlag]) -> list[ReviewFlag]:
+    """First flag per ``(field, message)`` pair, across every flag source (card T3.4)."""
+    seen: set[tuple[str, str]] = set()
+    kept: list[ReviewFlag] = []
+    for flag in flags:
+        key = (flag.field, flag.message)
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(flag)
+    return kept
 
 
 def _verifications(
@@ -586,9 +609,16 @@ def _deterministic_flags(
     caption_agreement: float | None,
     low_confidence_segments: int,
     segment_count: int,
+    music: bool,
     stages: Mapping[str, str],
 ) -> list[ReviewFlag]:
-    """The deterministic half of docs/04 §11."""
+    """The deterministic half of docs/04 §11.
+
+    Chapter coverage is only meaningful for a speech recording long enough to have a real
+    timeline: a music/non-speech job or a transcript below 20 segments never produces that
+    flag (verdict 29, card T3.4). A ``contradicted`` claim repeated in the summary is not a
+    deterministic check — only the LLM review can read that contradiction.
+    """
     flags: list[ReviewFlag] = []
 
     if speakers:
@@ -603,7 +633,12 @@ def _deterministic_flags(
             )
 
     coverage = _chapter_coverage(chapters, duration_s)
-    if duration_s > 0.0 and coverage < _CHAPTER_COVERAGE_MIN:
+    if (
+        not music
+        and segment_count >= _CHAPTER_COVERAGE_MIN_SEGMENTS
+        and duration_s > 0.0
+        and coverage < _CHAPTER_COVERAGE_MIN
+    ):
         flags.append(
             ReviewFlag(
                 severity="warn",
@@ -657,6 +692,7 @@ def _quality(
     speakers: Sequence[SpeakerIdentity],
     chapters: Sequence[Chapter],
     duration_s: float,
+    music: bool,
     stage_statuses: Mapping[str, str],
     translations: Sequence[Translation] = (),
 ) -> QualityInfo:
@@ -680,6 +716,7 @@ def _quality(
             caption_agreement=caption_agreement,
             low_confidence_segments=low_confidence,
             segment_count=segment_count,
+            music=music,
             stages=stage_statuses,
         )
     )
@@ -698,7 +735,7 @@ def _quality(
         caption_agreement=caption_agreement,
         dropped_uncited=0,
         stages=dict(stage_statuses),
-        review_flags=flags,
+        review_flags=_dedupe_flags(flags),
     )
 
 
@@ -947,6 +984,7 @@ def assemble_report(
             chapters=chapters,
             duration_s=duration_s,
             stage_statuses=statuses,
+            music=music,
             translations=translations,
         ),
     )

@@ -983,3 +983,159 @@ async def test_translate_entry_without_subtitle_files_is_not_reported(
     )
 
     assert [translation.lang for translation in report.translations] == ["de"]
+
+
+# --- T3.4: review flags, dedupe and the music/short-transcript coverage rule -----------
+
+
+def _short_chapters(checkpoints: dict[str, dict[str, Any] | None], *, duration: float = 61.0) -> None:
+    content = checkpoints[Stage.CONTENT.value]
+    assert content is not None
+    output = dict(content["output"])
+    output["chapters"] = [
+        {
+            "start": 0.0,
+            "end": 6.0,
+            "title": "Intro",
+            "summary": "Short.",
+            "evidence": ["seg:0"],
+        }
+    ]
+    checkpoints[Stage.CONTENT.value] = _checkpoint("done", output)
+
+
+async def test_music_job_produces_no_chapter_coverage_flag(
+    make_settings: Any,
+    tmp_path: Path,
+) -> None:
+    settings: Settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    repos = make_fake_repos()
+    job = await _job(repos)
+    checkpoints = _full_checkpoints()
+    plan = checkpoints[Stage.PLAN.value]
+    assert plan is not None
+    output = dict(plan["output"])
+    output["music_detected"] = True
+    checkpoints[Stage.PLAN.value] = _checkpoint("done", output)
+    _short_chapters(checkpoints)
+
+    report = assemble_report(
+        checkpoints,
+        job=job,
+        settings=settings,
+        transcript=_transcript(),
+    )
+
+    assert not [flag for flag in report.quality.review_flags if flag.field == "chapters"]
+    assert report.audio.music_detected is True
+
+
+async def test_short_transcript_produces_no_chapter_coverage_flag(
+    make_settings: Any,
+    tmp_path: Path,
+) -> None:
+    settings: Settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    repos = make_fake_repos()
+    job = await _job(repos)
+    checkpoints = _full_checkpoints()
+    _short_chapters(checkpoints)
+    full = _transcript()
+    short = Transcript(segments=full.segments[:19], language_code="en", dropped={})
+
+    report = assemble_report(
+        checkpoints,
+        job=job,
+        settings=settings,
+        transcript=short,
+    )
+
+    assert report.transcript_ref.segments == 19
+    assert not [flag for flag in report.quality.review_flags if flag.field == "chapters"]
+
+
+async def test_twenty_segments_still_apply_the_chapter_coverage_rule(
+    make_settings: Any,
+    tmp_path: Path,
+) -> None:
+    settings: Settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    repos = make_fake_repos()
+    job = await _job(repos)
+    checkpoints = _full_checkpoints()
+    _short_chapters(checkpoints)
+    full = _transcript()
+    twenty = Transcript(segments=full.segments[:20], language_code="en", dropped={})
+
+    report = assemble_report(
+        checkpoints,
+        job=job,
+        settings=settings,
+        transcript=twenty,
+    )
+
+    assert any(flag.field == "chapters" for flag in report.quality.review_flags)
+
+
+async def test_review_checkpoint_flags_are_appended_to_the_report(
+    make_settings: Any,
+    tmp_path: Path,
+) -> None:
+    settings: Settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    repos = make_fake_repos()
+    job = await _job(repos)
+    checkpoints = _full_checkpoints()
+    checkpoints[Stage.REVIEW.value] = _checkpoint(
+        "done",
+        {
+            "flags": [
+                {
+                    "severity": "warn",
+                    "field": "summary",
+                    "message": "the summary repeats a contradicted claim",
+                }
+            ],
+            "llm_meta": {"calls": 1},
+        },
+    )
+
+    report = assemble_report(
+        checkpoints,
+        job=job,
+        settings=settings,
+        transcript=_transcript(),
+    )
+
+    assert [
+        (flag.severity, flag.field, flag.message)
+        for flag in report.quality.review_flags
+        if flag.field == "summary"
+    ] == [("warn", "summary", "the summary repeats a contradicted claim")]
+
+
+async def test_review_flags_are_deduplicated_across_sources(
+    make_settings: Any,
+    tmp_path: Path,
+) -> None:
+    settings: Settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    repos = make_fake_repos()
+    job = await _job(repos)
+    checkpoints = _full_checkpoints()
+    duplicate = {
+        "severity": "info",
+        "field": "speakers.S1.name",
+        "message": "the same finding twice",
+    }
+    content = checkpoints[Stage.CONTENT.value]
+    assert content is not None
+    content_output = dict(content["output"])
+    content_output["review_flags"] = [duplicate]
+    checkpoints[Stage.CONTENT.value] = _checkpoint("done", content_output)
+    checkpoints[Stage.REVIEW.value] = _checkpoint("done", {"flags": [duplicate, duplicate]})
+
+    report = assemble_report(
+        checkpoints,
+        job=job,
+        settings=settings,
+        transcript=_transcript(),
+    )
+
+    assert [flag.message for flag in report.quality.review_flags].count("the same finding twice") == 1

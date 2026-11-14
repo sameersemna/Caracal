@@ -20,7 +20,7 @@ from typing import Any
 import httpx
 import pytest
 from tests.fakes.diarizer import FakeDiarizer
-from tests.fakes.ollama import FakeOllama, json_response
+from tests.fakes.ollama import FakeOllama, json_response, message_response, text_message
 from tests.fakes.redis import RecordingRedis
 from tests.fakes.repo import make_fake_repos
 from tests.fakes.resolver import FakeResolver
@@ -54,6 +54,7 @@ from caracal.pipeline.stages import (
     stage_langid,
     stage_normalize,
     stage_plan,
+    stage_review,
     stage_subtitles,
     stage_transcribe,
     stage_translate,
@@ -1170,6 +1171,7 @@ def test_m2_registry_wires_diarize_and_align_and_keeps_m1_stages() -> None:
     assert registry[Stage.ALIGN] is stage_align
     assert registry[Stage.TRANSCRIBE] is stage_transcribe
     assert registry[Stage.SUBTITLES] is stage_subtitles
+    assert registry[Stage.REVIEW] is stage_review
     assert registry[Stage.ASSEMBLE] is stage_assemble
 
 
@@ -2148,3 +2150,273 @@ async def test_translate_stage_counts_failed_units_and_keeps_source_text(
     assert entry["units"] == 1
     assert entry["failed_units"] == 1
     assert "A few years ago I started running." in " ".join(" ".join(cue["lines"]) for cue in entry["cues"])
+
+
+# --- T3.4 review ------------------------------------------------------------------------
+
+
+def _seed_review_inputs(
+    files: JobFiles,
+    transcript: Transcript,
+    *,
+    music: bool = False,
+    one_line: str = "Levitin explains stress.",
+) -> None:
+    """Minimal checkpoints for a draft report: normalize, plan, langid, content, identity."""
+    files.write_json(files.transcript_json, transcript.to_dict())
+    _write_output(
+        files,
+        Stage.NORMALIZE,
+        {
+            "probe": {"format_name": "webm", "sample_rate": 16000, "channels": 1},
+            "stats": {
+                "duration_s": 10.0,
+                "speech_ratio": 0.9,
+                "loudness_lufs": -18.0,
+                "quality": "good",
+                "silences": [],
+            },
+        },
+    )
+    _write_output(
+        files,
+        Stage.PLAN,
+        {
+            "run": {"content": True, "identity": True},
+            "reasons": {},
+            "content_profile": {
+                "likely_genre": "talk",
+                "expected_speakers": 1,
+                "needs_identity": True,
+                "checkworthy_domain": True,
+            },
+            "budgets": {"search_queries": 0, "llm_calls": 1, "claims": 8},
+            "music_detected": music,
+            "languages": None,
+        },
+    )
+    _write_output(
+        files,
+        Stage.LANGID,
+        {
+            "languages": [
+                {
+                    "code": "en",
+                    "name": "English",
+                    "share": 1.0,
+                    "spans": [{"start": 0.0, "end": 10.0}],
+                    "confidence": 0.99,
+                }
+            ],
+            "caption_agreement": 0.9,
+            "caption_lang": "en",
+        },
+    )
+    _write_output(
+        files,
+        Stage.CONTENT,
+        {
+            "summary": {
+                "one_line": one_line,
+                "short": "A short summary.",
+                "detailed": "A longer summary.",
+                "evidence": ["seg:0"],
+            },
+            "context": {
+                "genre": "talk",
+                "setting": "stage",
+                "audience": "general",
+                "purpose": "explain",
+                "tone": ["calm"],
+                "recorded_when": None,
+                "recorded_where": None,
+                "confidence": 0.8,
+                "evidence": ["seg:0"],
+            },
+            "review_flags": [],
+        },
+    )
+    _write_output(
+        files,
+        Stage.IDENTITY,
+        {
+            "speakers": [
+                {
+                    "label": "S1",
+                    "talk_time_s": 9.0,
+                    "share": 1.0,
+                    "first_seen_s": 0.0,
+                    "name": "Daniel Levitin",
+                    "confidence": 0.8,
+                    "role": "speaker",
+                    "candidates": [],
+                    "description": None,
+                    "evidence": ["seg:0"],
+                }
+            ],
+            "flags": [],
+        },
+    )
+
+
+def _review_client(settings: Settings, fake: FakeOllama) -> tuple[LLMClient, httpx.AsyncClient]:
+    http = httpx.AsyncClient(transport=fake.transport())
+    return LLMClient(settings, http), http
+
+
+async def test_stage_review_skips_quick_music_and_missing_llm(
+    make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    repos = make_fake_repos()
+
+    # Quick depth: no LLM call at all (the empty fake script would raise on a request).
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    fake = FakeOllama([])
+    client, http = _review_client(settings, fake)
+    try:
+        quick = replace(
+            _context(settings, repos, files, job_id=job.id, llm=client), options=JobOptions(depth="quick")
+        )
+        result = await stage_review(quick)
+    finally:
+        await http.aclose()
+    assert (result.status, result.reason) == ("skipped", "depth quick")
+
+    # Non-speech audio: the plan's music flag skips before the LLM is consulted.
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    _write_output(files, Stage.PLAN, {"music_detected": True})
+    fake = FakeOllama([])
+    client, http = _review_client(settings, fake)
+    try:
+        ctx = _context(settings, repos, files, job_id=job.id, llm=client)
+        result = await stage_review(ctx)
+    finally:
+        await http.aclose()
+    assert (result.status, result.reason) == ("skipped", "non-speech audio")
+
+    # No LLM client: non-fatal skip.
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    result = await stage_review(_context(settings, repos, files, job_id=job.id))
+    assert (result.status, result.reason) == ("skipped", "llm unavailable")
+
+    # A model that never returns valid JSON is also a non-fatal skip (initial + 2 repairs).
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    _seed_review_inputs(files, _transcript(["hello there"]))
+    fake = FakeOllama([message_response(text_message("not json")) for _ in range(3)])
+    client, http = _review_client(settings, fake)
+    try:
+        result = await stage_review(_context(settings, repos, files, job_id=job.id, llm=client))
+    finally:
+        await http.aclose()
+    assert (result.status, result.reason) == ("skipped", "llm unavailable")
+
+
+async def test_stage_review_builds_the_draft_without_writing_the_report(
+    make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    transcript = _transcript(["hello there", "general kenobi", "you are a bold one"])
+    _seed_review_inputs(files, transcript)
+    fake = FakeOllama(
+        [
+            json_response(
+                {
+                    "flags": [
+                        {
+                            "severity": "warn",
+                            "field": "summary",
+                            "message": "the summary names a different speaker",
+                        }
+                    ]
+                }
+            )
+        ]
+    )
+    client, http = _review_client(settings, fake)
+    try:
+        result = await stage_review(_context(settings, repos, files, job_id=job.id, llm=client))
+    finally:
+        await http.aclose()
+
+    assert result.status == "done"
+    flags = result.output["flags"]
+    assert isinstance(flags, list)
+    assert flags == [
+        {
+            "severity": "warn",
+            "field": "summary",
+            "message": "the summary names a different speaker",
+        }
+    ]
+    meta = result.output["llm_meta"]
+    assert isinstance(meta, dict)
+    assert meta["calls"] == 1
+    assert meta["sampled"] == 3
+    assert meta["kept_flags"] == 1
+
+    # The draft is built in memory: neither report file nor report row exists yet.
+    assert not files.report_json.is_file()
+    assert not files.report_md.is_file()
+    assert await repos.reports.get(job.id) is None
+
+    prompt = fake.body()["messages"][1]["content"]
+    assert "Levitin explains stress" in prompt
+    assert "Daniel Levitin" in prompt
+    assert "[seg:0]" in prompt
+    assert "[seg:2]" in prompt
+
+
+async def test_stage_assemble_appends_the_review_checkpoint_flags(
+    make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    transcript = _transcript(["hello there", "general kenobi"])
+    _seed_review_inputs(files, transcript)
+    fake = FakeOllama(
+        [
+            json_response(
+                {
+                    "flags": [
+                        {
+                            "severity": "warn",
+                            "field": "speakers.S1.name",
+                            "message": "the transcript never names this speaker",
+                        }
+                    ]
+                }
+            )
+        ]
+    )
+    client, http = _review_client(settings, fake)
+    try:
+        review = await stage_review(_context(settings, repos, files, job_id=job.id, llm=client))
+        # The runner persists every StageResult as the stage checkpoint; stage_review itself
+        # is pure and assemble reads the flags from that checkpoint.
+        _write_output(files, Stage.REVIEW, review.output)
+        assembled = await stage_assemble(_context(settings, repos, files, job_id=job.id, llm=client))
+    finally:
+        await http.aclose()
+
+    assert review.status == "done"
+    assert assembled.status == "done"
+    stored = await repos.reports.get(job.id)
+    assert stored is not None
+    messages = [flag["message"] for flag in stored["quality"]["review_flags"]]
+    assert "the transcript never names this speaker" in messages
