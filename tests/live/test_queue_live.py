@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 
 import pytest
 import redis.asyncio as redis_asyncio
@@ -27,14 +27,6 @@ from caracal.queue import (
 )
 
 pytestmark = pytest.mark.live
-
-
-@pytest.fixture(autouse=True)
-def isolated_environment() -> Iterator[None]:
-    """Override the unit-suite isolation: live tests need the real ``.env``."""
-    get_settings.cache_clear()
-    yield
-    get_settings.cache_clear()
 
 
 @pytest.fixture

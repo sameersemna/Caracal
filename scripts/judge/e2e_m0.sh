@@ -18,13 +18,13 @@ print('caracal keys outside prefix:', [k for k in r.scan_iter(match='caracal*',c
   rm -rf $S/e2e-data/$T
 }
 trap cleanup EXIT
-psql "$PG" -qAtc "CREATE SCHEMA \"$T\"" && uv run -q caracal migrate >$LOG/migrate.log 2>&1 && echo "migrate: ok"
-uv run -q caracal serve >$LOG/serve.log 2>&1 &
+psql "$PG" -qAtc "CREATE SCHEMA \"$T\"" && .venv/bin/caracal migrate >$LOG/migrate.log 2>&1 && echo "migrate: ok"
+.venv/bin/caracal serve >$LOG/serve.log 2>&1 &
 for i in $(seq 1 30); do curl -s $B/healthz >/dev/null && break; sleep 0.5; done
 echo "healthz: $(curl -s $B/healthz)"
 echo "no auth: $(curl -s -o /dev/null -w '%{http_code}' $B/v1/jobs)"
 echo "== demo 1: real 'caracal worker' (stub stages)"
-WID=w-real uv run -q caracal worker >$LOG/worker-real.log 2>&1 & WR=$!
+WID=w-real .venv/bin/caracal worker >$LOG/worker-real.log 2>&1 & WR=$!
 J=$(curl -s -H "$A" -H 'content-type: application/json' -d '{"source":{"url":"https://www.youtube.com/watch?v=dQw4w9WgXcQ"}}' $B/v1/jobs); echo "create: $J"
 JID=$(echo "$J" | python3 -c 'import json,sys;print(json.load(sys.stdin)["job_id"])')
 timeout 30 curl -sN -H "$A" $B/v1/jobs/$JID/events > $LOG/sse1.txt; echo "sse events: $(grep -c '^event:' $LOG/sse1.txt) last: $(grep '^event:' $LOG/sse1.txt | tail -1)"
