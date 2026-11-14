@@ -79,7 +79,7 @@ DEEP_CLAIM_TARGETS: Final = 15
 #: Identity-confirm window and the quote-attribution talk-time floor (card T3.2).
 IDENTITY_CONFIRM_MIN: Final = 0.40
 IDENTITY_CONFIRM_MAX: Final = 0.90
-QUOTE_MIN_TALK_TIME_S: Final = 30.0
+QUOTE_MIN_TALK_TIME_S: Final = 10.0
 QUOTE_MIN_WORDS: Final = 8
 
 #: Queries per target, hits per query, and the judge's confidence rules (docs/04 §8 step 3-4).
@@ -185,6 +185,7 @@ class VerifyResult:
     hits: list[VerifyHit]
     queries_used: int
     cost_usd: float
+    target_count: int
 
 
 @dataclass
@@ -385,7 +386,7 @@ def select_targets(
     Claims: up to 6 (standard) or 15 (deep) checkworthy claims, preferring ``fact`` claims
     with a digit, a date or a proper name. Speakers: every label whose top candidate is in
     ``[0.4, 0.9)`` is an ``identity_confirm`` target; every label with no candidates and at
-    least 30 s of talk time is a ``quote_attribution`` target using its key quote or its
+    least 10 s of talk time is a ``quote_attribution`` target using its key quote or its
     longest segment of at least 8 words.
     """
     limit = DEEP_CLAIM_TARGETS if depth == "deep" else STANDARD_CLAIM_TARGETS
@@ -1035,6 +1036,22 @@ async def verify(
         segments=transcript.segments,
         depth=depth,
     )
+    if not targets:
+        # Runtime decision, not plan time (verdict 32): nothing worth checking means the
+        # stage skips instead of spending an LLM call or rewriting the identity flags.
+        logger.info(
+            "verify skipped",
+            extra={"job_id": str(job_id), "reason": "nothing to verify"},
+        )
+        return VerifyResult(
+            verifications=[],
+            speakers=list(speakers),
+            flags=list(flags),
+            hits=[],
+            queries_used=0,
+            cost_usd=0.0,
+            target_count=0,
+        )
     queries = await _write_queries(
         llm,
         targets,
@@ -1108,6 +1125,7 @@ async def verify(
         hits=all_hits,
         queries_used=queries_used,
         cost_usd=cost_usd,
+        target_count=len(targets),
     )
 
 

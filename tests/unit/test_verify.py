@@ -333,6 +333,37 @@ def test_select_targets_falls_back_to_the_longest_eight_word_segment() -> None:
     assert targets[0].text == "a b c d e f g h i j k"
 
 
+def test_quote_attribution_accepts_a_twenty_two_second_speaker() -> None:
+    """The talk-time floor is 10 s (verdict 32), so the 22 s JFK side is eligible."""
+    rows = [("S2", "one two three four five six seven eight nine ten")]
+    segments = _transcript(rows).segments
+    eligible = _speaker("S2", None, talk_time_s=22.0, share=0.2)
+    too_short = _speaker("S2", None, talk_time_s=9.9, share=0.1)
+
+    assert [(target.target, target.kind) for target in select_targets([], [eligible], segments=segments)] == [
+        ("speaker:S2", "quote_attribution")
+    ]
+    assert select_targets([], [too_short], segments=segments) == []
+
+
+async def test_verify_with_no_targets_does_no_work(make_settings: MakeSettings) -> None:
+    """No targets is a runtime skip: no query LLM call, no search and no verdicts."""
+    settings = make_settings(BRAVE_API_KEY="brave-key")
+
+    result, fake, router = await _run(
+        settings,
+        speakers=[_speaker("S1", "Daniel Levitin", 0.95)],
+    )
+
+    assert result.target_count == 0
+    assert result.verifications == []
+    assert result.hits == []
+    assert result.queries_used == 0
+    assert result.cost_usd == 0.0
+    assert fake.requests == []
+    assert router.calls == []
+
+
 async def test_lindsay_confirmation_expands_the_name_and_promotes(
     make_settings: MakeSettings,
 ) -> None:

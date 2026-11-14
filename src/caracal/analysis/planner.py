@@ -37,7 +37,8 @@ SHORT_CLIP_IDENTITY_REASON: Final = "short clip: single-speaker identity logic"
 QUICK_REASON: Final = "quick depth: summary, languages and subtitles only"
 VERIFY_OFF_REASON: Final = "verification disabled by options"
 VERIFY_ON_REASON: Final = "verification requested"
-VERIFY_AUTO_REASON: Final = "auto verification: checkworthy domain and search configured"
+VERIFY_AUTO_REASON: Final = "auto verification: search configured"
+VERIFY_AUTO_NO_SEARCH_REASON: Final = "auto verification: no search provider configured"
 NO_TRANSLATION_REASON: Final = "no target language differs from the source"
 LLM_PROFILE_REASON: Final = "content profile from the LLM"
 LLM_UNAVAILABLE_REASON: Final = "llm unavailable"
@@ -364,14 +365,13 @@ async def plan(inputs: PlanInputs, *, llm: LLMClient | None) -> StagePlan:
         _set_skip(run, reasons, "verify", VERIFY_OFF_REASON)
     elif inputs.options.verify == "on":
         _set_reason(run, reasons, "verify", VERIFY_ON_REASON)
+    elif inputs.search_configured:
+        # The planner runs before identity, so it cannot know whether an unconfirmed name
+        # exists; auto therefore means "run unless quick, music or no provider" (verdict 32)
+        # and the verify stage itself reports "nothing to verify" when no target exists.
+        _set_reason(run, reasons, "verify", VERIFY_AUTO_REASON)
     else:
-        can_verify = (
-            inputs.options.depth != "quick" and profile.checkworthy_domain and inputs.search_configured
-        )
-        if can_verify:
-            _set_reason(run, reasons, "verify", VERIFY_AUTO_REASON)
-        else:
-            _set_skip(run, reasons, "verify", "auto verification: no checkworthy domain or search")
+        _set_skip(run, reasons, "verify", VERIFY_AUTO_NO_SEARCH_REASON)
 
     targets = _resolve_targets(inputs)
     if targets:

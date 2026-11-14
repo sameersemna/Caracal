@@ -19,6 +19,10 @@ from caracal.analysis.planner import (
     MUSIC_REASON,
     NO_TRANSLATION_REASON,
     QUICK_REASON,
+    VERIFY_AUTO_NO_SEARCH_REASON,
+    VERIFY_AUTO_REASON,
+    VERIFY_OFF_REASON,
+    VERIFY_ON_REASON,
     PlanInputs,
     plan,
 )
@@ -389,31 +393,51 @@ async def test_short_clip_keeps_automatic_diarization(make_settings: MakeSetting
     assert result.reasons["identity"] == "short clip: single-speaker identity logic"
 
 
-async def test_verify_modes(make_settings: MakeSettings) -> None:
+async def test_verify_gating_moves_to_run_time(make_settings: MakeSettings) -> None:
+    """`auto` no longer depends on the LLM profile or a checkworthy domain (verdict 32).
+
+    The planner cannot see identity results, so it only skips `auto` when a stronger rule
+    already skipped the stage (quick, music) or no search provider is configured. Every case
+    asserts the exact reason so an accidental fall-back to plan-time gating fails.
+    """
     settings = make_settings()
     cases = [
-        (JobOptions(verify="off"), True, False, "verification disabled by options"),
-        (JobOptions(verify="on"), True, True, "verification requested"),
+        # options, checkworthy, search configured, music, expected run, expected reason
+        (JobOptions(verify="off"), True, True, False, False, VERIFY_OFF_REASON),
+        (JobOptions(verify="on"), False, True, False, True, VERIFY_ON_REASON),
+        # The decisive case: an uncheckworthy profile no longer blocks auto verification.
+        (JobOptions(verify="auto"), False, True, False, True, VERIFY_AUTO_REASON),
         (
             JobOptions(verify="auto"),
             True,
-            True,
-            "auto verification: checkworthy domain and search configured",
+            False,
+            False,
+            False,
+            VERIFY_AUTO_NO_SEARCH_REASON,
         ),
-        (JobOptions(verify="auto"), False, False, "auto verification: no checkworthy domain or search"),
+        (JobOptions(verify="auto", depth="quick"), True, True, False, False, QUICK_REASON),
+        (JobOptions(verify="auto"), True, True, True, False, MUSIC_REASON),
     ]
-    for options, checkworthy, expected, reason in cases:
-        fake = FakeOllama([_profile_response(checkworthy_domain=checkworthy)])
+    for options, checkworthy, search_configured, music, expected, reason in cases:
+        transcript = _transcript(["🎵🎵🎵"] * 6) if music else _transcript(["hello there"] * 3)
+        no_llm = music or options.depth == "quick"
+        script = [] if no_llm else [_profile_response(checkworthy_domain=checkworthy)]
+        fake = FakeOllama(script)
         http, client = _client(settings, fake)
         try:
             result = await plan(
-                _inputs(transcript=_transcript(["hello there"] * 3), options=options),
+                _inputs(
+                    transcript=transcript,
+                    options=options,
+                    search_configured=search_configured,
+                ),
                 llm=client,
             )
         finally:
             await http.aclose()
-        assert result.run["verify"] is expected
-        assert result.reasons["verify"] == reason
+        case = (options, checkworthy, search_configured, music)
+        assert result.run["verify"] is expected, case
+        assert result.reasons["verify"] == reason, case
 
 
 async def test_translate_only_runs_for_a_target_that_differs_from_the_source(

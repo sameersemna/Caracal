@@ -1823,3 +1823,90 @@ async def test_verify_stage_skips_without_a_search_provider(
 
     assert result.status == "skipped"
     assert result.reason == "no search provider"
+
+
+async def test_verify_stage_skips_when_there_is_nothing_to_verify(
+    make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    """With search and an LLM available but no targets, the stage decides at run time."""
+    settings = make_settings(
+        CARACAL_DATA_DIR=tmp_path,
+        BRAVE_API_KEY="brave-key",
+        REDIS_PREFIX=PREFIX,
+    )
+    redis = RecordingRedis()
+    keys = Keys(PREFIX)
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    files.write_json(
+        files.transcript_json,
+        Transcript(
+            segments=(
+                Segment(
+                    id=0,
+                    start=0.0,
+                    end=4.0,
+                    text="A short line from the only speaker.",
+                    words=(),
+                    avg_logprob=-0.1,
+                    no_speech_prob=0.0,
+                    lang="en",
+                    speaker="S1",
+                ),
+            ),
+            language_code="en",
+            dropped={},
+        ).to_dict(),
+    )
+    _write_output(files, Stage.CONTENT, {"claims": [], "key_quotes": []})
+    _write_output(
+        files,
+        Stage.IDENTITY,
+        {
+            "speakers": [
+                {
+                    "label": "S1",
+                    "talk_time_s": 60.0,
+                    "share": 1.0,
+                    "first_seen_s": 0.0,
+                    "name": "Daniel Levitin",
+                    "confidence": 0.95,
+                    "candidates": [
+                        {
+                            "name": "Daniel Levitin",
+                            "confidence": 0.95,
+                            "sources": ["metadata", "web"],
+                            "evidence": ["meta:title"],
+                        }
+                    ],
+                    "evidence": ["seg:0"],
+                }
+            ],
+            "flags": [],
+        },
+    )
+    router = SearchRouter(settings, redis, keys, [FakeProvider("brave", [])])
+    fake = FakeOllama([])
+    http = httpx.AsyncClient(transport=fake.transport())
+    client = LLMClient(settings, http)
+    try:
+        result = await stage_verify(
+            _context(
+                settings,
+                repos,
+                files,
+                job_id=job.id,
+                llm=client,
+                redis=redis,
+                keys=keys,
+                search=router,
+            )
+        )
+    finally:
+        await http.aclose()
+
+    assert result.status == "skipped"
+    assert result.reason == "nothing to verify"
+    assert fake.requests == []

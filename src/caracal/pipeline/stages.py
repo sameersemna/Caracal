@@ -1112,6 +1112,10 @@ async def stage_verify(ctx: StageContext) -> StageResult:
         job_id=ctx.job_id,
         budget_exhausted=lambda: _budget_exhausted(ctx),
     )
+    if result.target_count == 0:
+        # Verdict 32: the plan can no longer predict this (it runs before identity), so the
+        # stage reports the no-target case itself instead of writing an empty checkpoint.
+        return StageResult(status="skipped", reason="nothing to verify")
     logger.info(
         "verify complete",
         extra={
