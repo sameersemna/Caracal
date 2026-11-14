@@ -18,6 +18,12 @@ names and upper-cases enums; with the schema **inlined** it uses the right field
 (case-insensitive enums + synonym map) → **12 / 12 valid on the first attempt** (2.2 s for 12 parallel calls). Local `gemma4:31b` fallback:
 same errors, 42.8 s cold start. Fixtures: `tests/fixtures/ollama/`.
 
+**Measured on a realistic task** (content analysis of 2 min of the TED transcript): a property named **`type`** is omitted by the model
+(0/6 valid; renamed → 6/6). Evidence ids are copied with the speaker label (`"seg:2 S1"`, 0/12 clean). Rules: LLM-facing models never use
+JSON-Schema keyword names (`type`, `items`, `properties`, `enum`, `format`, `required`, `default`, `const`) as field names — map them with
+pydantic aliases; evidence lists are normalised by extracting `(seg|meta|web|vp|caption|hint):[A-Za-z0-9_.-]+` tokens; transcript lines are
+rendered `[seg:12] S2 03:14.2 | text` (id alone inside the brackets).
+
 `call_tool` algorithm:
 0. **Schema preparation** (cached per model class): `model_json_schema()` → inline every `$ref` from `$defs`, drop `title`, append
    `Must be exactly one of: a, b, c.` to the description of every `enum`/`Literal` field.
@@ -118,7 +124,7 @@ Long transcripts: if the speaker-tagged transcript text exceeds `LLM_CONTEXT_CHA
 boundaries, run `content_window.md` per window (map) producing partial chapters/entities/claims/quotes, then
 `content_reduce.md` (reduce) to merge and dedupe. Otherwise one call to `content.md`.
 
-The transcript is passed as lines `[seg:12 S2 03:14.2] text` so the model can cite. Metadata as
+The transcript is passed as lines `[seg:12] S2 03:14.2 | text` so the model can cite. Metadata as
 `[meta:title] ...`, `[meta:description] ...`, `[meta:channel] ...`. Caller hints as `[hint:0] ...`.
 
 Outputs (validated pydantic): summary, context, chapters, topics, entities, key_quotes, claims (with `checkworthy`).
