@@ -4,10 +4,12 @@ Revision ID: 0002_voiceprints
 Revises: 0001_initial
 Create Date: 2026-11-14
 
-The vector extension is created by 0001 in the same schema (``search_path``), so the
-``vector(256)`` column and its HNSW cosine index resolve here. Embeddings are biometric
-data: a job delete only nulls ``voiceprints.job_id`` (``ON DELETE SET NULL``) while deleting
-a known speaker cascades to every embedding it owns.
+The vector extension is created by 0001 and normally already exists in ``public``; the
+connection's ``search_path`` is ``<schema>, public`` so ``vector(256)`` and its HNSW cosine
+operator class resolve from either schema. ``_require_vector_type`` fails with a clear error
+if the type is still invisible after ``CREATE EXTENSION``. Embeddings are biometric data: a
+job delete only nulls ``voiceprints.job_id`` (``ON DELETE SET NULL``) while deleting a known
+speaker cascades to every embedding it owns.
 """
 
 from __future__ import annotations
@@ -25,7 +27,26 @@ depends_on: str | None = None
 EMB_DIM = 256
 
 
+def _require_vector_type() -> None:
+    """Create pgvector when absent, then fail clearly if ``vector`` still does not resolve.
+
+    The extension may live in ``public`` while tables are created in ``CARACAL_DB_SCHEMA``;
+    ``to_regtype`` follows the connection's ``search_path``, so this checks exactly what the
+    following DDL will see. Offline SQL generation (``alembic upgrade --sql``) has no bind.
+    """
+    op.execute("CREATE EXTENSION IF NOT EXISTS vector")
+    if op.get_context().as_sql:
+        return
+    if op.get_bind().scalar(sa.text("SELECT to_regtype('vector')")) is None:
+        raise RuntimeError(
+            "pgvector not visible on search_path: the vector type does not resolve after "
+            "CREATE EXTENSION IF NOT EXISTS vector; install pgvector in public or in the "
+            "CARACAL_DB_SCHEMA schema (docs/05 §1)"
+        )
+
+
 def upgrade() -> None:
+    _require_vector_type()
     op.create_table(
         "known_speakers",
         sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
