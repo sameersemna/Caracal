@@ -44,6 +44,7 @@ No other module reads `os.environ` (enforced by `scripts/check_rules.py`). Secre
 | `CARACAL_JOB_TIMEOUT_S` | int | `10800` | |
 | `CARACAL_MAX_UPLOAD_MB` | int | `2048` | |
 | `CARACAL_MAX_DURATION_S` | int | `14400` | |
+| `CARACAL_REPORT_LANGUAGE` | str | `en` | language of every LLM-written report text (summaries, context, chapter titles, rationales). Quotes and entity surface forms stay verbatim |
 | `CARACAL_DEFAULT_TARGET_LANGS` | csv | `en` | auto-translate target(s) when the source language differs |
 | `YTDLP_COOKIES_FILE` | path? | none | optional, for age-gated content the owner is entitled to |
 | `CARACAL_LOG_LEVEL` | str | `INFO` | |

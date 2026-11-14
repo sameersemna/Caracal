@@ -98,11 +98,12 @@ scripts/
 ## 4. Pipeline (DAG)
 
 ```
-ingest ─> normalize ─> chunk ─> transcribe ─> langid ─┬─> diarize ─> align ─> voiceprint ─┐
-            │                                         │                                  │
-            └─ (platform metadata + captions from ingest) ────────────────────────────────┤
-                                                                                         v
-                      plan ─> content ─> identity ─> verify ─> translate ─> subtitles ─> review ─> assemble
+ingest ─> normalize ─> chunk ─> transcribe ─> langid ─> plan ─┬─> diarize ─> align ─> voiceprint ─┐
+            │                                                  │   (align regenerates subtitles)  │
+            └─ (platform metadata + captions from ingest) ──────┴──────────────────────────────────┤
+                                                                                                  v
+                           content ─> identity ─> verify ─> translate ─> subtitles ─> review ─> assemble
+(The planner runs right after langid so that its music / depth / option rules can skip diarize and later stages — T2.5.)
 ```
 
 Every stage has the signature:
