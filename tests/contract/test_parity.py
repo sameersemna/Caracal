@@ -33,6 +33,8 @@ class Row:
     rest: tuple[tuple[str, str], ...]
     mcp: tuple[str, ...]
     pending: str | None = None
+    rest_only: bool = False
+    reason: str | None = None
 
 
 AVAILABLE: tuple[Row, ...] = (
@@ -65,6 +67,14 @@ AVAILABLE: tuple[Row, ...] = (
     Row("translate", (("POST", "/v1/jobs/{job_id}/translate"),), ("translate_job",)),
     Row("ask", (("POST", "/v1/jobs/{job_id}/ask"),), ("ask_about_audio",)),
     Row("full-text search", (("GET", "/v1/search"),), ("search_transcripts",)),
+    # Biometric exception (card T4.3): raw embeddings are calibration data and stay REST-only.
+    Row(
+        "voiceprint export (calibration)",
+        (("GET", "/v1/jobs/{job_id}/voiceprints"),),
+        (),
+        rest_only=True,
+        reason="speaker embeddings are biometric data: explicit bearer-protected REST only",
+    ),
 )
 
 PENDING: tuple[Row, ...] = ()
@@ -169,6 +179,11 @@ async def test_every_available_row_exists_on_both_sides(
     for row in AVAILABLE:
         for method, template in row.rest:
             assert _rest_route_exists(h.app, method, template), (row.capability, method, template)
+        if row.rest_only:
+            assert row.reason, row.capability
+            assert row.mcp == (), row.capability
+            assert not any("voiceprint" in name for name in tools), row.capability
+            continue
         for name in row.mcp:
             assert name in tools, (row.capability, name)
 

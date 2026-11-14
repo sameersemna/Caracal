@@ -660,3 +660,34 @@ async def test_runner_logs_every_stage_outcome_without_transcript_text(
     assert failed.retryable is True
     assert failed.attempts == 3
     assert "transcript" not in caplog.text.lower()
+
+
+class _RunnerMetrics:
+    """A structural ``MetricsSink`` recording failed stages."""
+
+    def __init__(self) -> None:
+        self.failures: list[str] = []
+
+    async def add_whisper_seconds(self, seconds: float) -> None:
+        return None
+
+    async def incr_stage_failure(self, stage: str) -> None:
+        self.failures.append(stage)
+
+
+async def test_failed_stage_increments_the_stage_failures_metric(
+    make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    repos = make_fake_repos()
+    job_id = await _new_job(repos)
+    metrics = _RunnerMetrics()
+    deps = replace(_deps(settings, repos), metrics=metrics)
+
+    async def boom(ctx: StageContext) -> StageResult:
+        raise CaracalError(ErrorCode.INTERNAL, "stage exploded")
+
+    status = await run_pipeline(job_id, deps, {Stage.ASSEMBLE: boom})
+
+    assert status == "done"
+    assert metrics.failures == ["assemble"]

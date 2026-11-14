@@ -129,7 +129,7 @@ class Worker:
                 lock=lambda: whisper_lock(redis, self.keys),
             )
         )
-        self.llm = llm if llm is not None else LLMClient(settings, self._http)
+        self.llm = llm if llm is not None else LLMClient(settings, self._http, metrics=self.metrics)
         self.resolver: Resolver = resolver if resolver is not None else SystemResolver()
         # One search router per process: budget, cache and provider fallback live here
         # (docs/01 §5, docs/04 §8).
@@ -449,6 +449,7 @@ class Worker:
             redis=self.redis,
             keys=self.keys,
             search=self.search,
+            metrics=self.metrics,
         )
 
     async def _still_owner(self, entry_id: str) -> bool:

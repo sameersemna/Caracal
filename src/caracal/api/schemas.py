@@ -18,6 +18,7 @@ from pydantic import (
 )
 
 from caracal.analysis.translate import is_valid_target_lang
+from caracal.db.tables import EMB_DIM
 from caracal.pipeline.stages import JobOptions
 
 JobStatusValue = Literal["queued", "running", "done", "failed", "cancelled"]
@@ -251,6 +252,19 @@ class SpeakerDeleted(BaseModel):
 
     deleted: bool = True
     voiceprints_removed: int
+
+
+class VoiceprintItem(BaseModel):
+    """One diarized label and its raw speaker embedding (calibration export, card T4.3)."""
+
+    label: str
+    embedding: list[float] = Field(min_length=EMB_DIM, max_length=EMB_DIM)
+
+
+class VoiceprintExport(BaseModel):
+    """``GET /v1/jobs/{id}/voiceprints``; REST only because embeddings are biometric data."""
+
+    items: list[VoiceprintItem]
 
 
 class AskIn(BaseModel):

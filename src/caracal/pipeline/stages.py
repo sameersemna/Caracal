@@ -152,6 +152,14 @@ class Repos(Protocol):
     def speakers(self) -> SpeakerRepo: ...
 
 
+class MetricsSink(Protocol):
+    """The best-effort counters a stage or runner may update (``caracal.ops``)."""
+
+    async def add_whisper_seconds(self, seconds: float) -> None: ...
+
+    async def incr_stage_failure(self, stage: str) -> None: ...
+
+
 async def _never_cancelled() -> bool:
     """Default cancel probe for contexts built outside the runner."""
     return False
@@ -180,6 +188,7 @@ class StageContext:
     redis: Redis | None = None
     keys: Keys | None = None
     search: SearchRouter | None = None
+    metrics: MetricsSink | None = None
     cancelled: Callable[[], Awaitable[bool]] = _never_cancelled
     #: Set by the runner for an on-demand ``translate`` delivery: translate exactly these
     #: languages and ignore the plan's skip flag (docs/04 §10, card T3.3).
@@ -528,6 +537,19 @@ def _segment_rows(ctx: StageContext, transcript: Transcript) -> list[SegmentRow]
     ]
 
 
+async def _record_whisper_seconds(ctx: StageContext, chunk: Chunk) -> None:
+    """Add one chunk's audio duration to ``caracal_whisper_audio_seconds_total``."""
+    if ctx.metrics is None:
+        return
+    try:
+        await ctx.metrics.add_whisper_seconds(max(0.0, chunk.end_s - chunk.start_s))
+    except Exception as exc:  # best-effort telemetry, like every other counter
+        logger.warning(
+            "transcribe.metrics_failed",
+            extra={"job_id": str(ctx.job_id), "error": type(exc).__name__},
+        )
+
+
 async def stage_transcribe(ctx: StageContext) -> StageResult:
     """Transcribe every chunk under the whisper lock and persist the merged transcript."""
     specs = _chunk_specs(await _stage_output(ctx, Stage.CHUNK))
@@ -535,13 +557,14 @@ async def stage_transcribe(ctx: StageContext) -> StageResult:
     whisper = _require_whisper(ctx)
 
     results: list[WhisperResult] = []
-    for position, (spec, _chunk) in enumerate(zip(specs, chunks, strict=True), start=1):
+    for position, (spec, chunk) in enumerate(zip(specs, chunks, strict=True), start=1):
         if await ctx.cancelled():
             # The runner sees the cancel flag at the next stage boundary and settles the job
             # as ``cancelled``; no partial transcript is written (docs/05 §2).
             return StageResult(status="skipped", reason="cancelled")
         chunk_path = _job_path(ctx, _as_str(spec.get("path"), "chunk"))
         results.append(await whisper.transcribe(chunk_path, language=ctx.options.language))
+        await _record_whisper_seconds(ctx, chunk)
         await ctx.progress(
             round(position / len(chunks) * 100, 1),
             f"transcribed chunk {position}/{len(chunks)}",
@@ -1744,6 +1767,7 @@ def default_registry() -> dict[Stage, StageFn]:
 __all__ = [
     "CRITICAL_STAGES",
     "JobOptions",
+    "MetricsSink",
     "Repos",
     "Stage",
     "StageContext",

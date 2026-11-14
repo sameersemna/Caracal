@@ -16,7 +16,7 @@ import json
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal, TypeVar, cast
+from typing import Any, Literal, Protocol, TypeVar, cast
 
 import httpx
 from pydantic import BaseModel, ValidationError
@@ -32,6 +32,13 @@ logger = get_logger("caracal.llm.client")
 ModelT = TypeVar("ModelT", bound=BaseModel)
 EndpointKind = Literal["cloud", "local"]
 Mode = Literal["tool", "json"]
+
+
+class LlmMetrics(Protocol):
+    """The one metric the client records per call (``caracal_llm_calls_total``)."""
+
+    async def incr_llm_call(self, endpoint: str, mode: str, fallback: bool) -> None: ...
+
 
 _TOOL_SUFFIX = (
     "You MUST answer by calling the tool {tool_name} exactly once. "
@@ -210,10 +217,12 @@ class LLMClient:
         *,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         semaphore: asyncio.Semaphore | None = None,
+        metrics: LlmMetrics | None = None,
     ) -> None:
         self._settings = settings
         self._http = http
         self._sleep = sleep
+        self._metrics = metrics
         self._semaphore = (
             semaphore if semaphore is not None else asyncio.Semaphore(settings.CARACAL_LLM_CONCURRENCY)
         )
@@ -354,6 +363,7 @@ class LLMClient:
                     "duration_s": round(duration, 3),
                 },
             )
+            await self._record_call(state, current_mode)
             return ToolResult(
                 value=value,
                 meta=CallMeta(
@@ -407,7 +417,17 @@ class LLMClient:
                 "duration_s": round(duration, 3),
             },
         )
+        await self._record_call(state, "chat")
         return content
+
+    async def _record_call(self, state: _CallState, mode: str) -> None:
+        """Increment ``caracal_llm_calls_total``; metrics must never fail an LLM call."""
+        if self._metrics is None:
+            return
+        try:
+            await self._metrics.incr_llm_call(state.endpoint.kind, mode, state.fallback_used)
+        except Exception as exc:  # best-effort telemetry, like the worker's job metrics
+            logger.warning("llm.metrics_failed", extra={"error": type(exc).__name__})
 
     def _interpret(
         self,
@@ -625,4 +645,4 @@ class LLMClient:
         return cast(dict[str, Any], message)
 
 
-__all__ = ["CallMeta", "LLMClient", "Mode", "ToolResult"]
+__all__ = ["CallMeta", "LLMClient", "LlmMetrics", "Mode", "ToolResult"]

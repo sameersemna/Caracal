@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Callable
 from typing import Any
 
@@ -13,7 +14,7 @@ from tests.fakes.redis import RecordingRedis
 from tests.fakes.repo import make_fake_repos
 
 from caracal.app import AppDeps
-from caracal.cli import _run_worker, _serve, main
+from caracal.cli import _quiet_http_logs, _run_worker, _serve, main
 from caracal.config import Settings, get_settings
 from caracal.db.repo import PostgresJobRepo
 from caracal.log import get_logger
@@ -455,3 +456,39 @@ def test_migrate_rejects_invalid_configuration_without_running_alembic(
     invalid = next(record for record in records if record["msg"] == "config invalid")
     assert invalid["level"] == "ERROR"
     assert "DATABASE_URL" in str(invalid["fields"])
+
+
+def test_quiet_http_logs_suppresses_httpx_and_restores_the_level(caplog: pytest.LogCaptureFixture) -> None:
+    httpx_logger = logging.getLogger("httpx")
+    httpcore_logger = logging.getLogger("httpcore")
+    httpx_logger.setLevel(logging.INFO)
+    httpcore_logger.setLevel(logging.INFO)
+    caplog.set_level(logging.INFO)
+
+    with _quiet_http_logs():
+        httpx_logger.info("GET https://example.com/secret")
+        httpcore_logger.info("connection established")
+
+    assert "GET https://example.com/secret" not in caplog.text
+    assert "connection established" not in caplog.text
+    assert httpx_logger.level == logging.INFO
+    assert httpcore_logger.level == logging.INFO
+
+    httpx_logger.info("visible after doctor")
+    assert "visible after doctor" in caplog.text
+
+
+def test_worker_cli_flags_build_fast_recovery_intervals(
+    make_settings: Callable[..., Settings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from caracal.cli import _build_parser, _worker_intervals
+
+    args = _build_parser().parse_args(
+        ["worker", "--reclaim-after-s", "5", "--reclaim-every-s", "1", "--worker-id", "w-test"]
+    )
+    intervals = _worker_intervals(args)
+    assert intervals is not None
+    assert intervals.reclaim_min_idle_ms == 5_000
+    assert intervals.reclaim_s == 1.0
+    assert intervals.heartbeat_s == 10.0
+    assert args.worker_id == "w-test"

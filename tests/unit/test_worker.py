@@ -671,3 +671,37 @@ async def test_translate_deliveries_for_one_job_are_serialised(
 
     assert max_active == 1
     assert calls == ["subtitles", "assemble", "subtitles", "assemble"]
+
+
+async def test_worker_wires_the_metrics_registry_into_stages_and_the_llm(
+    make_settings: MakeSettings, tmp_path: Path, redis: RecordingRedis
+) -> None:
+    keys = Keys(PREFIX)
+    repos = make_fake_repos()
+    job_id = await _new_job(repos)
+    await _enqueue(redis, keys, job_id)
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path, REDIS_PREFIX=PREFIX, CARACAL_WORKER_CONCURRENCY=1)
+    seen: list[object] = []
+
+    async def capture(ctx: StageContext) -> StageResult:
+        seen.append(ctx.metrics)
+        return StageResult(status="done")
+
+    worker = Worker(
+        settings,
+        redis,
+        repos,
+        registry={Stage.CONTENT: capture},
+        worker_id="worker-metrics",
+        intervals=_fast_intervals(),
+    )
+    stop = asyncio.Event()
+    run = asyncio.create_task(worker.run(stop))
+    try:
+        await _wait_for(lambda: _status_is(repos, job_id, "done"))
+    finally:
+        stop.set()
+        await asyncio.wait_for(run, timeout=5)
+
+    assert seen == [worker.metrics]
+    assert worker.llm._metrics is worker.metrics

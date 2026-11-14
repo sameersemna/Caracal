@@ -505,3 +505,34 @@ async def test_citation_ids_tolerate_rendered_line_noise(make_settings: Any) -> 
     )
 
     assert [citation.seg_id for citation in result.citations] == ["seg:1", "seg:2"]
+
+
+@pytest.mark.asyncio
+async def test_inline_citation_tokens_are_stripped_from_the_answer_prose(make_settings: Any) -> None:
+    """Verdict 38: the answer text carries no bracketed evidence ids; citations do."""
+    repos = make_fake_repos()
+    job_id = await _done_job(repos)
+    rows = _segments(job_id, ["stress one", "stress two", "stress three"])
+    await repos.segments.replace_for_job(job_id, rows)
+    llm = _ScriptedLlm(
+        answer={
+            "answer": 'The talk says "treat" [seg:1], which is stress [seg:1].',
+            "confidence": 0.9,
+            "citations": [{"seg_id": "seg:1"}],
+        },
+    )
+
+    result = await qa.answer(
+        job_id,
+        "stress",
+        repos=repos.segments,
+        report=_report(),
+        transcript=_qa_segments(rows),
+        settings=make_settings(LLM_CONTEXT_CHARS=4000),
+        llm=llm,
+    )
+
+    assert result.answer == 'The talk says "treat", which is stress.'
+    assert "[seg:1]" not in result.answer
+    assert [citation.seg_id for citation in result.citations] == ["seg:1"]
+    assert result.evidence == ["seg:1"]
