@@ -145,16 +145,17 @@ Per speaker label, collect candidates from these **sources**, each producing `(n
 
 | Source | How | Base score |
 |---|---|---|
-| `self_intro` | regex + LLM over that speaker's segments: "I'm X", "my name is X", "ich bin X", "je m'appelle X", … (LLM handles all languages) | 0.85 |
+| `self_intro` | regex + LLM over that speaker's segments: "I'm X", "my name is X", "ich bin X", "je m'appelle X", … (LLM handles all languages). Full name 0.85, single given name 0.55. **In-character lines (impressions, parody, role-play, quoting, ads) are never a source** — measured: an impressionist's "It's me, John." | 0.85 / 0.55 |
 | `addressed_by_name` | another speaker says "thanks, X" / "welcome X" immediately before this speaker's turn | 0.6 |
-| `metadata` | name appears in title/channel/uploader/description; channel owner is likely the host (most talk time or first speaker) | 0.5 |
+| `metadata` | name appears in title/channel/uploader/description **and is linked to the label**: sole speaker, or the name occurs in the label's own speech / a verified addressed mention, or channel/uploader name → the `host`/`presenter` label | 0.5 |
 | `voiceprint` | strong match → similarity; weak → similarity × 0.6 | sim |
 | `hint` | caller's `speaker_hints` | 0.7 |
 | `web` | verify stage (§8) confirms the name is associated with the channel/event/voice context | +0.15 |
 
 Fusion: `confidence = 1 − Π(1 − score_i)` over independent sources for the same normalised name, capped at 0.98;
 conflicting names → keep all as candidates, `name` = top candidate only if it leads the second by ≥ 0.2,
-otherwise `name: null` with a ReviewFlag "ambiguous identity". A name with only one `metadata` source is never
+otherwise `name: null` with a ReviewFlag "ambiguous identity". The top name also needs confidence ≥ 0.6. Comedy/sketch/impression/parody
+content halves self_intro/addressed scores and flags "performance content: speaker identities uncertain". A name with only one `metadata` source is never
 promoted to `name` (stays a candidate) — **except the sole-speaker case**: when one label has ≥ 90 % of talk time and a person name
 appears in `meta:title` / `meta:uploader` / `meta:channel` and is also recognised as a `person` entity by content analysis, the metadata
 score is 0.75 and the name may be promoted (measured case: TED "… | Daniel Levitin | TED", one speaker, 100 % talk time).

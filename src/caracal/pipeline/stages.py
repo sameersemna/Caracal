@@ -19,9 +19,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, Protocol, cast
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
 from caracal.analysis.content import analyse_content
+from caracal.analysis.identity import VoiceprintMatch, resolve_identities
 from caracal.analysis.planner import PlanInputs
 from caracal.analysis.planner import plan as build_plan
 from caracal.asr import (
@@ -44,6 +45,7 @@ from caracal.ingest.direct import download_direct
 from caracal.ingest.ssrf import Resolver
 from caracal.llm.client import LLMClient
 from caracal.log import get_logger
+from caracal.report.model import Entity
 from caracal.speakers.align import assign_speakers, retime_outside_speech, speaker_stats
 from caracal.speakers.diarize import Diarizer, Turn
 from caracal.speakers.voiceprint import classify
@@ -859,12 +861,151 @@ async def stage_content(ctx: StageContext) -> StageResult:
     return StageResult(status="done", output=analysis.model_dump(mode="json"))
 
 
+def _speaker_stats_output(value: object) -> dict[str, dict[str, float | int]]:
+    """The align checkpoint's per-label statistics, re-validated for the identity stage."""
+    raw = _as_dict(value, "align")
+    stats: dict[str, dict[str, float | int]] = {}
+    for label, item in raw.items():
+        if not isinstance(label, str) or not label:
+            raise _malformed("align")
+        entry = _as_dict(item, "align")
+        stats[label] = {
+            "talk_time_s": _as_number(entry.get("talk_time_s"), "align"),
+            "share": _as_number(entry.get("share"), "align"),
+            "first_seen_s": _as_number(entry.get("first_seen_s"), "align"),
+        }
+    return stats
+
+
+def _voiceprint_matches(value: dict[str, object] | None) -> dict[str, list[VoiceprintMatch]]:
+    """The voiceprint checkpoint's matches, parsed into the identity stage's value type."""
+    if value is None:
+        return {}
+    raw = value.get("matches")
+    if raw is None:
+        return {}
+    matches = _as_dict(raw, "voiceprint")
+    parsed: dict[str, list[VoiceprintMatch]] = {}
+    for label, items in matches.items():
+        if not isinstance(label, str) or not label:
+            raise _malformed("voiceprint")
+        kept: list[VoiceprintMatch] = []
+        for item in _as_list(items, "voiceprint"):
+            entry = _as_dict(item, "voiceprint")
+            match_class = entry.get("class")
+            if match_class not in ("match", "candidate"):
+                continue
+            kept.append(
+                VoiceprintMatch(
+                    known_speaker_id=UUID(_as_str(entry.get("known_speaker_id"), "voiceprint")),
+                    name=_as_str(entry.get("name"), "voiceprint"),
+                    similarity=_as_number(entry.get("similarity"), "voiceprint"),
+                    match_class=match_class,
+                )
+            )
+        if kept:
+            parsed[label] = kept
+    return parsed
+
+
+def _content_entities(value: dict[str, object] | None) -> list[Entity]:
+    """The person (and other) entities the content stage found, for the metadata source."""
+    if value is None:
+        return []
+    entities: list[Entity] = []
+    for item in _as_list(value.get("entities", []), "content"):
+        try:
+            entities.append(Entity.model_validate(item))
+        except ValidationError as exc:
+            raise _malformed("content") from exc
+    return entities
+
+
+def _profile_genre(value: dict[str, object] | None) -> str | None:
+    """The plan's ``content_profile.likely_genre`` when the checkpoint carries one."""
+    if value is None:
+        return None
+    profile = value.get("content_profile")
+    if not isinstance(profile, dict):
+        return None
+    genre = profile.get("likely_genre")
+    if not isinstance(genre, str):
+        return None
+    stripped = genre.strip()
+    return stripped or None
+
+
+def _content_context(value: dict[str, object] | None) -> tuple[str | None, list[str]]:
+    """The content stage's ``context.genre`` and ``context.tone``, for the performance rule."""
+    if value is None:
+        return None, []
+    context = value.get("context")
+    if not isinstance(context, dict):
+        return None, []
+    genre_value = context.get("genre")
+    genre = genre_value.strip() if isinstance(genre_value, str) and genre_value.strip() else None
+    tone_value = context.get("tone")
+    tone: list[str] = []
+    if isinstance(tone_value, list):
+        tone = [item.strip() for item in tone_value if isinstance(item, str) and item.strip()]
+    return genre, tone
+
+
 async def stage_identity(ctx: StageContext) -> StageResult:
-    """Identity resolution is gated by the plan; the resolver itself lands in a later card."""
+    """Resolve speaker names from mentions, metadata, hints and voiceprints (docs/04 §7).
+
+    The plan gates the stage first; the aligned transcript supplies the labels and their talk
+    statistics, the content checkpoint the person entities the metadata source needs, and the
+    voiceprint checkpoint the strong/weak matches. The LLM only extracts mentions and writes
+    role descriptions — every candidate, score and promotion is decided deterministically.
+    """
     reason = await _plan_skip(ctx, Stage.IDENTITY)
     if reason is not None:
         return StageResult(status="skipped", reason=reason)
-    return StageResult(status="skipped", reason=_PENDING_STAGE)
+    if ctx.llm is None:
+        return StageResult(status="skipped", reason="llm unavailable")
+    align = await _done_output(ctx, Stage.ALIGN)
+    if align is None:
+        return StageResult(status="skipped", reason="unavailable")
+    stats = _speaker_stats_output(align.get("speakers"))
+    if not stats:
+        return StageResult(status="skipped", reason="unavailable")
+
+    transcript = _load_transcript(ctx)
+    voiceprint = await _done_output(ctx, Stage.VOICEPRINT)
+    content = await _done_output(ctx, Stage.CONTENT)
+    plan = await _stage_output(ctx, Stage.PLAN)
+    content_genre, content_tone = _content_context(content)
+    metadata = _metadata_mapping(await _ingest_platform(ctx), await _job_title(ctx))
+    result = await resolve_identities(
+        transcript,
+        metadata,
+        ctx.options.speaker_hints,
+        _content_entities(content),
+        _voiceprint_matches(voiceprint),
+        stats,
+        ctx.settings,
+        llm=ctx.llm,
+        profile_genre=_profile_genre(plan),
+        content_genre=content_genre,
+        content_tone=content_tone,
+    )
+    logger.info(
+        "identity complete",
+        extra={
+            "job_id": str(ctx.job_id),
+            "speakers": len(result.speakers),
+            "named": sum(1 for identity in result.speakers if identity.name is not None),
+            "flags": len(result.flags),
+        },
+    )
+    return StageResult(
+        status="done",
+        output={
+            "speakers": [identity.model_dump(mode="json") for identity in result.speakers],
+            "flags": [flag.model_dump(mode="json") for flag in result.flags],
+        },
+    )
 
 
 async def stage_verify(ctx: StageContext) -> StageResult:

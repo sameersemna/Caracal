@@ -1348,3 +1348,222 @@ async def test_stage_content_music_mode_returns_no_quotes_or_claims(
     ]
     prompt = fake.body()["messages"][1]["content"]
     assert "[seg:0]" not in prompt
+
+
+# --- T2.6 identity --------------------------------------------------------------------
+
+
+def _identity_transcript() -> Transcript:
+    rows: list[tuple[str, str, float, float]] = [
+        ("S1", "Hallo, ich bin Angela Merkel und willkommen.", 0.0, 3.0),
+        ("S2", "Vielen Dank fuer die Einladung.", 3.5, 6.0),
+    ]
+    segments = tuple(
+        Segment(
+            id=index,
+            start=start,
+            end=end,
+            text=text,
+            words=(),
+            avg_logprob=-0.1,
+            no_speech_prob=0.0,
+            lang="de",
+            speaker=speaker,
+        )
+        for index, (speaker, text, start, end) in enumerate(rows)
+    )
+    return Transcript(segments=segments, language_code="de", dropped={})
+
+
+def _identity_arguments() -> dict[str, Any]:
+    return {
+        "mentions": [
+            {
+                "speaker_label": "S1",
+                "name": "Angela Merkel",
+                "relation": "self_intro",
+                "seg_ids": ["seg:0"],
+            }
+        ],
+        "speakers": [
+            {"speaker_label": "S1", "role": "narrator", "description": "narrates the recording"},
+            {"speaker_label": "S2", "role": "guest", "description": "appears as a guest"},
+        ],
+    }
+
+
+def _identity_checkpoints(files: JobFiles) -> None:
+    files.write_json(files.transcript_json, _identity_transcript().to_dict())
+    _write_output(
+        files,
+        Stage.ALIGN,
+        {
+            "speakers": {
+                "S1": {"talk_time_s": 60.0, "share": 0.6, "first_seen_s": 0.0, "words": 60},
+                "S2": {"talk_time_s": 40.0, "share": 0.4, "first_seen_s": 3.5, "words": 40},
+            },
+            "retimed_words": 0,
+        },
+    )
+    _write_output(files, Stage.CONTENT, {"entities": []})
+    _write_output(
+        files,
+        Stage.VOICEPRINT,
+        {
+            "matches": {
+                "S2": [
+                    {
+                        "known_speaker_id": "6f1c1d1e-2a3b-4c5d-8e9f-0a1b2c3d4e5f",
+                        "name": "Jane Doe",
+                        "similarity": 0.962,
+                        "class": "match",
+                    }
+                ]
+            }
+        },
+    )
+
+
+async def test_identity_stage_resolves_mentions_and_voiceprints_from_checkpoints(
+    make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    await repos.jobs.set_title(job.id, "Ein Gespraech")
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    _identity_checkpoints(files)
+
+    fake = FakeOllama([json_response(_identity_arguments())])
+    http = httpx.AsyncClient(transport=fake.transport())
+    client = LLMClient(settings, http)
+    try:
+        result = await stage_identity(_context(settings, repos, files, job_id=job.id, llm=client))
+    finally:
+        await http.aclose()
+
+    assert result.status == "done"
+    assert fake.body()["format"] == "json"
+    speakers = result.output["speakers"]
+    assert isinstance(speakers, list)
+    by_label = {speaker["label"]: speaker for speaker in speakers}
+    assert by_label["S1"]["name"] == "Angela Merkel"
+    assert by_label["S1"]["confidence"] == pytest.approx(0.85)
+    assert by_label["S1"]["talk_time_s"] == pytest.approx(60.0)
+    assert by_label["S1"]["share"] == pytest.approx(0.6)
+    assert by_label["S1"]["role"] == "narrator"
+    assert by_label["S1"]["candidates"][0]["evidence"] == ["seg:0"]
+    assert by_label["S1"]["evidence"] == ["seg:0"]
+    assert by_label["S2"]["name"] == "Jane Doe"
+    assert by_label["S2"]["confidence"] == pytest.approx(0.962)
+    assert by_label["S2"]["known_speaker_id"] == "6f1c1d1e-2a3b-4c5d-8e9f-0a1b2c3d4e5f"
+    assert by_label["S2"]["voiceprint_similarity"] == pytest.approx(0.962)
+    assert result.output["flags"] == []
+
+
+async def test_identity_stage_passes_the_plan_genre_and_content_context(
+    make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    _identity_checkpoints(files)
+    _write_output(
+        files,
+        Stage.PLAN,
+        {
+            "run": {"identity": True},
+            "reasons": {},
+            "content_profile": {
+                "likely_genre": "comedy",
+                "expected_speakers": 2,
+                "needs_identity": True,
+                "checkworthy_domain": False,
+            },
+            "budgets": {"search_queries": 0, "llm_calls": 10, "claims": 0},
+            "music_detected": False,
+            "languages": None,
+        },
+    )
+    _write_output(
+        files,
+        Stage.CONTENT,
+        {
+            "entities": [],
+            "context": {"genre": "stand-up", "tone": ["satirical", "playful"]},
+        },
+    )
+
+    fake = FakeOllama([json_response(_identity_arguments())])
+    http = httpx.AsyncClient(transport=fake.transport())
+    client = LLMClient(settings, http)
+    try:
+        result = await stage_identity(_context(settings, repos, files, job_id=job.id, llm=client))
+    finally:
+        await http.aclose()
+
+    assert result.status == "done"
+    assert result.output["flags"] == [
+        {
+            "severity": "warn",
+            "field": "speakers",
+            "message": "performance content: speaker identities uncertain",
+        }
+    ]
+    speakers = result.output["speakers"]
+    assert isinstance(speakers, list)
+    by_label = {speaker["label"]: speaker for speaker in speakers}
+    assert by_label["S1"]["name"] is None
+    assert by_label["S1"]["candidates"][0]["confidence"] == pytest.approx(0.425)
+
+    prompt = fake.body()["messages"][1]["content"]
+    assert "[plan:likely_genre] comedy" in prompt
+    assert "[content:genre] stand-up" in prompt
+    assert "[content:tone] satirical, playful" in prompt
+
+
+async def test_identity_stage_is_skipped_by_the_plan(make_settings: MakeSettings, tmp_path: Path) -> None:
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    _write_output(
+        files,
+        Stage.PLAN,
+        {
+            "run": {"identity": False},
+            "reasons": {"identity": "music detected"},
+            "content_profile": {
+                "likely_genre": "music",
+                "expected_speakers": None,
+                "needs_identity": False,
+                "checkworthy_domain": False,
+            },
+            "budgets": {"search_queries": 0, "llm_calls": 0, "claims": 0},
+            "music_detected": True,
+            "languages": None,
+        },
+    )
+
+    result = await stage_identity(_context(settings, repos, files, job_id=job.id))
+
+    assert result.status == "skipped"
+    assert result.reason == "music detected"
+
+
+async def test_identity_stage_skips_without_an_llm(make_settings: MakeSettings, tmp_path: Path) -> None:
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    _identity_checkpoints(files)
+
+    result = await stage_identity(_context(settings, repos, files, job_id=job.id))
+
+    assert result.status == "skipped"
+    assert result.reason == "llm unavailable"
