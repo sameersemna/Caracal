@@ -122,13 +122,6 @@ async def run_pipeline(
     current: Stage | None = None
     rows = {row.name: row for row in await deps.repos.jobs.list_stages(job_id)}
 
-    if job.status == "queued":
-        await deps.repos.jobs.set_status(job_id, "running")
-    await deps.queue_events(
-        job_id,
-        _event({"type": "status", "status": "running"}, finished=finished, total=total),
-    )
-
     async def load(stage: Stage) -> dict[str, object] | None:
         value = files.read_json(files.stage(stage))
         if value is None:
@@ -168,6 +161,12 @@ async def run_pipeline(
 
     try:
         async with asyncio.timeout(float(deps.settings.CARACAL_JOB_TIMEOUT_S)):
+            if job.status == "queued":
+                await deps.repos.jobs.set_status(job_id, "running")
+            await deps.queue_events(
+                job_id,
+                _event({"type": "status", "status": "running"}, finished=finished, total=total),
+            )
             for stage in scheduled:
                 current = stage
                 if await deps.cancel_check(job_id):
