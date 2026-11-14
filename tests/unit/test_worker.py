@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.fakes.redis import RecordingRedis, all_keys, make_fake_redis
+from tests.fakes.redis import RecordingRedis, all_keys, make_fake_redis, text
 from tests.fakes.repo import make_fake_repos
 from tests.repo_contract import Repos
 
@@ -119,6 +120,69 @@ async def test_worker_processes_a_job_end_to_end_and_cleans_the_stream(
     assert all(key.startswith(PREFIX) for key in keys_seen)
     assert redis.published
     assert all(channel.startswith(PREFIX) for channel in redis.published)
+
+
+async def test_ownership_loss_stops_the_job_without_ack_and_keeps_the_new_owners_entry(
+    make_settings: MakeSettings,
+    tmp_path: Path,
+    redis: RecordingRedis,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Verdict 04 fix 2: the stale worker returns "lost", writes nothing and does not ack."""
+    caplog.set_level(logging.WARNING, logger="caracal.worker")
+    keys = Keys(PREFIX)
+    repos = make_fake_repos()
+    job_id = await _new_job(repos)
+    entry_id = await _enqueue(redis, keys, job_id)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked(ctx: StageContext) -> StageResult:
+        started.set()
+        await release.wait()
+        return StageResult(status="done", output={"must": "not be written"})
+
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path, REDIS_PREFIX=PREFIX, CARACAL_WORKER_CONCURRENCY=1)
+    worker = Worker(
+        settings,
+        redis,
+        repos,
+        registry={Stage.INGEST: blocked},
+        worker_id="worker-a",
+        intervals=_fast_intervals(),
+    )
+    stop = asyncio.Event()
+    run = asyncio.create_task(worker.run(stop))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+
+        # Another worker reclaims the idle entry while worker-a is still inside the stage.
+        stolen = await JobQueue(redis, keys).reclaim("worker-b", min_idle_ms=0)
+        assert [item.entry_id for item in stolen] == [entry_id]
+        assert stolen[0].times_delivered == 2
+
+        release.set()
+        await _wait_for(lambda: _all_tasks_finished(worker))
+    finally:
+        stop.set()
+        await asyncio.wait_for(run, timeout=5)
+
+    assert "job.lost" in caplog.text
+    job = await repos.jobs.get(job_id)
+    assert job is not None
+    assert job.status == "running"
+    stages = {row.name: row for row in await repos.jobs.list_stages(job_id)}
+    assert stages["ingest"].status == "running"
+    assert not JobFiles(tmp_path, job_id).stage(Stage.INGEST).exists()
+
+    # The entry is still pending, still owned by worker-b: worker-a must not have acked it.
+    assert await redis.xlen(keys.jobs_stream()) == 1
+    pending = await redis.xpending_range(keys.jobs_stream(), "workers", min="-", max="+", count=10)
+    assert [(text(row["message_id"]), text(row["consumer"])) for row in pending] == [(entry_id, "worker-b")]
+
+
+async def _all_tasks_finished(worker: Worker) -> bool:
+    return all(task.done() for task in worker._in_flight)
 
 
 async def _status_is(repos: Repos, job_id: uuid.UUID, expected: str) -> bool:

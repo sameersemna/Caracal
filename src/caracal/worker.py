@@ -196,8 +196,9 @@ class Worker:
             return
 
         touch = asyncio.create_task(self._touch_entry(delivery.entry_id))
+        status: str | None = None
         try:
-            await run_pipeline(delivery.job_id, self._deps(), self.registry)
+            status = await run_pipeline(delivery.job_id, self._deps(delivery.entry_id), self.registry)
         except asyncio.CancelledError:
             raise
         except CaracalError as exc:
@@ -221,18 +222,37 @@ class Worker:
         finally:
             touch.cancel()
             await asyncio.gather(touch, return_exceptions=True)
+        if status == "lost":
+            # Another consumer reclaimed the entry: it owns the job now, so leave the entry
+            # pending for it and write nothing (docs/05 §2).
+            logger.warning(
+                "job.lost",
+                extra={
+                    "job_id": str(delivery.job_id),
+                    "entry_id": delivery.entry_id,
+                    "worker_id": self.worker_id,
+                },
+            )
+            return
         await self._ack(delivery.entry_id)
 
     async def _touch_entry(self, entry_id: str) -> None:
         while True:
             await asyncio.sleep(self.intervals.touch_s)
             try:
-                await self.queue.touch(self.worker_id, entry_id)
+                owned = await self.queue.touch(self.worker_id, entry_id)
             except CaracalError as exc:
                 logger.warning(
                     "queue touch failed",
                     extra={"entry_id": entry_id, "error": exc.message},
                 )
+                continue
+            if not owned:
+                logger.warning(
+                    "queue touch found a new owner",
+                    extra={"entry_id": entry_id, "worker_id": self.worker_id},
+                )
+                return
 
     async def _fail_repeated(self, delivery: Delivery) -> None:
         job = await self.repos.jobs.get(delivery.job_id)
@@ -246,9 +266,15 @@ class Worker:
 
     async def _ack(self, entry_id: str) -> None:
         try:
-            await self.queue.ack(entry_id)
+            owned = await self.queue.ack(self.worker_id, entry_id)
         except CaracalError as exc:
             logger.warning("queue ack failed", extra={"entry_id": entry_id, "error": exc.message})
+            return
+        if not owned:
+            logger.warning(
+                "queue ack skipped: another consumer owns the entry",
+                extra={"entry_id": entry_id, "worker_id": self.worker_id},
+            )
 
     async def _heartbeat(self) -> None:
         while True:
@@ -278,13 +304,30 @@ class Worker:
             for delivery in deliveries[:capacity]:
                 self._spawn(delivery)
 
-    def _deps(self) -> RunnerDeps:
+    def _deps(self, entry_id: str) -> RunnerDeps:
+        async def still_owner() -> bool:
+            return await self._still_owner(entry_id)
+
         return RunnerDeps(
             settings=self.settings,
             repos=self.repos,
             queue_events=self._publish,
             cancel_check=self._cancelled,
+            still_owner=still_owner,
         )
+
+    async def _still_owner(self, entry_id: str) -> bool:
+        """True while this worker still owns the queue entry (owner-checked touch)."""
+        try:
+            return await self.queue.touch(self.worker_id, entry_id)
+        except CaracalError as exc:
+            # A Redis outage is not proof that another worker claimed the job; keep working
+            # (the periodic heartbeat retries) rather than abandoning it mid-stage.
+            logger.warning(
+                "queue owner check failed",
+                extra={"entry_id": entry_id, "error": exc.message},
+            )
+            return True
 
     async def _publish(self, job_id: uuid.UUID, event: dict[str, Any]) -> None:
         await publish_event(self.redis, self.keys, job_id, event)

@@ -31,6 +31,12 @@ _CHECKPOINT_TERMINAL = frozenset({"done", "skipped"})
 
 EventPublisher = Callable[[uuid.UUID, dict[str, Any]], Awaitable[None]]
 CancelCheck = Callable[[uuid.UUID], Awaitable[bool]]
+OwnerCheck = Callable[[], Awaitable[bool]]
+
+
+async def _always_owner() -> bool:
+    """Default ownership check for callers that are not queue workers."""
+    return True
 
 
 @dataclass
@@ -42,6 +48,7 @@ class RunnerDeps:
     queue_events: EventPublisher
     cancel_check: CancelCheck
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+    still_owner: OwnerCheck = _always_owner
 
 
 def _now() -> str:
@@ -93,8 +100,9 @@ async def run_pipeline(
 ) -> str:
     """Execute the registry's stages in canonical order, checkpointing and resuming.
 
-    Returns the job's final status: ``done``, ``failed`` or ``cancelled`` (or the existing
-    terminal status when the job was already finished).
+    Returns the job's final status: ``done``, ``failed``, ``cancelled``, ``lost`` when another
+    worker took the queue entry over (nothing is written after that point), or the existing
+    terminal status when the job was already finished.
     """
     active = dict(registry) if registry is not None else default_registry()
     scheduled = [stage for stage in Stage if stage in active]
@@ -104,6 +112,8 @@ async def run_pipeline(
         raise CaracalError(ErrorCode.NOT_FOUND, "job not found", {"job_id": str(job_id)})
     if job.status in JOB_TERMINAL_STATUSES:
         return job.status
+    if not await deps.still_owner():
+        return "lost"
 
     try:
         options = JobOptions.model_validate(job.options)
@@ -169,6 +179,8 @@ async def run_pipeline(
             )
             for stage in scheduled:
                 current = stage
+                if not await deps.still_owner():
+                    return "lost"
                 if await deps.cancel_check(job_id):
                     await deps.repos.jobs.set_status(job_id, "cancelled")
                     await deps.queue_events(
@@ -193,6 +205,10 @@ async def run_pipeline(
                 )
 
                 result, stage_error, other = await _run_stage(active[stage], ctx, deps)
+                # A stage that was already running when ownership was lost finishes, but its
+                # result must not reach the store or the artifact directory (docs/05 §2).
+                if not await deps.still_owner():
+                    return "lost"
                 if result is not None:
                     files.write_json(
                         files.stage(stage),
@@ -242,6 +258,9 @@ async def run_pipeline(
                     )
                     return "failed"
     except TimeoutError:
+        # Another worker may own the entry by now; never overwrite its outcome.
+        if not await deps.still_owner():
+            return "lost"
         latest = await deps.repos.jobs.get(job_id)
         if latest is not None and latest.status in JOB_TERMINAL_STATUSES:
             return latest.status
@@ -255,6 +274,8 @@ async def run_pipeline(
         )
         return "failed"
 
+    if not await deps.still_owner():
+        return "lost"
     await deps.repos.jobs.set_status(job_id, "done")
     await deps.queue_events(
         job_id,

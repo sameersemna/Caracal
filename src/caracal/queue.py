@@ -47,6 +47,37 @@ end
 return 0
 """
 
+# Heartbeat an entry only when ``ARGV[2]`` is still the pending owner (docs/05 §2).
+# KEYS[1] = stream, ARGV[1] = group, ARGV[2] = consumer, ARGV[3] = entry id.
+_TOUCH_LUA = """
+local p = redis.call('XPENDING', KEYS[1], ARGV[1], ARGV[3], ARGV[3], 1)
+if p[1] == nil or p[1][2] ~= ARGV[2] then return 0 end
+redis.call('XCLAIM', KEYS[1], ARGV[1], ARGV[2], 0, ARGV[3], 'JUSTID')
+return 1
+"""
+
+# Acknowledge only when ``ARGV[2]`` is still the pending owner: a stale consumer must never
+# remove the entry a newer owner is working on (docs/05 §2).
+_ACK_LUA = """
+local p = redis.call('XPENDING', KEYS[1], ARGV[1], ARGV[3], ARGV[3], 1)
+if p[1] == nil or p[1][2] ~= ARGV[2] then return 0 end
+redis.call('XACK', KEYS[1], ARGV[1], ARGV[3])
+redis.call('XDEL', KEYS[1], ARGV[3])
+return 1
+"""
+
+# One round-trip for count and window: a counter can never be left without a TTL when the
+# connection drops between INCR and EXPIRE (docs/05 §2). ARGV[1] = window seconds.
+_RATE_LIMIT_LUA = """
+local count = redis.call('INCR', KEYS[1])
+local ttl = redis.call('TTL', KEYS[1])
+if ttl == -1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+    ttl = tonumber(ARGV[1])
+end
+return {count, ttl}
+"""
+
 
 def _text(value: object) -> str:
     if isinstance(value, bytes):
@@ -200,27 +231,43 @@ class JobQueue:
                 deliveries.append(_delivery(entry_id, cast("Mapping[object, object]", fields), 1))
         return deliveries
 
-    async def touch(self, consumer: str, entry_id: str) -> None:
-        """Reset an entry's idle time (XCLAIM with min-idle 0 and JUSTID)."""
+    async def touch(self, consumer: str, entry_id: str) -> bool:
+        """Reset an entry's idle time, but only while ``consumer`` still owns it.
+
+        Returns ``True`` when the entry is still pending for ``consumer`` (and was re-claimed
+        for it), ``False`` when another consumer owns it or it is no longer pending.
+        """
         try:
-            await self.redis.xclaim(
+            result = await self.redis.eval(
+                _TOUCH_LUA,
+                1,
                 self.keys.jobs_stream(),
                 self.group,
                 consumer,
-                0,
-                [entry_id],
-                justid=True,
+                entry_id,
             )
         except RedisError as exc:
-            raise _redis_error("xclaim", exc) from exc
+            raise _redis_error("touch", exc) from exc
+        return int(cast("int", result)) == 1
 
-    async def ack(self, entry_id: str) -> None:
-        """Acknowledge and delete a finished entry."""
+    async def ack(self, consumer: str, entry_id: str) -> bool:
+        """Acknowledge and delete an entry, but only while ``consumer`` still owns it.
+
+        Returns ``True`` when this consumer's pending entry was acknowledged and deleted,
+        ``False`` (doing nothing) when another consumer owns it or it is no longer pending.
+        """
         try:
-            await self.redis.xack(self.keys.jobs_stream(), self.group, entry_id)
-            await self.redis.xdel(self.keys.jobs_stream(), entry_id)
+            result = await self.redis.eval(
+                _ACK_LUA,
+                1,
+                self.keys.jobs_stream(),
+                self.group,
+                consumer,
+                entry_id,
+            )
         except RedisError as exc:
-            raise _redis_error("xack", exc) from exc
+            raise _redis_error("ack", exc) from exc
+        return int(cast("int", result)) == 1
 
     async def reclaim(self, consumer: str, *, min_idle_ms: int) -> list[Delivery]:
         """Take over entries idle longer than ``min_idle_ms`` (dead consumer recovery)."""
@@ -391,15 +438,18 @@ async def rate_limit(
     limit: int,
     window_s: int = _RATE_WINDOW_S,
 ) -> tuple[bool, int]:
-    """Fixed-window counter; returns ``(allowed, retry_after_s)``."""
+    """Fixed-window counter; returns ``(allowed, retry_after_s)``.
+
+    Increment and window setup run as one Lua script, so a counter can never survive without
+    a TTL (which would lock that token+IP out permanently).
+    """
     key = keys.ratelimit(ident_hash)
     try:
-        count = int(await redis.incr(key))
-        await redis.expire(key, window_s, nx=True)
-        if count <= limit:
-            return True, 0
-        ttl = int(await redis.ttl(key))
+        raw = await redis.eval(_RATE_LIMIT_LUA, 1, key, window_s)
     except RedisError as exc:
         raise _redis_error("rate_limit", exc) from exc
+    count, ttl = (int(value) for value in cast("list[int]", raw))
+    if count <= limit:
+        return True, 0
     retry_after = ttl if ttl > 0 else window_s
     return False, max(1, retry_after)

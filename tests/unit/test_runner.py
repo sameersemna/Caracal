@@ -37,10 +37,12 @@ def _deps(
     events: list[dict[str, Any]] | None = None,
     sleeps: list[float] | None = None,
     cancel: list[bool] | None = None,
+    owner: list[bool] | None = None,
 ) -> RunnerDeps:
     recorded_events = events if events is not None else []
     recorded_sleeps = sleeps if sleeps is not None else []
     cancel_flags = cancel if cancel is not None else []
+    owner_flags = owner if owner is not None else []
 
     async def publish(job_id: uuid.UUID, event: dict[str, Any]) -> None:
         recorded_events.append(dict(event))
@@ -51,12 +53,16 @@ def _deps(
     async def cancelled(job_id: uuid.UUID) -> bool:
         return bool(cancel_flags.pop(0)) if cancel_flags else False
 
+    async def still_owner() -> bool:
+        return owner_flags.pop(0) if owner_flags else True
+
     return RunnerDeps(
         settings=settings,
         repos=repos,
         queue_events=publish,
         cancel_check=cancelled,
         sleep=sleep,
+        still_owner=still_owner,
     )
 
 
@@ -374,6 +380,117 @@ async def test_cancel_between_stages_settles_cancelled(make_settings: MakeSettin
     assert calls == ["ingest"]
     assert events[-1] == {"type": "end", "status": "cancelled", "ts": events[-1]["ts"], "pct": 33.3}
     assert (await repos.jobs.get(job_id)).status == "cancelled"
+
+
+async def test_lost_ownership_before_the_first_stage_writes_nothing(
+    make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    repos = make_fake_repos()
+    job_id = await _new_job(repos)
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    calls: list[str] = []
+    events: list[dict[str, Any]] = []
+    files = JobFiles(tmp_path, job_id)
+    registry = {
+        Stage.INGEST: _stage_fn(Stage.INGEST, calls),
+        Stage.NORMALIZE: _stage_fn(Stage.NORMALIZE, calls),
+    }
+
+    # The first check (before the job status is written) passes, the stage-loop check fails.
+    status = await run_pipeline(job_id, _deps(settings, repos, events=events, owner=[True, False]), registry)
+
+    assert status == "lost"
+    assert calls == []
+    assert [event["type"] for event in events] == ["status"]
+    assert await repos.jobs.list_stages(job_id) == []
+    assert files.read_json(files.stage(Stage.INGEST)) is None
+    job = await repos.jobs.get(job_id)
+    assert job is not None
+    assert job.status == "running"
+
+
+async def test_lost_ownership_after_a_stage_writes_nothing_for_the_next(
+    make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    repos = make_fake_repos()
+    job_id = await _new_job(repos)
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    calls: list[str] = []
+    events: list[dict[str, Any]] = []
+    files = JobFiles(tmp_path, job_id)
+    registry = {
+        Stage.INGEST: _stage_fn(Stage.INGEST, calls, output={"ok": True}),
+        Stage.NORMALIZE: _stage_fn(Stage.NORMALIZE, calls),
+    }
+
+    status = await run_pipeline(
+        job_id,
+        # initial check, ingest pre-check, ingest post-check, normalize pre-check
+        _deps(settings, repos, events=events, owner=[True, True, True, False]),
+        registry,
+    )
+
+    assert status == "lost"
+    assert calls == ["ingest"]
+    stages = {row.name: row for row in await repos.jobs.list_stages(job_id)}
+    assert set(stages) == {"ingest"}
+    assert stages["ingest"].status == "done"
+    assert files.read_json(files.stage(Stage.INGEST)) == {
+        "status": "done",
+        "reason": None,
+        "output": {"ok": True},
+    }
+    assert files.read_json(files.stage(Stage.NORMALIZE)) is None
+    assert [event["type"] for event in events] == ["status", "stage", "stage"]
+    assert events[-1]["status"] == "done"
+    job = await repos.jobs.get(job_id)
+    assert job is not None
+    assert job.status == "running"
+
+
+async def test_stage_result_is_discarded_when_ownership_is_lost_while_it_runs(
+    make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    repos = make_fake_repos()
+    job_id = await _new_job(repos)
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    files = JobFiles(tmp_path, job_id)
+    events: list[dict[str, Any]] = []
+    lost = False
+
+    async def stage(ctx: StageContext) -> StageResult:
+        nonlocal lost
+        lost = True
+        return StageResult(status="done", output={"must": "not be written"})
+
+    async def still_owner() -> bool:
+        return not lost
+
+    async def publish(job_id: uuid.UUID, event: dict[str, Any]) -> None:
+        events.append(dict(event))
+
+    async def never_cancelled(job_id: uuid.UUID) -> bool:
+        return False
+
+    deps = RunnerDeps(
+        settings=settings,
+        repos=repos,
+        queue_events=publish,
+        cancel_check=never_cancelled,
+        still_owner=still_owner,
+    )
+
+    status = await run_pipeline(job_id, deps, {Stage.INGEST: stage})
+
+    assert status == "lost"
+    assert files.read_json(files.stage(Stage.INGEST)) is None
+    stages = {row.name: row for row in await repos.jobs.list_stages(job_id)}
+    assert stages["ingest"].status == "running"
+    assert [event["type"] for event in events] == ["status", "stage"]
+    assert events[-1]["status"] == "running"
+    job = await repos.jobs.get(job_id)
+    assert job is not None
+    assert job.status == "running"
 
 
 async def test_job_timeout_fails_the_job(make_settings: MakeSettings, tmp_path: Path) -> None:
