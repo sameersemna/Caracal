@@ -19,3 +19,5 @@ correct and the file is under `data/uploads/`, but the directory UUID is not the
 (then T1.1 can write directly into `uploads/<row id>/`), or change docs/05 §3 to state that the
 upload directory is keyed by the storage id stored in `uploads.path` and that consumers must use
 `path` rather than reconstructing it from `id`.
+
+**Resolution (boss, verdict 08):** accepted for now; T1.6 adds `upload_id` to `UploadRepo.create` so the directory is `uploads/<upload_id>/`.
