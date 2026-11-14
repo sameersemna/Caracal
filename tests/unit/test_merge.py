@@ -364,3 +364,15 @@ def test_join_words_attaches_a_detached_punctuation_token() -> None:
         _word("...", 0.1, 0.2, space_before=True),
     )
     assert join_words(words) == "and..."
+
+
+def test_join_words_attaches_a_closing_quote_after_punctuation() -> None:
+    """Verdict 13 carry-forward: a cue line started with ``."`` because it got a space."""
+    words = [
+        _word("He", 0.0, 0.1, space_before=False),
+        _word("said", 0.1, 0.2, space_before=True),
+        _word('."', 0.2, 0.3, space_before=True),
+        _word("Then", 0.3, 0.4, space_before=True),
+    ]
+
+    assert join_words(words) == 'He said." Then'

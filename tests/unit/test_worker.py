@@ -15,7 +15,7 @@ from tests.fakes.repo import make_fake_repos
 from tests.repo_contract import Repos
 
 from caracal.config import Settings
-from caracal.pipeline.stages import Stage, StageContext, StageResult
+from caracal.pipeline.stages import Stage, StageContext, StageResult, default_registry
 from caracal.queue import JobQueue, Keys
 from caracal.storage import JobFiles
 from caracal.worker import Worker, WorkerIntervals
@@ -97,6 +97,7 @@ async def test_worker_processes_a_job_end_to_end_and_cleans_the_stream(
         settings,
         redis,
         repos,
+        registry=default_registry(),
         worker_id="worker-a",
         intervals=_fast_intervals(),
     )
@@ -204,7 +205,14 @@ async def test_job_enqueued_before_the_worker_starts_is_delivered(
     await JobQueue(redis, keys).enqueue(job_id, "pipeline")
 
     settings = make_settings(CARACAL_DATA_DIR=tmp_path, REDIS_PREFIX=PREFIX, CARACAL_WORKER_CONCURRENCY=1)
-    worker = Worker(settings, redis, repos, worker_id="worker-a", intervals=_fast_intervals())
+    worker = Worker(
+        settings,
+        redis,
+        repos,
+        registry=default_registry(),
+        worker_id="worker-a",
+        intervals=_fast_intervals(),
+    )
     stop = asyncio.Event()
     run = asyncio.create_task(worker.run(stop))
     try:

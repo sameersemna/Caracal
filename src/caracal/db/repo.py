@@ -290,6 +290,7 @@ class UploadRepo(Protocol):
     async def create(
         self,
         *,
+        upload_id: uuid.UUID | None = None,
         filename: str,
         size_bytes: int,
         sha256: str,
@@ -531,6 +532,7 @@ class PostgresUploadRepo:
     async def create(
         self,
         *,
+        upload_id: uuid.UUID | None = None,
         filename: str,
         size_bytes: int,
         sha256: str,
@@ -539,7 +541,9 @@ class PostgresUploadRepo:
         statement = (
             sa.insert(uploads)
             .values(
-                id=uuid.uuid4(),
+                # The API generates the id before streaming the body so the upload directory
+                # is named after the row (docs/05 §3); a caller may still let the repo pick one.
+                id=upload_id if upload_id is not None else uuid.uuid4(),
                 filename=filename,
                 size_bytes=size_bytes,
                 sha256=sha256,

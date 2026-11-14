@@ -11,22 +11,26 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
+from caracal.asr.whisper import WhisperClient
 from caracal.config import Settings
 from caracal.db.repo import JobRepo, ReportRepo, SegmentRepo, UploadRepo
 from caracal.db.tables import JOB_TERMINAL_STATUSES
 from caracal.errors import CaracalError, ErrorCode
+from caracal.ingest.ssrf import Resolver, SystemResolver
 from caracal.log import get_logger
 from caracal.pipeline.runner import RunnerDeps, run_pipeline
-from caracal.pipeline.stages import Repos, Stage, StageFn
+from caracal.pipeline.stages import Repos, Stage, StageFn, m1_registry
 from caracal.queue import (
     Delivery,
     JobQueue,
     Keys,
     is_cancelled,
     publish_event,
+    whisper_lock,
 )
 
 logger = get_logger("caracal.worker")
@@ -84,16 +88,37 @@ class Worker:
         registry: Mapping[Stage, StageFn] | None = None,
         worker_id: str | None = None,
         intervals: WorkerIntervals = _DEFAULT_INTERVALS,
+        http: httpx.AsyncClient | None = None,
+        whisper: WhisperClient | None = None,
+        resolver: Resolver | None = None,
     ) -> None:
         self.settings = settings
         self.redis = redis
         self.repos = repos
-        self.registry = registry
         self.worker_id = worker_id or _default_worker_id()
         self.intervals = intervals
         self.keys = Keys(settings.REDIS_PREFIX)
         self.queue = JobQueue(redis, self.keys)
         self._in_flight: set[asyncio.Task[None]] = set()
+
+        # Process-wide stage clients (docs/01 §4): one HTTP client, one whisper client whose
+        # every call takes the Redis single-slot lock, and the DNS resolver used by ingest.
+        self._owns_http = http is None
+        self._http = (
+            http if http is not None else httpx.AsyncClient(timeout=float(settings.WHISPER_TIMEOUT_S))
+        )
+        self.whisper = (
+            whisper
+            if whisper is not None
+            else WhisperClient(
+                settings.WHISPER_URL,
+                self._http,
+                timeout_s=float(settings.WHISPER_TIMEOUT_S),
+                lock=lambda: whisper_lock(redis, self.keys),
+            )
+        )
+        self.resolver: Resolver = resolver if resolver is not None else SystemResolver()
+        self.registry = registry if registry is not None else m1_registry()
 
     @property
     def concurrency(self) -> int:
@@ -111,6 +136,8 @@ class Worker:
             reclaim.cancel()
             await asyncio.gather(heartbeat, reclaim, return_exceptions=True)
             await self._drain()
+            if self._owns_http:
+                await self._http.aclose()
 
     async def _consume_loop(self, stop: asyncio.Event) -> None:
         while not stop.is_set():
@@ -314,6 +341,10 @@ class Worker:
             queue_events=self._publish,
             cancel_check=self._cancelled,
             still_owner=still_owner,
+            whisper=self.whisper,
+            resolver=self.resolver,
+            redis=self.redis,
+            keys=self.keys,
         )
 
     async def _still_owner(self, entry_id: str) -> bool:

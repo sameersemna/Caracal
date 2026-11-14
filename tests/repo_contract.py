@@ -338,6 +338,28 @@ async def case_upload_lifecycle(repos: Repos) -> None:
     assert await repos.uploads.list_unconsumed_older_than(24) == []
 
 
+async def case_upload_create_honours_the_given_id(repos: Repos) -> None:
+    """Verdict 08 carry-forward: the API generates the id so the upload dir matches the row."""
+    upload_id = uuid.uuid4()
+    upload = await repos.uploads.create(
+        upload_id=upload_id,
+        filename="talk.wav",
+        size_bytes=10,
+        sha256="id-sha",
+        path=f"/data/uploads/{upload_id}/talk.wav",
+    )
+    assert upload.id == upload_id
+    assert await repos.uploads.get(upload_id) == upload
+
+    generated = await repos.uploads.create(
+        filename="other.wav",
+        size_bytes=1,
+        sha256="other",
+        path="/data/uploads/other.wav",
+    )
+    assert generated.id != upload_id
+
+
 async def case_report_upsert(repos: Repos) -> None:
     job = await repos.jobs.create(source_kind="direct", options={})
     assert await repos.reports.get(job.id) is None
@@ -406,6 +428,7 @@ CASES: tuple[Callable[[Repos], Awaitable[None]], ...] = (
     case_find_recent_done,
     case_delete_cascades,
     case_upload_lifecycle,
+    case_upload_create_honours_the_given_id,
     case_report_upsert,
     case_segments_replace_and_search,
 )

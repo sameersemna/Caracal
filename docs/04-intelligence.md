@@ -42,6 +42,9 @@ Inputs: duration, speech_ratio, music_detected, languages, platform metadata, op
 needs_identity: bool, checkworthy_domain: bool}, budgets: {search_queries: int, llm_calls: int}}`.
 
 Rules (in order; each produces a reason string):
+- **music / non-lexical** (measured: an instrumental track gives `🎵🎵🎵` segments and whisper labels it `nn`): if ≥ 70 % of speech time is in
+  segments whose text has no letters/digits after removing ♪ 🎵 🎶 `[Music]`-style tags → `music_detected: true`, every language span → `und`,
+  skip diarize/identity/verify/translate; the report describes it as music.
 - `speech_ratio < 0.05` → skip diarize/identity/verify/translate; content = "music/ambient" description only.
 - `options.diarize == "off"` or diarizer unavailable → skip diarize/align/voiceprint.
 - `diarize == "auto"` and duration < 20 s → diarize anyway (cheap) but identity uses single-speaker logic.

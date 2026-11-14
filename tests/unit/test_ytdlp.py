@@ -623,6 +623,30 @@ async def test_no_captions_is_empty_and_does_not_download(
             True,
         ),
         (
+            "ERROR: Unable to download webpage: TLS fingerprint mismatch",
+            ErrorCode.SOURCE_UNAVAILABLE,
+            "site blocked automated access",
+            False,
+        ),
+        (
+            "ERROR: impersonation request failed",
+            ErrorCode.SOURCE_UNAVAILABLE,
+            "site blocked automated access",
+            False,
+        ),
+        (
+            "ERROR: Unable to download webpage: HTTP Error 403: Forbidden",
+            ErrorCode.SOURCE_UNAVAILABLE,
+            "site blocked automated access",
+            False,
+        ),
+        (
+            "ERROR: HTTP Error 403: Forbidden - please sign in to continue",
+            ErrorCode.SOURCE_UNAVAILABLE,
+            "authentication required",
+            False,
+        ),
+        (
             "ERROR: unexpected explosion at https://example.com/watch?v=abc",
             ErrorCode.SOURCE_UNAVAILABLE,
             "source could not be downloaded",
@@ -658,3 +682,10 @@ async def test_extractor_error_is_mapped_too(make_settings: Any, monkeypatch: py
         await fetch_metadata(URL, make_settings(), resolver=_resolver())
     assert excinfo.value.code is ErrorCode.SOURCE_UNAVAILABLE
     assert excinfo.value.message == "video is private"
+
+
+def test_curl_cffi_is_installed_for_ytdlp_impersonation() -> None:
+    """Verdict 09 carry-forward: yt-dlp uses curl-cffi automatically when present."""
+    import curl_cffi
+
+    assert curl_cffi.__version__ == "0.17.0"

@@ -296,6 +296,13 @@ def _map_error(exc: BaseException) -> CaracalError:
         for marker in ("sign in", "login", "log in", "authentication", "cookies", "members-only")
     ):
         return CaracalError(ErrorCode.SOURCE_UNAVAILABLE, "authentication required", {"category": "auth"})
+    # Sites that block clients by TLS fingerprint (Vimeo, ...) return one of these. They are
+    # not an authentication problem: yt-dlp with curl-cffi impersonation may still succeed
+    # elsewhere, but this host's request was refused outright (verdict 09).
+    if any(marker in text for marker in ("tls fingerprint", "impersonat", "http error 403")):
+        return CaracalError(
+            ErrorCode.SOURCE_UNAVAILABLE, "site blocked automated access", {"category": "blocked"}
+        )
     return CaracalError(
         ErrorCode.SOURCE_UNAVAILABLE, "source could not be downloaded", {"category": "unknown"}
     )

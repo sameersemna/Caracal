@@ -352,14 +352,6 @@ def create_app(
 
     @app.exception_handler(StarletteHTTPException)
     async def http_error_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
-        if exc.status_code == 404 and request.method == "POST" and request.url.path == "/v1/uploads":
-            # The upload route only claims multipart bodies (see ``MultipartUploadRoute``);
-            # any other content type is an unsupported media type, not a missing route.
-            return _envelope(
-                415,
-                ErrorCode.UNSUPPORTED_MEDIA,
-                "POST /v1/uploads requires multipart/form-data",
-            )
         code = ErrorCode.NOT_FOUND if exc.status_code == 404 else ErrorCode.INVALID_INPUT
         response = _envelope(exc.status_code, code, str(exc.detail))
         for name, value in (exc.headers or {}).items():
