@@ -50,7 +50,7 @@ to one side without the other fails the gate.
 | `GET /v1/speakers` | `?q=` | `{"items": [KnownSpeaker]}` |
 | `POST /v1/speakers/enroll` | `{"job_id","speaker_label","name","notes"?}` | `201 KnownSpeaker` |
 | `DELETE /v1/speakers/{id}` | — | `204` |
-| `GET /v1/search` | `?q=&limit=20` | full-text hits across all transcripts `[{"job_id","title","seg_id","start","text","rank"}]` |
+| `GET /v1/search` | `?q=&limit=20` (≤ 50) | `{"items": [{"job_id","title","seg_id","start","speaker","text","rank"}]}` — done jobs only |
 
 ### `JobCreate`
 ```json
