@@ -2,14 +2,18 @@
 
 Measured 2026-11-14: gemma4 invents field names when the tool schema uses pydantic's
 default ``$defs``/``$ref`` layout, and even with an inlined schema it emits enum synonyms
-and upper-cased enum values. :func:`prepare_schema` produces the inlined, enum-annotated
-schema that is sent to the model; :func:`coerce` repairs the model's arguments before
-pydantic validation.
+and upper-cased enum values. It also omits any property literally named ``type`` because
+that collides with the JSON-Schema keyword (0/6 valid; renaming gave 6/6), so
+:func:`prepare_schema` rejects such wire names and pydantic validation aliases are the
+escape hatch. :func:`coerce` repairs the model's arguments before pydantic validation,
+including evidence lists, which gemma4 copies as whole transcript line prefixes
+(``"seg:2 S1"``).
 """
 
 from __future__ import annotations
 
 import copy
+import re
 from collections.abc import Mapping
 from functools import cache
 from typing import Any, TypeVar, cast
@@ -17,6 +21,26 @@ from typing import Any, TypeVar, cast
 from pydantic import BaseModel
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
+
+#: JSON-Schema keyword names that gemma4 will not emit as model properties (docs/04 §1).
+RESERVED_FIELD_NAMES: frozenset[str] = frozenset(
+    {
+        "type",
+        "items",
+        "properties",
+        "enum",
+        "format",
+        "required",
+        "default",
+        "const",
+        "anyOf",
+        "oneOf",
+        "allOf",
+        "$ref",
+    }
+)
+
+_EVIDENCE_ID_RE = re.compile(r"(?:seg|meta|web|vp|caption|hint):[A-Za-z0-9_.-]+")
 
 DEFAULT_SYNONYMS: dict[str, str] = {
     # entity type: place
@@ -74,6 +98,27 @@ def _resolve_ref(node: dict[str, Any], defs: Mapping[str, Any], stack: tuple[str
     return merged
 
 
+def _check_reserved_names(node: object) -> None:
+    """Raise for every declared property whose **wire** name is a JSON-Schema keyword.
+
+    Runs on the raw ``model_json_schema()`` output so nested models (still under ``$defs``)
+    are checked too; pydantic already renders ``validation_alias`` as the property name, which
+    is exactly the name the model sees and therefore the name that must not be reserved.
+    """
+    if isinstance(node, dict):
+        node_dict = cast(dict[str, Any], node)
+        properties = node_dict.get("properties")
+        if isinstance(properties, dict):
+            for name in cast(dict[str, Any], properties):
+                if name in RESERVED_FIELD_NAMES:
+                    raise ValueError(f"reserved field name: {name}")
+        for value in node_dict.values():
+            _check_reserved_names(value)
+    elif isinstance(node, list):
+        for item in node:
+            _check_reserved_names(item)
+
+
 def _finish(node: dict[str, Any]) -> None:
     """Drop ``title`` and append the enum hint, walking schema nodes structurally."""
     node.pop("title", None)
@@ -109,8 +154,11 @@ def prepare_schema(model_cls: type[BaseModel]) -> dict[str, Any]:
     """Return the cached tool schema for ``model_cls`` with inlined refs and enum hints.
 
     Recursive models raise :class:`ValueError`: an inlined schema cannot represent a cycle.
+    A field whose wire name (``validation_alias`` if set, else the field name) is a
+    JSON-Schema keyword raises :class:`ValueError`; alias the field instead.
     """
-    schema = model_cls.model_json_schema()
+    schema = model_cls.model_json_schema(by_alias=True)
+    _check_reserved_names(schema)
     defs = schema.pop("$defs", {})
     if not isinstance(defs, dict):
         raise ValueError("JSON schema $defs must be an object")
@@ -231,14 +279,65 @@ def _coerce_union(value: Any, branches: list[Any], synonyms: Mapping[str, str]) 
     return coerce(value, non_null[0], synonyms=synonyms)
 
 
+def _array_schema(schema: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """Return the array branch of a property schema, looking through ``anyOf``/``oneOf``."""
+    if schema.get("type") == "array":
+        return schema
+    for key in ("anyOf", "oneOf"):
+        branches = schema.get(key)
+        if not isinstance(branches, list):
+            continue
+        for branch in branches:
+            if isinstance(branch, Mapping) and cast(Mapping[str, Any], branch).get("type") == "array":
+                return cast(Mapping[str, Any], branch)
+    return None
+
+
+def _is_evidence_property(name: str, schema: Mapping[str, Any]) -> bool:
+    """True when a property holds evidence ids (by name, ``_evidence`` suffix or marker)."""
+    array = _array_schema(schema)
+    if array is None:
+        return False
+    if name == "evidence" or name.endswith("_evidence"):
+        return True
+    items = array.get("items")
+    return isinstance(items, Mapping) and cast(Mapping[str, Any], items).get("x-evidence") is True
+
+
+def _normalise_evidence(value: Any) -> list[str]:
+    """Flatten a value into de-duplicated evidence ids, dropping strings without one.
+
+    gemma4 copies the whole rendered line prefix (``"seg:2 S1"``) or a comma-separated list
+    (``"seg:2, seg:5"``); only the ids themselves are evidence (docs/04 §1, §9).
+    """
+    if isinstance(value, str):
+        candidates: list[Any] = [value]
+    elif isinstance(value, (list, tuple)):
+        candidates = list(value)
+    else:
+        candidates = [value]
+    ids: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not isinstance(candidate, str):
+            continue
+        for found in _EVIDENCE_ID_RE.findall(candidate):
+            if found in seen:
+                continue
+            seen.add(found)
+            ids.append(found)
+    return ids
+
+
 def coerce(
     value: Any, schema: Mapping[str, Any], *, synonyms: Mapping[str, str] = DEFAULT_SYNONYMS
 ) -> object:
     """Repair a model-supplied value against its JSON schema (docs/04 §1 step 2).
 
     Handles enum case/synonyms, numeric strings, ``"null"``/``""`` for nullable fields,
-    scalar-to-list promotion, numeric clamping and recursive object/array coercion.
-    Unknown extra keys are left untouched for pydantic's own model config to handle.
+    scalar-to-list promotion, numeric clamping, recursive object/array coercion and evidence
+    lists (ids extracted from rendered transcript prefixes, de-duplicated). Unknown extra keys
+    are left untouched for pydantic's own model config to handle.
     """
     if not isinstance(schema, Mapping):
         return value
@@ -282,7 +381,11 @@ def coerce(
         if isinstance(properties, Mapping):
             for key, subschema in cast(Mapping[str, Any], properties).items():
                 if key in result and isinstance(subschema, Mapping):
-                    result[key] = coerce(result[key], cast(Mapping[str, Any], subschema), synonyms=merged)
+                    node = cast(Mapping[str, Any], subschema)
+                    if _is_evidence_property(key, node):
+                        result[key] = _normalise_evidence(result[key])
+                    else:
+                        result[key] = coerce(result[key], node, synonyms=merged)
         additional = mapping.get("additionalProperties")
         if isinstance(additional, Mapping):
             known = set(properties) if isinstance(properties, Mapping) else set()
@@ -302,4 +405,4 @@ def coerce(
     return value
 
 
-__all__ = ["DEFAULT_SYNONYMS", "coerce", "prepare_schema"]
+__all__ = ["DEFAULT_SYNONYMS", "RESERVED_FIELD_NAMES", "coerce", "prepare_schema"]

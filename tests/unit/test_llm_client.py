@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 from typing import Any, Literal
 
@@ -13,7 +14,7 @@ from tests.fakes.ollama import (
     AsyncProbeTransport,
     FakeOllama,
     error_response,
-    fixture_response,
+    load_fixture,
     message_response,
     text_message,
     tool_call_message,
@@ -28,8 +29,10 @@ from caracal.llm.schema import DEFAULT_SYNONYMS
 
 
 class Entity(BaseModel):
+    """``type`` stays the report field name; ``entity_type`` is what the LLM may emit."""
+
     text: str
-    type: Literal["person", "org", "place", "date", "other"]
+    type: Literal["person", "org", "place", "date", "other"] = Field(validation_alias="entity_type")
     evidence: list[str]
 
 
@@ -47,9 +50,22 @@ _TOOL_SUFFIX = (
 _VALID_MESSAGE = {
     "language": "de",
     "speaker_name": "Angela Merkel",
-    "entities": [{"text": "Berlin", "type": "place", "evidence": ["seg:1"]}],
+    "entities": [{"text": "Berlin", "entity_type": "place", "evidence": ["seg:1"]}],
     "confidence": 0.9,
 }
+
+
+def _recorded_arguments(name: str) -> dict[str, Any]:
+    """Fixture arguments updated to the reserved-name-free wire name (card 17)."""
+    arguments = load_fixture(name)["message"]["tool_calls"][0]["function"]["arguments"]
+    converted = copy.deepcopy(arguments)
+    for entity in converted["entities"]:
+        entity["entity_type"] = entity.pop("type")
+    return converted
+
+
+def _recorded_response(name: str = "tool_call_inlined_schema") -> httpx.Response:
+    return message_response(tool_call_message(_recorded_arguments(name)))
 
 
 def _settings(**overrides: object) -> Settings:
@@ -77,7 +93,7 @@ async def _call(client: LLMClient, prompt: str = "PROMPT") -> Any:
 
 
 async def test_request_body_is_cloud_tool_call_with_inlined_schema() -> None:
-    fake = FakeOllama([fixture_response("tool_call_inlined_schema")])
+    fake = FakeOllama([_recorded_response()])
     async with httpx.AsyncClient(transport=fake.transport()) as http:
         result = await _call(LLMClient(_settings(), http))
 
@@ -124,16 +140,54 @@ async def test_valid_arguments_without_coercion_changes_report_clean_meta() -> N
     assert result.value.entities[0].text == "Berlin"
 
 
+async def test_aliased_model_end_to_end_uses_wire_name_and_report_field_name() -> None:
+    message = {
+        "language": "de",
+        "speaker_name": None,
+        "entities": [{"text": "Berlin", "entity_type": "Location", "evidence": ["seg:1 S1"]}],
+        "confidence": 0.5,
+    }
+    fake = FakeOllama([message_response(tool_call_message(message))])
+    async with httpx.AsyncClient(transport=fake.transport()) as http:
+        result = await _call(LLMClient(_settings(), http))
+
+    entity_parameters = fake.body()["tools"][0]["function"]["parameters"]["properties"]["entities"]["items"]
+    assert set(entity_parameters["properties"]) == {"text", "entity_type", "evidence"}
+    assert "type" not in entity_parameters["properties"]
+
+    assert result.value.entities[0].type == "place"
+    assert result.value.entities[0].evidence == ["seg:1"]
+    assert result.value.model_dump()["entities"][0]["type"] == "place"
+    assert result.meta.attempts == 1
+    assert result.meta.coerced is True
+
+
+async def test_aliased_model_accepts_the_plain_field_name_via_by_name() -> None:
+    message = {
+        "language": "de",
+        "speaker_name": None,
+        "entities": [{"text": "Berlin", "type": "place", "evidence": ["seg:1"]}],
+        "confidence": 0.5,
+    }
+    fake = FakeOllama([message_response(tool_call_message(message))])
+    async with httpx.AsyncClient(transport=fake.transport()) as http:
+        result = await _call(LLMClient(_settings(), http))
+
+    assert result.value.entities[0].type == "place"
+    assert result.meta.attempts == 1
+    assert result.meta.coerced is False
+
+
 async def test_invalid_first_reply_triggers_repair_without_echoing_values() -> None:
     invalid = {
         "language": "de",
-        "entities": [{"text": "Angela Merkel", "type": "person"}],
+        "entities": [{"text": "Angela Merkel", "entity_type": "person"}],
         "confidence": 1,
     }
     fake = FakeOllama(
         [
             message_response(tool_call_message(invalid)),
-            fixture_response("tool_call_inlined_schema"),
+            _recorded_response(),
         ]
     )
     async with httpx.AsyncClient(transport=fake.transport()) as http:
@@ -155,7 +209,7 @@ async def test_call_tool_merges_per_call_synonyms() -> None:
     message = {
         "language": "de",
         "speaker_name": None,
-        "entities": [{"text": "Köln", "type": "town", "evidence": ["seg:0"]}],
+        "entities": [{"text": "Köln", "entity_type": "town", "evidence": ["seg:0"]}],
         "confidence": 0.5,
     }
     fake = FakeOllama([message_response(tool_call_message(message))])
@@ -174,7 +228,9 @@ async def test_call_tool_merges_per_call_synonyms() -> None:
 
 
 async def test_no_tool_call_fenced_json_is_extracted_and_coerced() -> None:
-    fake = FakeOllama([fixture_response("no_tools_json_format")])
+    fenced = load_fixture("no_tools_json_format")["message"]["content"]
+    # The recording predates card 17: its entities use the field name ``type``.
+    fake = FakeOllama([message_response(text_message(fenced.replace('"type":', '"entity_type":')))])
     async with httpx.AsyncClient(transport=fake.transport()) as http:
         result = await _call(LLMClient(_settings(), http))
 
@@ -199,7 +255,7 @@ async def test_two_primary_failures_switch_to_local_fallback() -> None:
         [
             error_response(500),
             error_response(500),
-            fixture_response("tool_call_inlined_schema"),
+            _recorded_response(),
         ]
     )
     settings = _settings(LLM_LOCAL_PROXY_MODEL="gemma4:proxy-test", LLM_FALLBACK_MODEL="gemma4:local-test")
@@ -228,9 +284,9 @@ async def test_401_falls_back_immediately_and_logs_auth_failed_once(
     fake = FakeOllama(
         [
             error_response(401),
-            fixture_response("tool_call_inlined_schema"),
+            _recorded_response(),
             error_response(401),
-            fixture_response("tool_call_inlined_schema"),
+            _recorded_response(),
         ]
     )
     async with httpx.AsyncClient(transport=fake.transport()) as http:
@@ -270,7 +326,7 @@ async def test_all_endpoints_failing_raises_retryable_dependency_down() -> None:
 
 
 async def test_semaphore_limits_concurrent_requests() -> None:
-    fake = FakeOllama([fixture_response("tool_call_inlined_schema") for _ in range(3)])
+    fake = FakeOllama([_recorded_response() for _ in range(3)])
     probe = AsyncProbeTransport(fake, delay=0.02)
     async with httpx.AsyncClient(transport=probe) as http:
         client = LLMClient(_settings(CARACAL_LLM_CONCURRENCY=2), http)
@@ -282,7 +338,7 @@ async def test_semaphore_limits_concurrent_requests() -> None:
 async def test_info_logs_never_contain_prompt_text(caplog: pytest.LogCaptureFixture) -> None:
     caplog.set_level(logging.INFO, logger="caracal.llm.client")
     marker = "UNIQUE-TRANSCRIPT-MARKER-42"
-    fake = FakeOllama([fixture_response("tool_call_inlined_schema")])
+    fake = FakeOllama([_recorded_response()])
     async with httpx.AsyncClient(transport=fake.transport()) as http:
         await _call(LLMClient(_settings(), http), prompt=marker)
 
