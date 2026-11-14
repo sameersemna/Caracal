@@ -53,8 +53,11 @@ Keys (shown with the default prefix `caracal:`):
 Queue semantics (`queue.py`):
 - `enqueue_job(job_id, kind)` → `XADD`. Group created with `XGROUP CREATE ... MKSTREAM` (ignore BUSYGROUP).
 - Worker loop: `XREADGROUP GROUP workers <worker_id> COUNT 1 BLOCK 5000`, at most `CARACAL_WORKER_CONCURRENCY`
-  in flight. While a job runs, the worker `XCLAIM`s its own entry every 60 s (resets idle time = heartbeat).
-  On finish (done/failed/cancelled) → `XACK` + `XDEL`.
+  in flight. While a job runs, the worker heartbeats its entry every 60 s with an **owner-checked** Lua `XCLAIM … JUSTID`
+  (only if `XPENDING` still lists this consumer as owner). If the heartbeat finds another owner, the job is **lost**: the runner
+  stops before the next stage (and does not write the result of the stage in progress) and returns `lost` without writing any
+  status/stage/checkpoint/event; the worker does not ack. On finish (done/failed/cancelled) → owner-checked Lua `XACK` + `XDEL`.
+  Rate-limit counters are updated by one Lua script (INCR + EXPIRE when TTL is −1). Event `pct` = finished stages / total.
 - Recovery: every 60 s, `XAUTOCLAIM` entries idle > 300 s (their worker died) and re-run them; the runner resumes
   from checkpoints (docs/01 §4). Entry delivered > 3 times → job `failed` with `internal: "worker crashed repeatedly"`.
 - `XTRIM MAXLEN ~ 10000` on enqueue.
