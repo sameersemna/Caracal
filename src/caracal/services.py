@@ -22,9 +22,12 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any, Literal, cast
 
+import httpx
 from pydantic import ValidationError
 from redis.asyncio import Redis
 
+from caracal.analysis.qa import QaSegment, qa_report, validate_question
+from caracal.analysis.qa import answer as answer_question
 from caracal.analysis.translate import is_valid_target_lang
 from caracal.api.schemas import (
     AnalyzeSummary,
@@ -38,6 +41,8 @@ from caracal.api.schemas import (
     JobStatus,
     JobSummary,
     KnownSpeaker,
+    SearchItem,
+    SearchResults,
     SpeakerDeleted,
     SpeakerList,
     StageStatus,
@@ -50,10 +55,11 @@ from caracal.db.tables import JOB_STATUSES, JOB_TERMINAL_STATUSES
 from caracal.errors import CaracalError, ErrorCode
 from caracal.ingest.router import classify_source_static
 from caracal.ingest.upload import UploadInfo, save_upload
+from caracal.llm.client import LLMClient
 from caracal.log import get_logger
 from caracal.pipeline.stages import JobOptions, Repos, Stage
 from caracal.queue import JobQueue, Keys, rate_limit, set_cancel
-from caracal.report.model import Report, ReportSummary
+from caracal.report.model import Answer, Report, ReportSummary
 from caracal.report.render_md import render_markdown
 from caracal.speakers.voiceprint import EnrollmentDeps
 from caracal.speakers.voiceprint import enroll as enroll_voiceprint
@@ -70,6 +76,8 @@ _ACTIVE_STATUSES = frozenset({"queued", "running"})
 _SUBTITLE_EXTENSIONS = frozenset({"srt", "vtt"})
 _TRANSCRIPT_PREVIEW_CHARS = 1000
 _WAIT_POLL_S = 1.0
+_SEARCH_POOL = 50
+"""The largest page the REST contract allows; the service filters it down to ``done`` jobs."""
 
 TranscriptFormat = Literal["json", "txt", "srt", "vtt"]
 ProgressCallback = Callable[[JobProgress], Awaitable[None]]
@@ -136,6 +144,7 @@ class JobService:
         keys: Keys,
         queue: JobQueue,
         data_dir: Path,
+        llm: LLMClient | None = None,
     ) -> None:
         self.settings = settings
         self.repos = repos
@@ -144,6 +153,9 @@ class JobService:
         self.queue = queue
         self.data_dir = data_dir
         self.speaker_service = SpeakerService(repos, data_dir)
+        # Q&A is the only read-side capability that calls the LLM. Production builds a client
+        # on first use; tests inject a scripted one so no request leaves the process.
+        self.llm = llm
 
     # -- links and status -------------------------------------------------
 
@@ -590,6 +602,120 @@ class JobService:
                 return None
             raise
         return report.summary_view()
+
+    # -- question answering / search --------------------------------------
+
+    def _qa_segments(self, job_id: uuid.UUID) -> tuple[QaSegment, ...]:
+        """The stored transcript as Q&A segments; an absent file means hits-only context."""
+        files = JobFiles(self.data_dir, job_id)
+        if not files.transcript_json.is_file():
+            return ()
+        payload = self._artifact_json(files.transcript_json)
+        raw = payload.get("segments")
+        if not isinstance(raw, list):
+            return ()
+        segments: list[QaSegment] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            seg_id = item.get("id")
+            start = item.get("start")
+            end = item.get("end")
+            text = item.get("text")
+            if not isinstance(seg_id, int) or isinstance(seg_id, bool):
+                continue
+            if not isinstance(start, (int, float)) or isinstance(start, bool):
+                continue
+            if not isinstance(text, str):
+                continue
+            end_s = (
+                float(end) if isinstance(end, (int, float)) and not isinstance(end, bool) else float(start)
+            )
+            speaker = item.get("speaker")
+            segments.append(
+                QaSegment(
+                    seg_id=seg_id,
+                    start=float(start),
+                    end=end_s,
+                    speaker=speaker if isinstance(speaker, str) else None,
+                    text=text,
+                )
+            )
+        return tuple(segments)
+
+    async def ask_about_audio(self, job_id: uuid.UUID, question: str) -> Answer:
+        """Answer a question about a finished job (docs/03 §2-§3, docs/04 §12)."""
+        question = validate_question(question)
+        job = await self.repos.jobs.get(job_id)
+        if job is None:
+            raise _not_found(job_id)
+        if job.status != "done":
+            raise CaracalError(
+                ErrorCode.JOB_NOT_READY,
+                "job is not done",
+                {"job_id": str(job_id), "status": job.status},
+            )
+        report = await self.report(job_id)
+        context = qa_report(report)
+        transcript = self._qa_segments(job_id)
+        client = self.llm
+        if client is not None:
+            return await answer_question(
+                job_id,
+                question,
+                repos=self.repos.segments,
+                report=context,
+                transcript=transcript,
+                settings=self.settings,
+                llm=client,
+            )
+        async with httpx.AsyncClient() as http:
+            return await answer_question(
+                job_id,
+                question,
+                repos=self.repos.segments,
+                report=context,
+                transcript=transcript,
+                settings=self.settings,
+                llm=LLMClient(self.settings, http),
+            )
+
+    async def search_transcripts(self, query: str, limit: int = 20) -> SearchResults:
+        """Full-text search over finished jobs' transcripts (docs/03 §2-§3, docs/05 §1)."""
+        needle = query.strip()
+        if not needle:
+            raise CaracalError(ErrorCode.INVALID_INPUT, "q must not be empty")
+        if not 1 <= limit <= _SEARCH_POOL:
+            raise CaracalError(
+                ErrorCode.INVALID_INPUT,
+                "limit must be between 1 and 50",
+                {"limit": limit},
+            )
+        hits = await self.repos.segments.search(needle, limit=_SEARCH_POOL)
+        finished: dict[uuid.UUID, bool] = {}
+        items: list[SearchItem] = []
+        for hit in hits:
+            done = finished.get(hit.job_id)
+            if done is None:
+                job = await self.repos.jobs.get(hit.job_id)
+                done = job is not None and job.status == "done"
+                finished[hit.job_id] = done
+            if not done:
+                continue
+            items.append(
+                SearchItem(
+                    job_id=hit.job_id,
+                    title=hit.title,
+                    seg_id=hit.seg_id,
+                    start=hit.start_s,
+                    speaker=hit.speaker,
+                    text=hit.text,
+                    rank=hit.rank,
+                )
+            )
+            if len(items) >= limit:
+                break
+        return SearchResults(items=items)
 
     # -- speakers ---------------------------------------------------------
 

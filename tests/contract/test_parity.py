@@ -15,9 +15,11 @@ from typing import Any
 from fastapi import FastAPI
 from mcp.client import Client
 
+from caracal.db.repo import SegmentRow
 from caracal.pipeline.stages import JobOptions, Stage
 from caracal.storage import JobFiles
 from tests.contract.conftest import AUTH, Harness
+from tests.contract.test_api_qa_search import _ScriptedLlm
 from tests.contract.test_api_report import _report
 
 _URL = "https://example.com/talk"
@@ -61,12 +63,11 @@ AVAILABLE: tuple[Row, ...] = (
         ("list_speakers", "enroll_speaker", "delete_speaker"),
     ),
     Row("translate", (("POST", "/v1/jobs/{job_id}/translate"),), ("translate_job",)),
+    Row("ask", (("POST", "/v1/jobs/{job_id}/ask"),), ("ask_about_audio",)),
+    Row("full-text search", (("GET", "/v1/search"),), ("search_transcripts",)),
 )
 
-PENDING: tuple[Row, ...] = (
-    Row("ask", (("POST", "/v1/jobs/{job_id}/ask"),), ("ask_about_audio",), "T3.5"),
-    Row("full-text search", (("GET", "/v1/search"),), ("search_transcripts",), "T3.5"),
-)
+PENDING: tuple[Row, ...] = ()
 
 
 def _iter_routes(routes: Any) -> Any:
@@ -303,3 +304,69 @@ async def test_speakers_return_equal_data(make_harness: Callable[..., Harness]) 
     assert deleted.structured_content == {"deleted": True, "voiceprints_removed": 1}
     async with h.client() as client:
         assert (await client.get("/v1/speakers", headers=AUTH)).json() == {"items": []}
+
+
+async def _segmented_job(
+    h: Harness,
+    *,
+    status: str,
+    texts: list[str],
+    title: str,
+) -> uuid.UUID:
+    record = await h.repos.jobs.create(
+        source_kind="platform",
+        source_url=_URL,
+        title=title,
+        options=JobOptions().model_dump(),
+    )
+    if status != "queued":
+        await h.repos.jobs.set_status(record.id, status)
+    await h.repos.segments.replace_for_job(
+        record.id,
+        [
+            SegmentRow(record.id, index, float(index), float(index) + 1.0, "S1", "en", text)
+            for index, text in enumerate(texts)
+        ],
+    )
+    return record.id
+
+
+async def test_ask_returns_equal_data(make_harness: Callable[..., Harness]) -> None:
+    h = make_harness()
+    job_id = await _stored_job(h)
+    await h.repos.segments.replace_for_job(
+        job_id,
+        [SegmentRow(job_id, 1, 0.0, 1.0, "S1", "en", "stress one")],
+    )
+    h.app.state.service.llm = _ScriptedLlm(
+        answer={
+            "answer": "The talk is about stress.",
+            "confidence": 0.8,
+            "citations": [{"seg_id": "seg:1"}],
+        },
+    )
+
+    mcp = await _mcp_call(h, "ask_about_audio", {"job_id": str(job_id), "question": "stress"})
+    async with h.client() as client:
+        rest = await client.post(
+            f"/v1/jobs/{job_id}/ask",
+            headers=AUTH,
+            json={"question": "stress"},
+        )
+
+    assert rest.status_code == 200
+    assert mcp.structured_content == rest.json()
+
+
+async def test_search_returns_equal_data(make_harness: Callable[..., Harness]) -> None:
+    h = make_harness()
+    done_id = await _segmented_job(h, status="done", texts=["stress alpha", "stress beta"], title="Done")
+    await _segmented_job(h, status="running", texts=["stress ignored"], title="Running")
+
+    mcp = await _mcp_call(h, "search_transcripts", {"query": "stress", "limit": 20})
+    async with h.client() as client:
+        rest = await client.get("/v1/search", headers=AUTH, params={"q": "stress", "limit": 20})
+
+    assert rest.status_code == 200
+    assert mcp.structured_content == rest.json()
+    assert {item["job_id"] for item in rest.json()["items"]} == {str(done_id)}
