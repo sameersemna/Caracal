@@ -26,6 +26,7 @@ from caracal.analysis.content import analyse_content
 from caracal.analysis.identity import VoiceprintMatch, resolve_identities
 from caracal.analysis.planner import PlanInputs
 from caracal.analysis.planner import plan as build_plan
+from caracal.analysis.review import ReviewResult, review_report
 from caracal.analysis.translate import (
     TranslatedUnits,
     is_valid_target_lang,
@@ -1552,6 +1553,76 @@ async def _caption_words(ctx: StageContext) -> list[CaptionWord] | None:
     return None
 
 
+_REVIEW_QUICK_REASON = "depth quick"
+_REVIEW_MUSIC_REASON = "non-speech audio"
+
+
+async def stage_review(ctx: StageContext) -> StageResult:
+    """LLM self-review of a draft report, checkpointed as flags for assemble (card T3.4).
+
+    ``review`` keeps its enum position *before* ``assemble``, so the stage builds the draft
+    itself by calling the pure :func:`assemble_report` (no file or report row is written) and
+    reviews it. The output only carries ``flags`` and ``llm_meta``; ``assemble`` reads the
+    checkpoint and appends the flags to the final report (docs/04 §11).
+
+    Quick jobs, non-speech audio and a missing LLM client skip the review instead of failing
+    the job — the deterministic checks in the assembler still run.
+    """
+    if ctx.options.depth == "quick":
+        return StageResult(status="skipped", reason=_REVIEW_QUICK_REASON)
+    plan = await _done_output(ctx, Stage.PLAN)
+    if plan is not None and plan.get("music_detected") is True:
+        return StageResult(status="skipped", reason=_REVIEW_MUSIC_REASON)
+    if ctx.llm is None:
+        return StageResult(status="skipped", reason="llm unavailable")
+    job = await ctx.repos.jobs.get(ctx.job_id)
+    if job is None:
+        raise CaracalError(ErrorCode.NOT_FOUND, "job not found", {"job_id": str(ctx.job_id)})
+
+    checkpoints: dict[str, dict[str, object] | None] = {}
+    for stage in Stage:
+        checkpoints[stage.value] = await ctx.load(stage)
+    rows = await ctx.repos.jobs.list_stages(ctx.job_id)
+    statuses = {row.name: row.status for row in rows}
+    transcript = _transcript_if_present(ctx)
+    draft = assemble_report(
+        checkpoints,
+        job=job,
+        settings=ctx.settings,
+        transcript=transcript,
+        caption_words=await _caption_words(ctx),
+        stage_statuses=statuses,
+    )
+    result: ReviewResult
+    try:
+        result = await review_report(draft, transcript=transcript, llm=ctx.llm)
+    except CaracalError as exc:
+        # An unreachable or misbehaving model must not fail the job: the review is a bonus
+        # layer over the deterministic flags (docs/04 §11, card T3.4).
+        logger.warning(
+            "review.llm_failed",
+            extra={"job_id": str(ctx.job_id), "code": exc.code.value},
+        )
+        return StageResult(status="skipped", reason="llm unavailable")
+    logger.info(
+        "review complete",
+        extra={
+            "job_id": str(ctx.job_id),
+            "flags": len(result.flags),
+            "sampled": result.llm_meta.sampled,
+            "dropped_flags": result.llm_meta.dropped_flags,
+            "llm_calls": result.llm_meta.calls,
+        },
+    )
+    return StageResult(
+        status="done",
+        output={
+            "flags": [flag.model_dump(mode="json") for flag in result.flags],
+            "llm_meta": result.llm_meta.model_dump(mode="json"),
+        },
+    )
+
+
 def _section_counts(report: object) -> dict[str, int]:
     """How many items each report section carries, for the assemble checkpoint."""
     counts = {
@@ -1655,6 +1726,7 @@ _M2_STAGES: dict[Stage, StageFn] = {
     Stage.IDENTITY: stage_identity,
     Stage.VERIFY: stage_verify,
     Stage.TRANSLATE: stage_translate,
+    Stage.REVIEW: stage_review,
     Stage.ASSEMBLE: stage_assemble,
 }
 
@@ -1690,6 +1762,7 @@ __all__ = [
     "stage_langid",
     "stage_normalize",
     "stage_plan",
+    "stage_review",
     "stage_subtitles",
     "stage_transcribe",
     "stage_translate",
