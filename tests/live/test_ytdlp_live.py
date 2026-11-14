@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import os
 import threading
-from collections.abc import Iterator
 from pathlib import Path
 from uuid import uuid4
 
@@ -24,14 +23,6 @@ from caracal.storage import JobFiles
 pytestmark = pytest.mark.live
 
 _LIVE_URL = os.environ.get("CARACAL_LIVE_YT_URL")
-
-
-@pytest.fixture(autouse=True)
-def isolated_environment() -> Iterator[None]:
-    """Override the unit-suite isolation: live tests need the real environment and ``.env``."""
-    get_settings.cache_clear()
-    yield
-    get_settings.cache_clear()
 
 
 @pytest.mark.skipif(not _LIVE_URL, reason="CARACAL_LIVE_YT_URL is not set")

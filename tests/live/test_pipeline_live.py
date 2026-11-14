@@ -12,7 +12,7 @@ import hashlib
 import os
 import shutil
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -49,14 +49,6 @@ pytestmark = pytest.mark.live
 
 _AUDIO = Path(__file__).resolve().parents[1] / "fixtures" / "audio" / "jfk.wav"
 _MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "src" / "caracal" / "migrations"
-
-
-@pytest.fixture(autouse=True)
-def isolated_environment() -> Iterator[None]:
-    """Live tests need the real environment/``.env`` rather than the unit-suite isolation."""
-    get_settings.cache_clear()
-    yield
-    get_settings.cache_clear()
 
 
 def _alembic(direction: str) -> None:

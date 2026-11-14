@@ -6,7 +6,6 @@ stdout must stay empty because it is the MCP stdio channel.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from pathlib import Path
 
 import httpx
@@ -18,14 +17,6 @@ from caracal.config import Settings, get_settings
 pytestmark = pytest.mark.live
 
 AUDIO = Path(__file__).resolve().parents[1] / "fixtures" / "audio" / "jfk.wav"
-
-
-@pytest.fixture(autouse=True)
-def isolated_environment() -> Iterator[None]:
-    """Live tests need the real environment/``.env`` rather than the unit-suite isolation."""
-    get_settings.cache_clear()
-    yield
-    get_settings.cache_clear()
 
 
 async def test_live_jfk_transcription(capsys: pytest.CaptureFixture[str]) -> None:

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 
 import pytest
@@ -35,14 +35,6 @@ from tests.repo_contract import CASES, Repos
 pytestmark = pytest.mark.live
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "src" / "caracal" / "migrations"
-
-
-@pytest.fixture(autouse=True)
-def isolated_environment() -> Iterator[None]:
-    """Override the unit-suite isolation: live tests need the real environment and ``.env``."""
-    get_settings.cache_clear()
-    yield
-    get_settings.cache_clear()
 
 
 def _provision_settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
