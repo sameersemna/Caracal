@@ -20,6 +20,7 @@ from caracal.db.repo import (
     ReportRepo,
     SegmentRepo,
     SegmentRow,
+    SpeakerRepo,
     UploadRepo,
 )
 from caracal.errors import CaracalError, ErrorCode
@@ -27,12 +28,13 @@ from caracal.errors import CaracalError, ErrorCode
 
 @dataclass(frozen=True)
 class Repos:
-    """The four repository protocols plus a hook that empties all of them."""
+    """The repository protocols plus a hook that empties all of them."""
 
     jobs: JobRepo
     uploads: UploadRepo
     reports: ReportRepo
     segments: SegmentRepo
+    speakers: SpeakerRepo
     cleanup: Callable[[], Awaitable[None]]
 
 
@@ -416,6 +418,139 @@ async def case_segments_replace_and_search(repos: Repos) -> None:
     await expect_error(ErrorCode.NOT_FOUND, repos.segments.replace_for_job(uuid.uuid4(), []))
 
 
+def _embedding(*head: float) -> list[float]:
+    """A 256-d vector whose leading components are ``head`` and whose rest is zero."""
+    vector = [0.0] * 256
+    vector[: len(head)] = head
+    return vector
+
+
+async def case_speaker_name_normalisation_merges(repos: Repos) -> None:
+    first = await repos.speakers.upsert_known("Daniel  Levitin", "Author of This Is Your Brain on Music")
+    assert first.name == "Daniel  Levitin"
+    assert first.name_norm == "daniel levitin"
+    assert first.notes == "Author of This Is Your Brain on Music"
+    assert first.samples == 0
+    assert first.created_at.tzinfo is not None
+    assert first.updated_at >= first.created_at
+
+    merged = await repos.speakers.upsert_known("daniel levitin.")
+    assert merged.id == first.id
+    assert merged.name_norm == "daniel levitin"
+    assert merged.notes == "Author of This Is Your Brain on Music"  # notes kept when not given
+
+    updated = await repos.speakers.upsert_known("DANIEL LEVITIN", "Neuroscientist")
+    assert updated.id == first.id
+    assert updated.notes == "Neuroscientist"
+
+    accented = await repos.speakers.upsert_known("José", None)
+    decomposed = await repos.speakers.upsert_known("JOSE\u0301")
+    assert decomposed.id == accented.id
+    assert decomposed.name_norm == "josé"
+
+    listed = await repos.speakers.list()
+    assert [record.id for record in listed] == [first.id, accented.id]
+    assert await repos.speakers.get(first.id) == updated
+    assert await repos.speakers.get(uuid.uuid4()) is None
+
+    await expect_error(ErrorCode.INVALID_INPUT, repos.speakers.upsert_known("!!!"))
+    await expect_error(ErrorCode.INVALID_INPUT, repos.speakers.upsert_known("   "))
+
+
+async def case_speaker_nearest_best_per_speaker(repos: Repos) -> None:
+    levitin = await repos.speakers.upsert_known("Daniel Levitin")
+    other = await repos.speakers.upsert_known("Someone Else")
+    job = await repos.jobs.create(source_kind="direct", options={})
+
+    await repos.speakers.add_voiceprint(levitin.id, _embedding(0.0, 1.0), job.id, "S1")
+    await repos.speakers.add_voiceprint(levitin.id, _embedding(1.0), None, "S2")
+    await repos.speakers.add_voiceprint(other.id, _embedding(0.6, 0.8), job.id, "S1")
+
+    matches = await repos.speakers.nearest(_embedding(1.0), k=5)
+    assert [match.known_speaker_id for match in matches] == [levitin.id, other.id]
+    assert matches[0].name == "Daniel Levitin"
+    assert matches[0].similarity == pytest.approx(1.0, abs=1e-6)
+    # The worse Levitin sample (similarity 0) is not a second row: one row per known speaker.
+    assert len(matches) == 2
+    assert matches[1].similarity == pytest.approx(0.6, abs=1e-6)
+
+    only = await repos.speakers.nearest(_embedding(0.0, 1.0), k=1)
+    assert [match.known_speaker_id for match in only] == [levitin.id]
+
+    listed = await repos.speakers.list(q="levi")
+    assert [record.id for record in listed] == [levitin.id]
+    assert listed[0].samples == 2
+    assert await repos.speakers.list(q="no such person") == []
+    assert len(await repos.speakers.list(q="  ")) == 2
+
+
+async def case_speaker_delete_cascades_and_counts(repos: Repos) -> None:
+    doomed = await repos.speakers.upsert_known("Doomed Person")
+    survivor = await repos.speakers.upsert_known("Survivor")
+    await repos.speakers.add_voiceprint(doomed.id, _embedding(1.0), None, "S1")
+    await repos.speakers.add_voiceprint(doomed.id, _embedding(0.0, 1.0), None, "S2")
+    await repos.speakers.add_voiceprint(survivor.id, _embedding(0.6, 0.8), None, "S1")
+
+    assert await repos.speakers.delete(doomed.id) == 2
+    assert await repos.speakers.get(doomed.id) is None
+    assert [record.id for record in await repos.speakers.list()] == [survivor.id]
+    # The remaining embeddings are untouched: the survivor still matches at 0.6.
+    matches = await repos.speakers.nearest(_embedding(1.0), k=5)
+    assert [match.known_speaker_id for match in matches] == [survivor.id]
+    assert matches[0].similarity == pytest.approx(0.6, abs=1e-6)
+    survivor_record = await repos.speakers.get(survivor.id)
+    assert survivor_record is not None
+    assert survivor_record.samples == 1
+
+    await expect_error(ErrorCode.NOT_FOUND, repos.speakers.delete(doomed.id))
+
+
+async def case_job_delete_keeps_voiceprints(repos: Repos) -> None:
+    speaker = await repos.speakers.upsert_known("Enrolled From A Job")
+    job = await repos.jobs.create(source_kind="direct", options={})
+    await repos.speakers.add_voiceprint(speaker.id, _embedding(1.0), job.id, "S1")
+
+    await repos.jobs.delete(job.id)
+
+    # Biometric data outlives the job: only the provenance link is nulled (SET NULL).
+    record = await repos.speakers.get(speaker.id)
+    assert record is not None
+    assert record.samples == 1
+    matches = await repos.speakers.nearest(_embedding(1.0), k=3)
+    assert [match.name for match in matches] == ["Enrolled From A Job"]
+
+
+async def case_speaker_embedding_validation(repos: Repos) -> None:
+    speaker = await repos.speakers.upsert_known("Validated")
+
+    short = await expect_error(
+        ErrorCode.INVALID_INPUT,
+        repos.speakers.add_voiceprint(speaker.id, [1.0, 0.0, 0.0], None, "S1"),
+    )
+    assert short.details["expected"] == 256
+    await expect_error(
+        ErrorCode.INVALID_INPUT,
+        repos.speakers.add_voiceprint(speaker.id, [*_embedding(1.0)[:-1], float("nan")], None, "S1"),
+    )
+    await expect_error(
+        ErrorCode.INVALID_INPUT,
+        repos.speakers.add_voiceprint(speaker.id, [*_embedding(1.0)[:-1], float("inf")], None, "S1"),
+    )
+    await expect_error(
+        ErrorCode.INVALID_INPUT,
+        repos.speakers.nearest([0.5, 0.5]),
+    )
+    await expect_error(
+        ErrorCode.NOT_FOUND,
+        repos.speakers.add_voiceprint(uuid.uuid4(), _embedding(1.0), None, "S1"),
+    )
+    await expect_error(
+        ErrorCode.NOT_FOUND,
+        repos.speakers.add_voiceprint(speaker.id, _embedding(1.0), uuid.uuid4(), "S1"),
+    )
+    assert await repos.speakers.nearest(_embedding(1.0)) == []
+
+
 CASES: tuple[Callable[[Repos], Awaitable[None]], ...] = (
     case_job_create_and_get,
     case_job_create_validates_source_kind,
@@ -431,4 +566,9 @@ CASES: tuple[Callable[[Repos], Awaitable[None]], ...] = (
     case_upload_create_honours_the_given_id,
     case_report_upsert,
     case_segments_replace_and_search,
+    case_speaker_name_normalisation_merges,
+    case_speaker_nearest_best_per_speaker,
+    case_speaker_delete_cascades_and_counts,
+    case_job_delete_keeps_voiceprints,
+    case_speaker_embedding_validation,
 )

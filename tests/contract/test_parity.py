@@ -49,13 +49,6 @@ AVAILABLE: tuple[Row, ...] = (
         ("get_transcript",),
     ),
     Row("cancel / delete", (("DELETE", "/v1/jobs/{job_id}"),), ("cancel_job",)),
-)
-
-PENDING: tuple[Row, ...] = (
-    Row("report", (("GET", "/v1/jobs/{job_id}/report"),), ("get_report",), "T2.7"),
-    Row("translate", (("POST", "/v1/jobs/{job_id}/translate"),), ("translate_job",), "T3.3"),
-    Row("ask", (("POST", "/v1/jobs/{job_id}/ask"),), ("ask_about_audio",), "T3.5"),
-    Row("full-text search", (("GET", "/v1/search"),), ("search_transcripts",), "T3.5"),
     Row(
         "speakers",
         (
@@ -64,8 +57,14 @@ PENDING: tuple[Row, ...] = (
             ("DELETE", "/v1/speakers/{speaker_id}"),
         ),
         ("list_speakers", "enroll_speaker", "delete_speaker"),
-        "T2.3",
     ),
+)
+
+PENDING: tuple[Row, ...] = (
+    Row("report", (("GET", "/v1/jobs/{job_id}/report"),), ("get_report",), "T2.7"),
+    Row("translate", (("POST", "/v1/jobs/{job_id}/translate"),), ("translate_job",), "T3.3"),
+    Row("ask", (("POST", "/v1/jobs/{job_id}/ask"),), ("ask_about_audio",), "T3.5"),
+    Row("full-text search", (("GET", "/v1/search"),), ("search_transcripts",), "T3.5"),
 )
 
 
@@ -219,3 +218,52 @@ async def test_transcript_json_returns_equal_data(make_harness: Callable[..., Ha
 
     assert rest.status_code == 200
     assert mcp.structured_content == rest.json()
+
+
+def _diarize_checkpoint(h: Harness, job_id: uuid.UUID) -> None:
+    files = JobFiles(h.settings.CARACAL_DATA_DIR, job_id)
+    files.ensure()
+    files.write_json(
+        files.stage(Stage.DIARIZE),
+        {
+            "status": "done",
+            "reason": None,
+            "output": {
+                "num_speakers": 1,
+                "turns": [],
+                "exclusive_turns": [],
+                "embeddings": {"S1": [1.0, *([0.0] * 255)]},
+            },
+        },
+    )
+
+
+async def test_speakers_return_equal_data(make_harness: Callable[..., Harness]) -> None:
+    h = make_harness()
+    job_id = await _done_job(h)
+    _diarize_checkpoint(h, job_id)
+
+    enrolled = await _mcp_call(
+        h,
+        "enroll_speaker",
+        {
+            "job_id": str(job_id),
+            "speaker_label": "S1",
+            "name": "Daniel  Levitin",
+            "notes": "Neuroscientist",
+        },
+    )
+    assert enrolled.is_error is False
+
+    mcp = await _mcp_call(h, "list_speakers", {})
+    async with h.client() as client:
+        rest = await client.get("/v1/speakers", headers=AUTH)
+
+    assert rest.status_code == 200
+    assert rest.json() == [enrolled.structured_content]
+    assert mcp.structured_content == rest.json()
+
+    deleted = await _mcp_call(h, "delete_speaker", {"speaker_id": enrolled.structured_content["id"]})
+    assert deleted.structured_content == {"deleted": True, "voiceprints_removed": 1}
+    async with h.client() as client:
+        assert (await client.get("/v1/speakers", headers=AUTH)).json() == []

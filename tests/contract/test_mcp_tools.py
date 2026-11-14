@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import math
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -21,7 +22,7 @@ from caracal.pipeline.stages import JobOptions, Stage
 from caracal.queue import publish_event
 from caracal.services import JobService
 from caracal.storage import JobFiles
-from tests.contract.conftest import Harness
+from tests.contract.conftest import AUTH, Harness
 
 URL = "https://example.com/talk"
 
@@ -380,3 +381,114 @@ async def test_cancel_job_cancels_and_deletes(make_harness: Callable[..., Harnes
     assert delete.structured_content == {"job_id": str(done_id), "status": "deleted"}
     assert await h.repos.jobs.get(done_id) is None
     assert not files.root.exists()
+
+
+def _unit(similarity: float) -> list[float]:
+    rest = math.sqrt(max(0.0, 1.0 - similarity * similarity))
+    return [similarity, rest, *([0.0] * 254)]
+
+
+def _write_diarize(h: Harness, job_id: uuid.UUID, embeddings: dict[str, list[float]]) -> None:
+    files = JobFiles(h.settings.CARACAL_DATA_DIR, job_id)
+    files.ensure()
+    files.write_json(
+        files.stage(Stage.DIARIZE),
+        {
+            "status": "done",
+            "reason": None,
+            "output": {
+                "num_speakers": len(embeddings),
+                "turns": [],
+                "exclusive_turns": [],
+                "embeddings": embeddings,
+            },
+        },
+    )
+
+
+async def test_speaker_tools_round_trip_and_match_rest(make_harness: Callable[..., Harness]) -> None:
+    h = make_harness()
+    job_id = await _job(h, status="done")
+    _write_diarize(h, job_id, {"S1": _unit(0.97)})
+
+    async with Client(build_mcp(_service(h), h.settings)) as client:
+        enrolled = await client.call_tool(
+            "enroll_speaker",
+            {
+                "job_id": str(job_id),
+                "speaker_label": "S1",
+                "name": "Daniel  Levitin",
+                "notes": "Neuroscientist",
+            },
+        )
+        assert enrolled.is_error is False
+        created = enrolled.structured_content
+        assert created is not None
+        assert created["name"] == "Daniel  Levitin"
+        assert created["notes"] == "Neuroscientist"
+        assert created["samples"] == 1
+        assert uuid.UUID(created["id"])
+
+        async with h.client() as rest_client:
+            rest = await rest_client.get("/v1/speakers", headers=AUTH)
+        listed = await client.call_tool("list_speakers", {})
+        assert rest.status_code == 200
+        assert listed.structured_content == rest.json() == [created]
+
+        deleted = await client.call_tool("delete_speaker", {"speaker_id": created["id"]})
+        assert deleted.is_error is False
+        assert deleted.structured_content == {"deleted": True, "voiceprints_removed": 1}
+
+        empty = await client.call_tool("list_speakers", {})
+        assert empty.structured_content == []
+
+    async with h.client() as rest_client:
+        assert (await rest_client.get("/v1/speakers", headers=AUTH)).json() == []
+
+
+async def test_speaker_tool_errors_carry_the_error_code(
+    make_harness: Callable[..., Harness],
+) -> None:
+    h = make_harness()
+    queued_id = await _job(h, status="queued")
+    _write_diarize(h, queued_id, {"S1": _unit(0.9)})
+    done_id = await _job(h, status="done")
+    _write_diarize(h, done_id, {"S1": _unit(0.9)})
+
+    async with Client(build_mcp(_service(h), h.settings)) as client:
+        not_ready = await client.call_tool(
+            "enroll_speaker",
+            {"job_id": str(queued_id), "speaker_label": "S1", "name": "Too Early"},
+        )
+        unknown_label = await client.call_tool(
+            "enroll_speaker",
+            {"job_id": str(done_id), "speaker_label": "S9", "name": "Wrong Label"},
+        )
+        bad_job = await client.call_tool(
+            "enroll_speaker",
+            {"job_id": "not-a-uuid", "speaker_label": "S1", "name": "Bad Job"},
+        )
+        bad_speaker = await client.call_tool("delete_speaker", {"speaker_id": "not-a-uuid"})
+
+    assert not_ready.is_error is True
+    assert "job_not_ready" in _text(not_ready)
+    assert unknown_label.is_error is True
+    assert "not_found" in _text(unknown_label)
+    assert bad_job.is_error is True
+    assert "invalid_input: job_id must be a UUID" in _text(bad_job)
+    assert bad_speaker.is_error is True
+    assert "invalid_input: speaker_id must be a UUID" in _text(bad_speaker)
+
+
+async def test_speaker_tool_descriptions_state_the_biometric_consent_rule(
+    make_harness: Callable[..., Harness],
+) -> None:
+    h = make_harness()
+
+    async with Client(build_mcp(_service(h), h.settings)) as client:
+        listed = await client.list_tools()
+
+    descriptions = {tool.name: tool.description or "" for tool in listed.tools}
+    for name in ("list_speakers", "enroll_speaker", "delete_speaker"):
+        assert "biometric" in descriptions[name].lower(), name
+        assert "consent" in descriptions[name].lower(), name

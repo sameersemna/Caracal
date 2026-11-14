@@ -9,6 +9,7 @@ by counting matching terms, because reproducing ``ts_rank`` would duplicate Post
 from __future__ import annotations
 
 import copy
+import math
 import re
 import uuid
 from collections.abc import Sequence
@@ -18,12 +19,17 @@ from typing import Any
 
 from caracal.db.repo import (
     JobRecord,
+    KnownSpeakerRecord,
     SearchHit,
     SegmentRow,
     StageRecord,
     UploadRecord,
+    VoiceMatch,
     decode_cursor,
     encode_cursor,
+    normalise_name,
+    normalise_text,
+    validate_embedding,
 )
 from caracal.db.tables import (
     JOB_SOURCE_KINDS,
@@ -47,6 +53,25 @@ def _tokens(value: str) -> list[str]:
     return _TOKEN_RE.findall(value.lower())
 
 
+@dataclass(frozen=True)
+class _StoredVoiceprint:
+    id: uuid.UUID
+    known_speaker_id: uuid.UUID
+    job_id: uuid.UUID | None
+    speaker_label: str
+    embedding: list[float]
+
+
+@dataclass(frozen=True)
+class _StoredSpeaker:
+    id: uuid.UUID
+    name: str
+    name_norm: str
+    notes: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
 @dataclass
 class _Store:
     jobs: dict[uuid.UUID, JobRecord] = field(default_factory=dict)
@@ -54,6 +79,8 @@ class _Store:
     uploads: dict[uuid.UUID, UploadRecord] = field(default_factory=dict)
     reports: dict[uuid.UUID, tuple[str, dict[str, Any]]] = field(default_factory=dict)
     segments: dict[uuid.UUID, list[SegmentRow]] = field(default_factory=dict)
+    speakers: dict[uuid.UUID, _StoredSpeaker] = field(default_factory=dict)
+    voiceprints: list[_StoredVoiceprint] = field(default_factory=list)
 
     def clear(self) -> None:
         self.jobs.clear()
@@ -61,6 +88,8 @@ class _Store:
         self.uploads.clear()
         self.reports.clear()
         self.segments.clear()
+        self.speakers.clear()
+        self.voiceprints.clear()
 
 
 class FakeJobRepo:
@@ -254,6 +283,11 @@ class FakeJobRepo:
         if job_id not in self._store.jobs:
             raise CaracalError(ErrorCode.NOT_FOUND, "job not found", {"job_id": str(job_id)})
         del self._store.jobs[job_id]
+        # ON DELETE SET NULL: embeddings are biometric data and outlive the job.
+        self._store.voiceprints = [
+            replace(voiceprint, job_id=None) if voiceprint.job_id == job_id else voiceprint
+            for voiceprint in self._store.voiceprints
+        ]
         for key in [key for key in self._store.stages if key[0] == job_id]:
             del self._store.stages[key]
         self._store.reports.pop(job_id, None)
@@ -376,6 +410,142 @@ class FakeSegmentRepo:
         return hits[:page_size]
 
 
+def _cosine_similarity(left: list[float], right: list[float]) -> float:
+    """Cosine similarity with the same semantics as pgvector's ``1 - (a <=> b)``."""
+    dot = sum(a * b for a, b in zip(left, right, strict=True))
+    left_norm = math.sqrt(sum(value * value for value in left))
+    right_norm = math.sqrt(sum(value * value for value in right))
+    if left_norm == 0.0 or right_norm == 0.0:
+        return 0.0
+    return dot / (left_norm * right_norm)
+
+
+class FakeSpeakerRepo:
+    """In-memory :class:`caracal.db.repo.SpeakerRepo` over the shared store."""
+
+    def __init__(self, store: _Store) -> None:
+        self._store = store
+
+    def _samples(self, speaker_id: uuid.UUID) -> int:
+        return sum(1 for voiceprint in self._store.voiceprints if voiceprint.known_speaker_id == speaker_id)
+
+    def _record(self, speaker: _StoredSpeaker) -> KnownSpeakerRecord:
+        return KnownSpeakerRecord(
+            id=speaker.id,
+            name=speaker.name,
+            name_norm=speaker.name_norm,
+            notes=speaker.notes,
+            samples=self._samples(speaker.id),
+            created_at=speaker.created_at,
+            updated_at=speaker.updated_at,
+        )
+
+    async def upsert_known(self, name: str, notes: str | None = None) -> KnownSpeakerRecord:
+        name_norm = normalise_name(name)
+        existing = next(
+            (speaker for speaker in self._store.speakers.values() if speaker.name_norm == name_norm),
+            None,
+        )
+        now = _now()
+        if existing is None:
+            speaker = _StoredSpeaker(
+                id=uuid.uuid4(),
+                name=name,
+                name_norm=name_norm,
+                notes=notes,
+                created_at=now,
+                updated_at=now,
+            )
+        else:
+            speaker = replace(
+                existing,
+                notes=notes if notes is not None else existing.notes,
+                updated_at=now,
+            )
+        self._store.speakers[speaker.id] = speaker
+        return self._record(speaker)
+
+    async def add_voiceprint(
+        self,
+        known_speaker_id: uuid.UUID,
+        embedding: Sequence[float],
+        job_id: uuid.UUID | None,
+        speaker_label: str,
+    ) -> uuid.UUID:
+        values = validate_embedding(embedding)
+        if not isinstance(speaker_label, str) or not speaker_label.strip():
+            raise CaracalError(ErrorCode.INVALID_INPUT, "speaker_label must not be empty")
+        if known_speaker_id not in self._store.speakers:
+            raise CaracalError(
+                ErrorCode.NOT_FOUND,
+                "known speaker not found",
+                {"speaker_id": str(known_speaker_id)},
+            )
+        if job_id is not None and job_id not in self._store.jobs:
+            raise CaracalError(ErrorCode.NOT_FOUND, "job not found", {"job_id": str(job_id)})
+        voiceprint_id = uuid.uuid4()
+        self._store.voiceprints.append(
+            _StoredVoiceprint(
+                id=voiceprint_id,
+                known_speaker_id=known_speaker_id,
+                job_id=job_id,
+                speaker_label=speaker_label,
+                embedding=values,
+            )
+        )
+        return voiceprint_id
+
+    async def nearest(self, embedding: Sequence[float], *, k: int = 5) -> list[VoiceMatch]:
+        values = validate_embedding(embedding)
+        page_size = max(1, min(_MAX_PAGE, k))
+        best: dict[uuid.UUID, float] = {}
+        for voiceprint in self._store.voiceprints:
+            similarity = _cosine_similarity(values, voiceprint.embedding)
+            previous = best.get(voiceprint.known_speaker_id)
+            if previous is None or similarity > previous:
+                best[voiceprint.known_speaker_id] = similarity
+        matches = [
+            VoiceMatch(
+                known_speaker_id=speaker_id,
+                name=self._store.speakers[speaker_id].name,
+                similarity=similarity,
+            )
+            for speaker_id, similarity in best.items()
+            if speaker_id in self._store.speakers
+        ]
+        matches.sort(key=lambda match: (-match.similarity, match.name, str(match.known_speaker_id)))
+        return matches[:page_size]
+
+    async def list(self, q: str | None = None) -> list[KnownSpeakerRecord]:
+        speakers = list(self._store.speakers.values())
+        if q is not None:
+            needle = normalise_text(q)
+            if needle:
+                speakers = [speaker for speaker in speakers if needle in speaker.name_norm]
+        speakers.sort(key=lambda speaker: (speaker.name, str(speaker.id)))
+        return [self._record(speaker) for speaker in speakers]
+
+    async def get(self, known_speaker_id: uuid.UUID) -> KnownSpeakerRecord | None:
+        speaker = self._store.speakers.get(known_speaker_id)
+        return None if speaker is None else self._record(speaker)
+
+    async def delete(self, known_speaker_id: uuid.UUID) -> int:
+        if known_speaker_id not in self._store.speakers:
+            raise CaracalError(
+                ErrorCode.NOT_FOUND,
+                "known speaker not found",
+                {"speaker_id": str(known_speaker_id)},
+            )
+        removed = self._samples(known_speaker_id)
+        del self._store.speakers[known_speaker_id]
+        self._store.voiceprints = [
+            voiceprint
+            for voiceprint in self._store.voiceprints
+            if voiceprint.known_speaker_id != known_speaker_id
+        ]
+        return removed
+
+
 def make_fake_repos() -> Repos:
     """Build the four fakes over one shared store, ready for the contract suite."""
     store = _Store()
@@ -388,5 +558,6 @@ def make_fake_repos() -> Repos:
         uploads=FakeUploadRepo(store),
         reports=FakeReportRepo(store),
         segments=FakeSegmentRepo(store),
+        speakers=FakeSpeakerRepo(store),
         cleanup=cleanup,
     )

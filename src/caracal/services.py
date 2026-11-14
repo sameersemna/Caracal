@@ -35,11 +35,13 @@ from caracal.api.schemas import (
     JobSourceStatus,
     JobStatus,
     JobSummary,
+    KnownSpeaker,
+    SpeakerDeleted,
     StageStatus,
     UploadCreated,
 )
 from caracal.config import Settings
-from caracal.db.repo import JobRecord, StageRecord
+from caracal.db.repo import JobRecord, KnownSpeakerRecord, StageRecord
 from caracal.db.tables import JOB_STATUSES, JOB_TERMINAL_STATUSES
 from caracal.errors import CaracalError, ErrorCode
 from caracal.ingest.router import classify_source_static
@@ -47,6 +49,8 @@ from caracal.ingest.upload import UploadInfo, save_upload
 from caracal.log import get_logger
 from caracal.pipeline.stages import JobOptions, Repos, Stage
 from caracal.queue import JobQueue, Keys, rate_limit, set_cancel
+from caracal.speakers.voiceprint import EnrollmentDeps
+from caracal.speakers.voiceprint import enroll as enroll_voiceprint
 from caracal.storage import JobFiles, UploadFiles
 
 logger = get_logger("caracal.services")
@@ -69,6 +73,52 @@ def _not_found(job_id: uuid.UUID) -> CaracalError:
     return CaracalError(ErrorCode.NOT_FOUND, "job not found", {"job_id": str(job_id)})
 
 
+def _known_speaker(record: KnownSpeakerRecord) -> KnownSpeaker:
+    return KnownSpeaker(
+        id=record.id,
+        name=record.name,
+        notes=record.notes,
+        samples=record.samples,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+    )
+
+
+class SpeakerService:
+    """Known speakers and their voiceprints (docs/03 §2-§3, docs/04 §5).
+
+    Enrollment is biometric: it exists only as an explicit request, never as a pipeline side
+    effect (docs/06 §2). Both front doors call these methods so their answers cannot diverge.
+    """
+
+    def __init__(self, repos: Repos, data_dir: Path) -> None:
+        self.repos = repos
+        self.data_dir = data_dir
+
+    async def list(self, query: str | None = None) -> list[KnownSpeaker]:
+        """Known speakers, optionally filtered by name containment (docs/03 §2)."""
+        query = query.strip() if query is not None else None
+        records = await self.repos.speakers.list(query or None)
+        return [_known_speaker(record) for record in records]
+
+    async def enroll(
+        self,
+        job_id: uuid.UUID,
+        speaker_label: str,
+        name: str,
+        notes: str | None = None,
+    ) -> KnownSpeaker:
+        """Store one label's embedding under a name for a finished job (docs/04 §5)."""
+        deps = EnrollmentDeps(jobs=self.repos.jobs, speakers=self.repos.speakers, data_dir=self.data_dir)
+        record = await enroll_voiceprint(deps, job_id, speaker_label, name, notes)
+        return _known_speaker(record)
+
+    async def delete(self, speaker_id: uuid.UUID) -> SpeakerDeleted:
+        """Delete a known speaker and every embedding it owns (docs/06 §2)."""
+        removed = await self.repos.speakers.delete(speaker_id)
+        return SpeakerDeleted(deleted=True, voiceprints_removed=removed)
+
+
 class JobService:
     """Every capability, independent of REST or MCP (docs/03 §0)."""
 
@@ -87,6 +137,7 @@ class JobService:
         self.keys = keys
         self.queue = queue
         self.data_dir = data_dir
+        self.speaker_service = SpeakerService(repos, data_dir)
 
     # -- links and status -------------------------------------------------
 
@@ -448,6 +499,26 @@ class JobService:
         media_type = "application/x-subrip" if ext == "srt" else "text/vtt; charset=utf-8"
         return path.read_bytes(), media_type
 
+    # -- speakers ---------------------------------------------------------
+
+    async def list_speakers(self, query: str | None = None) -> list[KnownSpeaker]:
+        """``GET /v1/speakers`` and MCP ``list_speakers`` (docs/03 §2-§3)."""
+        return await self.speaker_service.list(query)
+
+    async def enroll_speaker(
+        self,
+        job_id: uuid.UUID,
+        speaker_label: str,
+        name: str,
+        notes: str | None = None,
+    ) -> KnownSpeaker:
+        """``POST /v1/speakers/enroll`` and MCP ``enroll_speaker`` (docs/03 §2-§3)."""
+        return await self.speaker_service.enroll(job_id, speaker_label, name, notes)
+
+    async def delete_speaker(self, speaker_id: uuid.UUID) -> SpeakerDeleted:
+        """``DELETE /v1/speakers/{id}`` and MCP ``delete_speaker`` (docs/03 §2-§3)."""
+        return await self.speaker_service.delete(speaker_id)
+
     # -- cancel / delete --------------------------------------------------
 
     async def cancel_or_delete(
@@ -591,4 +662,4 @@ def ident_hash_for_mcp(settings: Settings) -> str:
     return hashlib.sha1(f"{token}:mcp".encode(), usedforsecurity=False).hexdigest()
 
 
-__all__ = ["MAX_BASE64_DECODED_BYTES", "JobService", "ident_hash_for_mcp"]
+__all__ = ["MAX_BASE64_DECODED_BYTES", "JobService", "SpeakerService", "ident_hash_for_mcp"]

@@ -54,6 +54,38 @@ def test_labels_are_renamed_by_first_appearance_across_turns_exclusive_and_embed
     assert [round(value, 6) for value in result.embeddings["S2"]] == [0.6, 0.8]
 
 
+def test_speaker_01_speaking_first_becomes_s1_and_the_mapping_follows_everywhere() -> None:
+    """Verdict 18: pyannote's raw labels are unordered; the first voice heard is S1.
+
+    Real pyannote emits ``SPEAKER_01`` first (measured on two.wav), while the fake used to
+    always start at ``SPEAKER_00``. Renaming by sorted label would swap these speakers, so
+    the turns, exclusive turns and embeddings must all agree with first appearance.
+    """
+    result = build_result(
+        turns=[
+            Turn(0.0, 1.0, "SPEAKER_01"),
+            Turn(1.0, 2.0, "SPEAKER_00"),
+            Turn(2.0, 3.0, "SPEAKER_01"),
+        ],
+        exclusive_turns=[
+            Turn(0.0, 1.0, "SPEAKER_01"),
+            Turn(1.0, 2.0, "SPEAKER_00"),
+        ],
+        embeddings={"SPEAKER_00": [0.0, 1.0], "SPEAKER_01": [3.0, 4.0]},
+    )
+
+    assert [(turn.start, turn.label) for turn in result.turns] == [
+        (0.0, "S1"),
+        (1.0, "S2"),
+        (2.0, "S1"),
+    ]
+    assert [(turn.start, turn.label) for turn in result.exclusive_turns] == [(0.0, "S1"), (1.0, "S2")]
+    # SPEAKER_01 (first heard) is S1 and keeps its own normalised embedding.
+    assert result.embeddings["S1"] == pytest.approx([0.6, 0.8])
+    assert result.embeddings["S2"] == pytest.approx([0.0, 1.0])
+    assert result.num_speakers == 2
+
+
 def test_turn_times_are_rounded_to_milliseconds() -> None:
     result = build_result(
         turns=[Turn(0.123456, 1.987654, "A")],

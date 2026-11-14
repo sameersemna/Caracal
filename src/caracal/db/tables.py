@@ -7,6 +7,7 @@ configured schema and the same objects work in the throwaway schemas used by liv
 
 from __future__ import annotations
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     BigInteger,
     CheckConstraint,
@@ -27,6 +28,9 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 
 metadata = MetaData(schema=None)
+
+EMB_DIM = 256
+"""Speaker embedding dimension (docs/05 §1; measured community-1 ``speaker_embeddings``)."""
 
 JOB_STATUSES: tuple[str, ...] = ("queued", "running", "done", "failed", "cancelled")
 JOB_TERMINAL_STATUSES: frozenset[str] = frozenset({"done", "failed", "cancelled"})
@@ -138,15 +142,64 @@ segments = Table(
 
 Index("ix_segments_tsv", segments.c.tsv, postgresql_using="gin")
 
+known_speakers = Table(
+    "known_speakers",
+    metadata,
+    Column("id", UUID(as_uuid=True), nullable=False),
+    Column("name", Text, nullable=False),
+    Column("name_norm", Text, nullable=False),
+    Column("notes", Text, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    PrimaryKeyConstraint("id", name="pk_known_speakers"),
+)
+
+Index("uq_known_speakers_name_norm", known_speakers.c.name_norm, unique=True)
+
+voiceprints = Table(
+    "voiceprints",
+    metadata,
+    Column("id", UUID(as_uuid=True), nullable=False),
+    Column("known_speaker_id", UUID(as_uuid=True), nullable=False),
+    Column("job_id", UUID(as_uuid=True), nullable=True),
+    Column("speaker_label", Text, nullable=False),
+    Column("embedding", Vector(EMB_DIM), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    PrimaryKeyConstraint("id", name="pk_voiceprints"),
+    ForeignKeyConstraint(
+        ["known_speaker_id"],
+        ["known_speakers.id"],
+        name="fk_voiceprints_known_speaker_id_known_speakers",
+        ondelete="CASCADE",
+    ),
+    # Biometric embeddings outlive a job: deleting the job nulls the provenance link only.
+    ForeignKeyConstraint(
+        ["job_id"],
+        ["jobs.id"],
+        name="fk_voiceprints_job_id_jobs",
+        ondelete="SET NULL",
+    ),
+)
+
+Index(
+    "ix_voiceprints_embedding_hnsw",
+    voiceprints.c.embedding,
+    postgresql_using="hnsw",
+    postgresql_ops={"embedding": "vector_cosine_ops"},
+)
+
 __all__ = [
+    "EMB_DIM",
     "JOB_SOURCE_KINDS",
     "JOB_STATUSES",
     "JOB_TERMINAL_STATUSES",
     "STAGE_STATUSES",
     "job_stages",
     "jobs",
+    "known_speakers",
     "metadata",
     "reports",
     "segments",
     "uploads",
+    "voiceprints",
 ]

@@ -28,6 +28,7 @@ from caracal.db.repo import (
     PostgresJobRepo,
     PostgresReportRepo,
     PostgresSegmentRepo,
+    PostgresSpeakerRepo,
     PostgresUploadRepo,
 )
 from tests.repo_contract import CASES, Repos
@@ -111,7 +112,9 @@ async def live_repos(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Repos]:
 
         async def cleanup() -> None:
             async with engine.begin() as connection:
-                await connection.execute(sa.text("TRUNCATE TABLE uploads, jobs CASCADE"))
+                await connection.execute(
+                    sa.text("TRUNCATE TABLE uploads, jobs, known_speakers, voiceprints CASCADE")
+                )
 
         try:
             yield Repos(
@@ -119,6 +122,7 @@ async def live_repos(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Repos]:
                 uploads=PostgresUploadRepo(engine),
                 reports=PostgresReportRepo(engine),
                 segments=PostgresSegmentRepo(engine),
+                speakers=PostgresSpeakerRepo(engine),
                 cleanup=cleanup,
             )
         finally:
@@ -149,11 +153,75 @@ async def test_upgrade_then_downgrade_removes_tables(monkeypatch: pytest.MonkeyP
             "uploads",
             "reports",
             "segments",
+            "known_speakers",
+            "voiceprints",
         }
-        assert "voiceprints" not in tables
         assert await _tsv_generation(url, schema) == "ALWAYS"
 
         await asyncio.to_thread(_alembic, "downgrade", "base")
         assert await _table_names(url, schema) == {"alembic_version"}
     finally:
+        await _drop_schema(url, schema)
+
+
+async def test_voiceprints_are_vectors_with_an_hnsw_cosine_index_and_outlive_their_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Migration 0002: ``vector(256)`` + HNSW cosine index + ``job_id ON DELETE SET NULL``."""
+    settings = _provision_settings(monkeypatch)
+    schema = settings.CARACAL_DB_SCHEMA
+    url = settings.DATABASE_URL.get_secret_value()
+    embedding = [1.0, *([0.0] * 255)]
+    await _create_schema(url, schema)
+    engine = None
+    try:
+        await asyncio.to_thread(_alembic, "upgrade", "head")
+        engine = make_engine(settings)
+        speakers = PostgresSpeakerRepo(engine)
+        jobs = PostgresJobRepo(engine)
+
+        speaker = await speakers.upsert_known("Daniel Levitin")
+        job = await jobs.create(source_kind="direct", options={})
+        await speakers.add_voiceprint(speaker.id, embedding, job.id, "S1")
+
+        matches = await speakers.nearest(embedding, k=3)
+        assert [(match.name, round(match.similarity, 6)) for match in matches] == [("Daniel Levitin", 1.0)]
+
+        async with engine.connect() as connection:
+            column_type = await connection.scalar(
+                sa.text(
+                    "SELECT format_type(atttypid, atttypmod) FROM pg_attribute "
+                    "WHERE attrelid = 'voiceprints'::regclass AND attname = 'embedding'"
+                )
+            )
+            index_definition = await connection.scalar(
+                sa.text(
+                    "SELECT indexdef FROM pg_indexes "
+                    "WHERE schemaname = :schema AND indexname = 'ix_voiceprints_embedding_hnsw'"
+                ).bindparams(schema=schema)
+            )
+        assert column_type == "vector(256)"
+        assert index_definition is not None
+        assert "USING hnsw" in index_definition
+        assert "vector_cosine_ops" in index_definition
+
+        await jobs.delete(job.id)
+
+        async with engine.connect() as connection:
+            job_id_after = await connection.scalar(
+                sa.text("SELECT job_id FROM voiceprints WHERE known_speaker_id = :speaker").bindparams(
+                    speaker=speaker.id
+                )
+            )
+        assert job_id_after is None
+        surviving = await speakers.get(speaker.id)
+        assert surviving is not None
+        assert surviving.samples == 1
+
+        await asyncio.to_thread(_alembic, "downgrade", "base")
+        assert "voiceprints" not in await _table_names(url, schema)
+        assert "known_speakers" not in await _table_names(url, schema)
+    finally:
+        if engine is not None:
+            await engine.dispose()
         await _drop_schema(url, schema)

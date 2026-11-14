@@ -23,6 +23,8 @@ from caracal.api.schemas import (
     JobProgress,
     JobSourceIn,
     JobStatus,
+    KnownSpeaker,
+    SpeakerDeleted,
 )
 from caracal.config import Settings
 from caracal.errors import CaracalError
@@ -33,6 +35,10 @@ HTTP_INLINE_BASE64_BYTES = 750 * 1024
 """Largest inline ``audio_base64`` payload accepted over HTTP (the 1 MiB body cap)."""
 
 _PENDING_HINT = "call get_job / get_transcript later"
+_BIOMETRIC_NOTE = (
+    "Voiceprints are biometric data: only enroll with the person's explicit consent, and "
+    "delete them as soon as they are no longer needed."
+)
 _SERVER_INSTRUCTIONS = (
     "Caracal turns an audio or video file or link into a timestamped transcript and "
     "subtitles. Analysis is asynchronous: analyze_audio creates a job, then get_job polls "
@@ -65,6 +71,10 @@ class TranscriptResult(RootModel[dict[str, Any]]):
     """
 
 
+class SpeakerList(RootModel[list[KnownSpeaker]]):
+    """``list_speakers`` output: the same array ``GET /v1/speakers`` returns."""
+
+
 def _tool_error(exc: CaracalError) -> ToolError:
     """Caracal error -> MCP error carrying the stable code, never a traceback or input value."""
     return ToolError(f"{exc.code.value}: {exc.message}")
@@ -75,6 +85,13 @@ def _job_uuid(value: str) -> uuid.UUID:
         return uuid.UUID(value)
     except (AttributeError, TypeError, ValueError) as exc:
         raise ToolError("invalid_input: job_id must be a UUID") from exc
+
+
+def _speaker_uuid(value: str) -> uuid.UUID:
+    try:
+        return uuid.UUID(value)
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ToolError("invalid_input: speaker_id must be a UUID") from exc
 
 
 def _pending(job_id: uuid.UUID, status: JobStatus) -> AnalyzeResult:
@@ -253,6 +270,54 @@ def build_mcp(
 
     @server.tool(
         description=(
+            "List enrolled known speakers (people whose voiceprints are stored), each with "
+            "name, notes, sample count and timestamps; query filters by name. Use it to find "
+            "a speaker_id or to check whether a voice is already enrolled. " + _BIOMETRIC_NOTE
+        )
+    )
+    async def list_speakers(query: str | None = None) -> SpeakerList:
+        try:
+            return SpeakerList(root=await service.list_speakers(query))
+        except CaracalError as exc:
+            raise _tool_error(exc) from exc
+
+    @server.tool(
+        description=(
+            "Enroll one speaker from a finished analysis job: give its job_id, the diarized "
+            "speaker_label (S1, S2, ...), and the person's name (notes optional). The stored "
+            "embedding lets later jobs recognize the same voice; the same normalised name "
+            "adds another sample to the existing speaker. Fails with job_not_ready until the "
+            "job is done and with not_found when the label is not in the diarization. " + _BIOMETRIC_NOTE
+        )
+    )
+    async def enroll_speaker(
+        job_id: str,
+        speaker_label: str,
+        name: str,
+        notes: str | None = None,
+    ) -> KnownSpeaker:
+        parsed = _job_uuid(job_id)
+        try:
+            return await service.enroll_speaker(parsed, speaker_label, name, notes)
+        except CaracalError as exc:
+            raise _tool_error(exc) from exc
+
+    @server.tool(
+        description=(
+            "Delete a known speaker by speaker_id, together with every voiceprint stored for "
+            "them, and report how many embeddings were removed. Irreversible: use it to "
+            "honour a deletion request. " + _BIOMETRIC_NOTE
+        )
+    )
+    async def delete_speaker(speaker_id: str) -> SpeakerDeleted:
+        parsed = _speaker_uuid(speaker_id)
+        try:
+            return await service.delete_speaker(parsed)
+        except CaracalError as exc:
+            raise _tool_error(exc) from exc
+
+    @server.tool(
+        description=(
             "Cancel a queued or running job, or delete a finished job. With the default "
             "delete_artifacts=false an active job gets a cancel flag and keeps its files; "
             "pass true to also delete a finished job's database rows and artifacts. Use it "
@@ -272,4 +337,10 @@ def build_mcp(
     return server
 
 
-__all__ = ["HTTP_INLINE_BASE64_BYTES", "AnalyzeResult", "TranscriptResult", "build_mcp"]
+__all__ = [
+    "HTTP_INLINE_BASE64_BYTES",
+    "AnalyzeResult",
+    "SpeakerList",
+    "TranscriptResult",
+    "build_mcp",
+]
