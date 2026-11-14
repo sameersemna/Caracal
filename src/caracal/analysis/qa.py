@@ -28,6 +28,7 @@ from caracal.db.repo import SearchHit, SegmentRepo
 from caracal.errors import CaracalError, ErrorCode
 from caracal.llm.client import LLMClient
 from caracal.llm.prompts import format_timestamp, load_prompt, wrap_data
+from caracal.report.evidence import normalise_ids
 from caracal.report.model import Answer, Citation, Report
 
 _SEARCH_LIMIT: Final = 12
@@ -306,13 +307,23 @@ async def _retrieve(
 
 
 def _citation_seg_id(raw: object) -> int | None:
-    """Parse ``"seg:12"``, ``"12"`` or ``12`` into a segment id; anything else is ignored."""
+    """Parse ``"seg:12"``, ``"12"`` or ``12``; rendered-line noise is tolerated.
+
+    ``normalise_ids`` applies the typed-evidence rule, so ``"seg:2."``, ``"seg:2 S1"`` and
+    ``"see seg:2"`` all become segment 2 (docs/04 §1, §9).
+    """
     if isinstance(raw, bool):
         return None
     if isinstance(raw, int):
         return raw if raw >= 0 else None
     if not isinstance(raw, str):
         return None
+    for found in normalise_ids(raw):
+        if found.startswith("seg:"):
+            try:
+                return int(found[4:])
+            except ValueError:
+                continue
     value = raw.strip()
     if value.startswith("seg:"):
         value = value[4:]

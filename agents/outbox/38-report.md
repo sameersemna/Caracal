@@ -22,6 +22,7 @@ STATUS: DONE
 - test_keyword_expansion_runs_when_fewer_than_three_hits: 0 literal hits calls qa_keywords, then searches `Krakau or Polen or Gipfel`; also pins limit=12 and the job_id filter.
 - test_two_hits_still_trigger_keyword_expansion: 2 hits still runs the keyword pass, together with the 3-hit no-keyword test pinning the <3 threshold.
 - test_citation_text_and_start_come_from_the_real_segment: fabricated model start/text are replaced by the DB row values.
+- test_citation_ids_tolerate_rendered_line_noise: "seg:1." and "seg:2 S1" resolve through the typed-evidence rule.
 - test_unknown_citation_is_dropped_but_a_valid_one_is_kept: unknown ids are dropped without discarding valid citations.
 - test_invented_segment_id_becomes_not_found: only-segment evidence gives exactly "Not found in the audio.", confidence 0.
 - test_summary_only_citation_is_not_found: `meta:summary` is not a valid citation.
@@ -51,7 +52,7 @@ STATUS: DONE
 ........................................................................ [ 91%]
 ........................................................................ [ 97%]
 ............................                                             [100%]
-1180 passed in 11.34s
+1181 passed in 11.46s
 GATE: PASS
 ```
 

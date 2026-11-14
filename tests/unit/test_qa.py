@@ -478,3 +478,30 @@ def test_qa_report_uses_the_dominant_language_context_and_chapters() -> None:
     assert context.summary == "A short talk about one idea."
     assert "genre: talk" in context.context
     assert context.chapters == ((0.0, "Der Gipfel"),)
+
+
+@pytest.mark.asyncio
+async def test_citation_ids_tolerate_rendered_line_noise(make_settings: Any) -> None:
+    repos = make_fake_repos()
+    job_id = await _done_job(repos)
+    rows = _segments(job_id, ["alpha one", "alpha two", "alpha three"])
+    await repos.segments.replace_for_job(job_id, rows)
+    llm = _ScriptedLlm(
+        answer={
+            "answer": "The talk is about alpha.",
+            "confidence": 0.7,
+            "citations": [{"seg_id": "seg:1."}, {"seg_id": "seg:2 S1"}],
+        },
+    )
+
+    result = await qa.answer(
+        job_id,
+        "alpha",
+        repos=repos.segments,
+        report=_report(),
+        transcript=_qa_segments(rows),
+        settings=make_settings(LLM_CONTEXT_CHARS=4000),
+        llm=llm,
+    )
+
+    assert [citation.seg_id for citation in result.citations] == ["seg:1", "seg:2"]
