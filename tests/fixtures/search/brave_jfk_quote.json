@@ -1,0 +1,407 @@
+{
+ "status": 200,
+ "body": {
+  "type": "search",
+  "query": {
+   "original": "\"ask not what your country can do for you\" speech",
+   "show_strict_warning": false,
+   "cleaned": "ask not what your country can do for you speech",
+   "is_navigational": true,
+   "is_news_breaking": false,
+   "spellcheck_off": false,
+   "country": "us",
+   "bad_results": false,
+   "should_fallback": false,
+   "postal_code": "",
+   "city": "",
+   "header_country": "",
+   "more_results_available": true,
+   "state": "",
+   "search_operators": {
+    "applied": true,
+    "cleaned_query": "ask not what your country can do for you speech"
+   },
+   "related_queries": []
+  },
+  "mixed": {
+   "type": "mixed",
+   "main": [
+    {
+     "type": "web",
+     "index": 0,
+     "all": false
+    },
+    {
+     "type": "web",
+     "index": 1,
+     "all": false
+    },
+    {
+     "type": "videos",
+     "all": true
+    },
+    {
+     "type": "web",
+     "index": 2,
+     "all": false
+    },
+    {
+     "type": "web",
+     "index": 3,
+     "all": false
+    },
+    {
+     "type": "web",
+     "index": 4,
+     "all": false
+    },
+    {
+     "type": "web",
+     "index": 5,
+     "all": false
+    },
+    {
+     "type": "web",
+     "index": 6,
+     "all": false
+    },
+    {
+     "type": "web",
+     "index": 7,
+     "all": false
+    },
+    {
+     "type": "web",
+     "index": 8,
+     "all": false
+    },
+    {
+     "type": "web",
+     "index": 9,
+     "all": false
+    },
+    {
+     "type": "web",
+     "index": 10,
+     "all": false
+    },
+    {
+     "type": "web",
+     "index": 11,
+     "all": false
+    },
+    {
+     "type": "web",
+     "index": 12,
+     "all": false
+    },
+    {
+     "type": "web",
+     "index": 13,
+     "all": false
+    },
+    {
+     "type": "web",
+     "index": 14,
+     "all": false
+    },
+    {
+     "type": "web",
+     "index": 15,
+     "all": false
+    },
+    {
+     "type": "web",
+     "index": 16,
+     "all": false
+    },
+    {
+     "type": "web",
+     "index": 17,
+     "all": false
+    }
+   ],
+   "top": [],
+   "side": []
+  },
+  "videos": {
+   "type": "videos",
+   "results": [
+    {
+     "type": "video_result",
+     "url": "https://www.youtube.com/shorts/MXUWakHoMtY",
+     "title": "John F. Kennedy: \"Ask not what your country can do for you.\" - YouTube",
+     "description": "On January 20, 1961 John F. Kennedy took the oath of office to become the 35th president of the United States. He was the youngest man elected president, as ...",
+     "age": "January 20, 2026",
+     "page_age": "2026-01-20T14:52:26",
+     "fetched_content_timestamp": 1794298812,
+     "video": {
+      "duration": "00:30",
+      "creator": "John F. Kennedy Library Foundation",
+      "publisher": "YouTube"
+     },
+     "meta_url": {
+      "scheme": "https",
+      "netloc": "youtube.com",
+      "hostname": "www.youtube.com",
+      "favicon": "https://imgs.search.brave.com/Wg4wjE5SHAargkzePU3eSLmWgVz84BEZk1SjSglJK_U/rs:fit:32:32:1:0/g:ce/aHR0cDovL2Zhdmlj/b25zLnNlYXJjaC5i/cmF2ZS5jb20vaWNv/bnMvOTkyZTZiMWU3/YzU3Nzc5YjExYzUy/N2VhZTIxOWNlYjM5/ZGVjN2MyZDY4Nzdh/ZDYzMTYxNmI5N2Rk/Y2Q3N2FkNy93d3cu/eW91dHViZS5jb20v",
+      "path": "\u203a shorts  \u203a MXUWakHoMtY"
+     },
+     "thumbnail": {
+      "src": "https://imgs.search.brave.com/s1IJXEKjCwOEtpaJKvFFvpMrwSapNhY7psRc6hqZfu4/rs:fit:200:200:1:0/g:ce/aHR0cHM6Ly9pLnl0/aW1nLmNvbS92aS9N/WFVXYWtIb010WS9v/YXIyLmpwZz9zcXA9/LW9heW13RWRDSlVE/RU5BRlNGV1FBZ0h5/cTRxcEF3d0lBUlVB/QUloQ2NBSEFBUVk9/JmFtcDtycz1BT240/Q0xCcWoydzM1NHY0/R21iU0pFQnVkVldq/RTRyV3d3",
+      "original": "https://i.ytimg.com/vi/MXUWakHoMtY/oar2.jpg?sqp=-oaymwEdCJUDENAFSFWQAgHyq4qpAwwIARUAAIhCcAHAAQY=&amp;rs=AOn4CLBqj2w354v4GmbSJEBudVWjE4rWww"
+     }
+    },
+    {
+     "type": "video_result",
+     "url": "https://www.facebook.com/JFKLibraryFdn/videos/john-f-kennedy-ask-not-what-your-country-can-do-for-you/1084151380469622/",
+     "title": "John F. Kennedy: \"Ask not what your country can do for you.\"",
+     "description": "JFK Library Foundation, Boston. 339,875 likes \u00b7 11,410 talking about this \u00b7 119,362 were here. Dedicated to the legacy of our nation's 35th president.",
+     "fetched_content_timestamp": 1787618235,
+     "video": {},
+     "meta_url": {
+      "scheme": "https",
+      "netloc": "facebook.com",
+      "hostname": "www.facebook.com",
+      "favicon": "https://imgs.search.brave.com/UPSLokJBKWPdNzHbqH5o3CgD13zMvR3pUTn8bk7hmPM/rs:fit:32:32:1:0/g:ce/aHR0cDovL2Zhdmlj/b25zLnNlYXJjaC5i/cmF2ZS5jb20vaWNv/bnMvOWM3NjZkMmE4/MTU1MTk4ZDU5YzU3/NjUxY2ExZTdjNWQx/NjJlNTY1Y2VlODM4/MmRmMDgzZDBiMmI3/YzU4NmU4ZS93d3cu/ZmFjZWJvb2suY29t/Lw",
+      "path": "\u203a JFKLibraryFdn  \u203a videos  \u203a john-f-kennedy-ask-not-what-your-country-can-do-for-you  \u203a 1084151380469622"
+     },
+     "thumbnail": {
+      "src": "https://imgs.search.brave.com/aqo0eLx42Kbt_EcUSmqEzHkA2xHp7yyVSSJd7bj0sV0/rs:fit:200:200:1:0/g:ce/aHR0cHM6Ly9zY29u/dGVudC1kZnc2LTIu/eHguZmJjZG4ubmV0/L3YvdDM5LjMwODA4/LTEvNDE0OTQ3MTU0/Xzc1NjAyNTkyOTg5/MTIwNF80MDEwNDE4/MzkwNjY4NjcxNDgw/X24uanBnP3N0cD1k/c3QtanBnX3R0NiZh/bXA7Y3N0cD1teDEw/ODB4MTA4MCZhbXA7/Y3RwPXM3MjB4NzIw/JmFtcDtfbmNfY2F0/PTEwOSZhbXA7Y2Ni/PTEtNyZhbXA7X25j/X3NpZD0zYWIzNDUm/YW1wO19uY19vaGM9/dWhQbmthck11eVFR/N2tOdndIdktYc3om/YW1wO19uY19vYz1B/ZG9QbEZHbENzMkhz/NTAzN1J6OGhfamE4/Q2JJYVNHWG45VmFi/bDJPZjVfWjcwM2x6/N0xJWXpVWHlLMXpD/QkVuLVN3JmFtcDtf/bmNfenQ9MjQmYW1w/O19uY19odD1zY29u/dGVudC1kZnc2LTIu/eHgmYW1wO19uY19n/aWQ9cmt1UnA1MnVz/R3RsV0NZUG9zT29i/dyZhbXA7X25jX3Nz/PTc5Mjg5JmFtcDtv/aD0wMF9BUUdFQWFR/Vk1BM3E4aDJqUGFt/cHRwTXRFYWZCWWNj/aTV3azA4dnRlSjh3/cUN3JmFtcDtvZT02/QTkyRDA3Ng",
+      "original": "https://scontent-dfw6-2.xx.fbcdn.net/v/t39.30808-1/414947154_756025929891204_4010418390668671480_n.jpg?stp=dst-jpg_tt6&amp;cstp=mx1080x1080&amp;ctp=s720x720&amp;_nc_cat=109&amp;ccb=1-7&amp;_nc_sid=3ab345&amp;_nc_ohc=uhPnkarMuyQQ7kNvwHvKXsz&amp;_nc_oc=AdoPlFGlCs2Hs5037Rz8h_ja8CbIaSGXn9Vabl2Of5_Z703lz7LIYzUXyK1zCBEn-Sw&amp;_nc_zt=24&amp;_nc_ht=scontent-dfw6-2.xx&amp;_nc_gid=rkuRp52usGtlWCYPosOobw&amp;_nc_ss=79289&amp;oh=00_AQGEAaQVMA3q8h2jPamptpMtEafBYcci5wk08vteJ8wqCw&amp;oe=6A92D076"
+     }
+    }
+   ],
+   "mutated_by_goggles": false
+  },
+  "web": {
+   "type": "search",
+   "results": [
+    {
+     "title": "Inaugural Address, January 20, 1961 | JFK Library",
+     "url": "https://www.jfklibrary.org/archives/other-resources/john-f-kennedy-speeches/inaugural-address-19610120",
+     "is_source_local": false,
+     "is_source_both": false,
+     "description": "The energy, the faith, the devotion which we bring to this endeavor will light our country and all who serve it--and the glow from that fire can truly light the world. And so, my fellow Americans: <strong>ask not what your country can do for you--ask what you can do for your country.</strong>",
+     "profile": {
+      "name": "JFK Library",
+      "url": "https://www.jfklibrary.org/archives/other-resources/john-f-kennedy-speeches/inaugural-address-19610120",
+      "long_name": "jfklibrary.org",
+      "img": "https://imgs.search.brave.com/b6qKBDKr4bk16wKJG-fu_JiW9WVWocF6jMi9u6aEafo/rs:fit:32:32:1:0/g:ce/aHR0cDovL2Zhdmlj/b25zLnNlYXJjaC5i/cmF2ZS5jb20vaWNv/bnMvMjlmM2EwNzc2/NTk4M2JjNDIyNDcz/OGMyZWVmOGY4ODMy/YTkzYzljN2I1OTUw/MTI2Y2RkMTUzY2Vh/ZDBhZDM0NC93d3cu/amZrbGlicmFyeS5v/cmcv"
+     },
+     "language": "en",
+     "family_friendly": true,
+     "type": "search_result",
+     "subtype": "generic",
+     "is_live": false,
+     "meta_url": {
+      "scheme": "https",
+      "netloc": "jfklibrary.org",
+      "hostname": "www.jfklibrary.org",
+      "favicon": "https://imgs.search.brave.com/b6qKBDKr4bk16wKJG-fu_JiW9WVWocF6jMi9u6aEafo/rs:fit:32:32:1:0/g:ce/aHR0cDovL2Zhdmlj/b25zLnNlYXJjaC5i/cmF2ZS5jb20vaWNv/bnMvMjlmM2EwNzc2/NTk4M2JjNDIyNDcz/OGMyZWVmOGY4ODMy/YTkzYzljN2I1OTUw/MTI2Y2RkMTUzY2Vh/ZDBhZDM0NC93d3cu/amZrbGlicmFyeS5v/cmcv",
+      "path": "\u203a archives  \u203a other-resources  \u203a john-f-kennedy-speeches  \u203a inaugural-address-19610120"
+     },
+     "cluster_type": "generic",
+     "cluster": [
+      {
+       "title": "Historic Speeches",
+       "url": "https://www.jfklibrary.org/learn/about-jfk/historic-speeches",
+       "is_source_local": false,
+       "is_source_both": false,
+       "description": "President Kennedy believed in the power of words -- both written and spoken -- to win votes, to set goals, to change minds, to move nations. He consistently took care to choose the right words and phrases that would send the right message. This section presents some of John F.",
+       "family_friendly": true
+      },
+      {
+       "title": "Life of John F. Kennedy",
+       "url": "https://www.jfklibrary.org/learn/about-jfk/life-of-john-f-kennedy",
+       "is_source_local": false,
+       "is_source_both": false,
+       "description": "Growing Up in the Kennedy Family Rose Fitzgerald Kennedy, who was a very disciplined and organized woman, made the following entry on a notecard, when her second child was born: John Fitzgerald Kennedy Born Brookline, Mass. (83 Beals Street) May 29, 1917",
+       "family_friendly": true
+      },
+      {
+       "title": "Profile in Courage Essay Contest",
+       "url": "https://www.jfklibrary.org/learn/education/profile-in-courage-essay-contest",
+       "is_source_local": false,
+       "is_source_both": false,
+       "description": "Supported by the John D. and Catherine T. MacArthur Foundation \u00b7 Supported by More Perfect and made possible through the support of the Office of American Possibilities Fund, a sponsored project of Rockefeller Philanthropy Advisors",
+       "family_friendly": true
+      },
+      {
+       "title": "Hours and Admission",
+       "url": "https://www.jfklibrary.org/visit-museum/visit/plan-your-trip/hours-and-admission",
+       "is_source_local": false,
+       "is_source_both": false,
+       "description": "HoursThe Museum is open 7 days a week from 10:00 a.m. to 5:00 p.m. Walk-up tickets are available until 4:15 p.m. We recommend arriving before 3:30 pm to ensure you have enough time to explore the Museum before we close promptly at 5:00 pm.Early ClosureWe close at 2:00 p.m. on:",
+       "family_friendly": true
+      }
+     ],
+     "extra_snippets": [
+      "The energy, the faith, the devotion which we bring to this endeavor will light our country and all who serve it--and the glow from that fire can truly light the world. And so, my fellow Americans: ask not what your country can do for you--ask what you can do for your country.",
+      "In your hands, my fellow citizens, more than mine, will rest the final success or failure of our course. Since this country was founded, each generation of Americans has been summoned to give testimony to its national loyalty."
+     ],
+     "search_operators_fallback": false
+    },
+    {
+     "title": "President John F. Kennedy's Inaugural Address (1961) | National Archives",
+     "url": "https://www.archives.gov/milestone-documents/president-john-f-kennedys-inaugural-address",
+     "is_source_local": false,
+     "is_source_both": false,
+     "description": "The climax of the speech and its ... for your country&quot; \u2013 was <strong>honed down from a thought about sacrifice that Kennedy had long held in his mind and had expressed in various ways in campaign speeches</strong>....",
+     "page_age": "2022-02-08T16:43:35",
+     "profile": {
+      "name": "National Archives",
+      "url": "https://www.archives.gov/milestone-documents/president-john-f-kennedys-inaugural-address",
+      "long_name": "archives.gov",
+      "img": "https://imgs.search.brave.com/HerLAsL6AnSfd7-0ph4LOcsXgLkkQ8NudUEx2_vJ1eI/rs:fit:32:32:1:0/g:ce/aHR0cDovL2Zhdmlj/b25zLnNlYXJjaC5i/cmF2ZS5jb20vaWNv/bnMvMjRkYTcwODBl/ZjAyYzMzNzUzNTQw/Y2Y5ZWQzOWM2NTg0/MzI2ZTc2MjA2ZDhj/ZDQ3ZDFiZGM3MjE5/YjdhZDA2My93d3cu/YXJjaGl2ZXMuZ292/Lw"
+     },
+     "language": "en",
+     "family_friendly": true,
+     "type": "search_result",
+     "subtype": "generic",
+     "is_live": false,
+     "meta_url": {
+      "scheme": "https",
+      "netloc": "archives.gov",
+      "hostname": "www.archives.gov",
+      "favicon": "https://imgs.search.brave.com/HerLAsL6AnSfd7-0ph4LOcsXgLkkQ8NudUEx2_vJ1eI/rs:fit:32:32:1:0/g:ce/aHR0cDovL2Zhdmlj/b25zLnNlYXJjaC5i/cmF2ZS5jb20vaWNv/bnMvMjRkYTcwODBl/ZjAyYzMzNzUzNTQw/Y2Y5ZWQzOWM2NTg0/MzI2ZTc2MjA2ZDhj/ZDQ3ZDFiZGM3MjE5/YjdhZDA2My93d3cu/YXJjaGl2ZXMuZ292/Lw",
+      "path": "\u203a milestone-documents  \u203a president-john-f-kennedys-inaugural-address"
+     },
+     "thumbnail": {
+      "src": "https://imgs.search.brave.com/gVZcMkxoGNEoqeLN3_DjAZD627TEg3nrZQhlPhNTEfM/rs:fit:200:200:1:0/g:ce/aHR0cHM6Ly93d3cu/YXJjaGl2ZXMuZ292/L3NpdGVzL2FsbC90/aGVtZXMvbmFyYS9p/bWFnZXMvbmFyYWxv/Z28tb2cucG5n",
+      "original": "https://www.archives.gov/sites/all/themes/nara/images/naralogo-og.png",
+      "logo": true
+     },
+     "age": "February 8, 2022",
+     "extra_snippets": [
+      "EnlargeDownload Link Citation: Inaugural Address, Kennedy Draft, 01/17/1961; Papers of John F. Kennedy: President's Office Files, 01/20/1961-11/22/1963; John F. Kennedy Library; National Archives and Records Administration. View All Pages in the National Archives Catalog View Transcript On January 20, 1961, President John F.",
+      "The climax of the speech and its most memorable phrase \u2013 \"Ask not what your country can do for you \u2013 ask what you can do for your country\" \u2013 was honed down from a thought about sacrifice that Kennedy had long held in his mind and had expressed in various ways in campaign speeches.",
+      "The energy, the faith, the devotion which we bring to this endeavor will light our country and all who serve it--and the glow from that fire can truly light the world. And so, my fellow Americans: ask not what your country can do for you--ask what you can do for your country.",
+      "He envisioned the Peace Corps as a pool of trained American volunteers who would go overseas to help foreign countries meet their needs for skilled manpower. Later that year, Congress passed the Peace Corps Act, making the program permanent. This document is available on DocsTeach, the online tool for teaching with documents from the National Archives. Find teaching activities that incorporate this document, or create your own online activity."
+     ],
+     "search_operators_fallback": false
+    },
+    {
+     "title": "John F. Kennedy\u2019s Inaugural Address, 1961 | Gilder Lehrman Institute of American History",
+     "url": "https://www.gilderlehrman.org/history-resources/spotlight-primary-source/john-f-kennedys-inaugural-address-1961",
+     "is_source_local": false,
+     "is_source_both": false,
+     "description": "His short, fourteen-minute inaugural address is best remembered for a single line: <strong>&quot;My fellow Americans: ask not what your country can do for you\u2014ask what you can do for your country.&quot;</strong> This call to public service resonated with what JFK called the &quot;new generation of Americans\u2014born in this ...",
+     "profile": {
+      "name": "Gilder Lehrman Institute of American History",
+      "url": "https://www.gilderlehrman.org/history-resources/spotlight-primary-source/john-f-kennedys-inaugural-address-1961",
+      "long_name": "gilderlehrman.org",
+      "img": "https://imgs.search.brave.com/pRtSp1K265Rc4pDUQFZg4sfDFnFKv86eKPcuU6GrBiQ/rs:fit:32:32:1:0/g:ce/aHR0cDovL2Zhdmlj/b25zLnNlYXJjaC5i/cmF2ZS5jb20vaWNv/bnMvOTM1M2EwNTIz/NTQ3ZTFjMjBlMGUw/ZDc5ZDFkZDhkODU5/MDcyMWUzNDM0ZGIz/ODVlNjk2NDIzNmFm/ZGZhNWEyZC93d3cu/Z2lsZGVybGVocm1h/bi5vcmcv"
+     },
+     "language": "en",
+     "family_friendly": true,
+     "type": "search_result",
+     "subtype": "generic",
+     "is_live": false,
+     "meta_url": {
+      "scheme": "https",
+      "netloc": "gilderlehrman.org",
+      "hostname": "www.gilderlehrman.org",
+      "favicon": "https://imgs.search.brave.com/pRtSp1K265Rc4pDUQFZg4sfDFnFKv86eKPcuU6GrBiQ/rs:fit:32:32:1:0/g:ce/aHR0cDovL2Zhdmlj/b25zLnNlYXJjaC5i/cmF2ZS5jb20vaWNv/bnMvOTM1M2EwNTIz/NTQ3ZTFjMjBlMGUw/ZDc5ZDFkZDhkODU5/MDcyMWUzNDM0ZGIz/ODVlNjk2NDIzNmFm/ZGZhNWEyZC93d3cu/Z2lsZGVybGVocm1h/bi5vcmcv",
+      "path": "\u203a history-resources  \u203a spotlight-primary-source  \u203a john-f-kennedys-inaugural-address-1961"
+     },
+     "extra_snippets": [
+      "John F. Kennedy\u2019s Inaugural Address, 1961 | On January 20, 1961, John F. Kennedy was sworn in as the thirty-fifth President of the United States. | On January 20, 1961, John F. Kennedy was sworn in as the thirty-fifth President of the United States. His short, fourteen-minute inaugural address is best remembered for a single line: \"My fellow Americans: ask not what your country can do for you\u2014ask what you can do for your country.\"",
+      "His short, fourteen-minute inaugural address is best remembered for a single line: \"My fellow Americans: ask not what your country can do for you\u2014ask what you can do for your country.\" This call to public service resonated with what JFK called the \"new generation of Americans\u2014born in this century, tempered by war, disciplined by a hard and bitter peace, proud of our ancient heritage.\" It is virtually the only part of the speech to address solely domestic matters and initiatives.",
+      "The energy, the faith, the devotion which we bring to this endeavor will light our country and all who serve it\u2014and the glow from that fire can truly light the world. And so, my fellow Americans: ask not what your country can do for you\u2014ask what you can do for your country."
+     ],
+     "search_operators_fallback": false
+    },
+    {
+     "title": "Ask Not What Your Country Can Do For You speech",
+     "url": "http://www.oneworlduv.com/wp-content/uploads/2011/06/kennedy_inaug_speech_1961.pdf",
+     "is_source_local": false,
+     "is_source_both": false,
+     "description": "energy, the faith, the devotion which we bring to this endeavour will light our country and all who \u00b7 serve it -- and the glow from that fire can truly light the world. And so, my fellow Americans: ask not what your country can do for you - ask what you can do for",
+     "profile": {
+      "name": "Oneworlduv",
+      "url": "http://www.oneworlduv.com/wp-content/uploads/2011/06/kennedy_inaug_speech_1961.pdf",
+      "long_name": "oneworlduv.com",
+      "img": "https://imgs.search.brave.com/wwbGMnLcHdo_eWsCTTZnPGhmK_VBeaoFy90FKvgwleY/rs:fit:32:32:1:0/g:ce/aHR0cDovL2Zhdmlj/b25zLnNlYXJjaC5i/cmF2ZS5jb20vaWNv/bnMvMzA5MjgyODA2/OTRlMDg3NzhhYTU1/ZjU2MTU2ODg5OTJj/YTZkY2Q0MWZjMTM5/NDU1MTllYmQ0MmNj/OWI5OWU4ZS93d3cu/b25ld29ybGR1di5j/b20v"
+     },
+     "language": "en",
+     "family_friendly": true,
+     "type": "search_result",
+     "subtype": "generic",
+     "is_live": false,
+     "meta_url": {
+      "scheme": "http",
+      "netloc": "oneworlduv.com",
+      "hostname": "www.oneworlduv.com",
+      "favicon": "https://imgs.search.brave.com/wwbGMnLcHdo_eWsCTTZnPGhmK_VBeaoFy90FKvgwleY/rs:fit:32:32:1:0/g:ce/aHR0cDovL2Zhdmlj/b25zLnNlYXJjaC5i/cmF2ZS5jb20vaWNv/bnMvMzA5MjgyODA2/OTRlMDg3NzhhYTU1/ZjU2MTU2ODg5OTJj/YTZkY2Q0MWZjMTM5/NDU1MTllYmQ0MmNj/OWI5OWU4ZS93d3cu/b25ld29ybGR1di5j/b20v",
+      "path": "\u203a wp-content  \u203a uploads  \u203a 2011  \u203a 06  \u203a kennedy_inaug_speech_1961.pdf"
+     },
+     "content_type": "pdf",
+     "extra_snippets": [
+      "In your hands, my fellow citizens, more than in mine, will rest the final success or failure of our \u00b7 course. Since this country was founded, each generation of Americans has been summoned to give",
+      "history the final judge of our deeds, let us go forth to lead the land we love, asking His blessing and His"
+     ],
+     "search_operators_fallback": false
+    },
+    {
+     "title": "Annotation: \u201cAsk not what your country can do for you \u2026\u201d - National Peace Corps Association",
+     "url": "https://www.peacecorpsconnect.org/john-f-kennedys-inaugural-address-what-these-words-mean-now/",
+     "is_source_local": false,
+     "is_source_both": false,
+     "description": "The energy, the faith, the devotion ... truly light the world. And so, my fellow Americans: <strong>ask not what your country can do for you \u2014 ask what you can do for your country.</strong>...",
+     "page_age": "2026-04-24T21:47:23",
+     "profile": {
+      "name": "National Peace Corps Association",
+      "url": "https://www.peacecorpsconnect.org/john-f-kennedys-inaugural-address-what-these-words-mean-now/",
+      "long_name": "peacecorpsconnect.org",
+      "img": "https://imgs.search.brave.com/krUYDMSPaVIRTa_Qj4y_dS_oywFni9YAbeY9QWcmDvo/rs:fit:32:32:1:0/g:ce/aHR0cDovL2Zhdmlj/b25zLnNlYXJjaC5i/cmF2ZS5jb20vaWNv/bnMvZDliZDJlYzBh/Mjg4NWMxOTQ3ZWVh/MjE3YzE4MmM2Zjk1/YmZhYzNhZThhNDll/NTUxZjBjZDIzNDJk/NTVhM2E0NC93d3cu/cGVhY2Vjb3Jwc2Nv/bm5lY3Qub3JnLw"
+     },
+     "language": "en",
+     "family_friendly": true,
+     "type": "search_result",
+     "subtype": "article",
+     "is_live": false,
+     "meta_url": {
+      "scheme": "https",
+      "netloc": "peacecorpsconnect.org",
+      "hostname": "www.peacecorpsconnect.org",
+      "favicon": "https://imgs.search.brave.com/krUYDMSPaVIRTa_Qj4y_dS_oywFni9YAbeY9QWcmDvo/rs:fit:32:32:1:0/g:ce/aHR0cDovL2Zhdmlj/b25zLnNlYXJjaC5i/cmF2ZS5jb20vaWNv/bnMvZDliZDJlYzBh/Mjg4NWMxOTQ3ZWVh/MjE3YzE4MmM2Zjk1/YmZhYzNhZThhNDll/NTUxZjBjZDIzNDJk/NTVhM2E0NC93d3cu/cGVhY2Vjb3Jwc2Nv/bm5lY3Qub3JnLw",
+      "path": "  \u203a home  \u203a private: news  \u203a annotation: \u201cask not what your country can do for you \u2026\u201d"
+     },
+     "thumbnail": {
+      "src": "https://imgs.search.brave.com/EqNMY9KYsbHnGw4Rhwv1n2jTtv4TpdhcBTOQOcB54t0/rs:fit:200:200:1:0/g:ce/aHR0cHM6Ly93d3cu/cGVhY2Vjb3Jwc2Nv/bm5lY3Qub3JnL3dw/LWNvbnRlbnQvdXBs/b2Fkcy8yMDIxLzAx/L0pGSy1zcGVlY2gu/cG5n",
+      "original": "https://www.peacecorpsconnect.org/wp-content/uploads/2021/01/JFK-speech.png",
+      "logo": false
+     },
+     "age": "April 24, 2026",
+     "article": {
+      "author": [
+       {
+        "type": "person",
+        "name": "Ritz Penaranda"
+       }
+      ],
+      "date": "Jan 29, 2021",
+      "publisher": {
+       "type": "organization",
+       "name": "National Peace Corps Association",
+       "url": "https://www.peacecorpsconnect.org/",
+       "thumbnail": {
+        "src": "https://imgs.search.brave.com/MYmE-J_lOcZ29npzqdJOnmC-vN8dDCJBK1EuER_WSJ0/rs:fit:200:200:1:0/g:ce/aHR0cHM6Ly93d3cu/cGVhY2Vjb3Jwc2Nv/bm5lY3Qub3JnL3dw/LWNvbnRlbnQvdXBs/b2Fkcy8yMDIzLzEw/L05QQ0EtbG9nby00/MDB4NDAwLTEucG5n",
+        "original": "https://www.peacecorpsconnect.org/wp-content/uploads/2023/10/NPCA-logo-400x400-1.png"
+       }
+      }
+     },
+     "extra_snippets": [
+      "The conclusion of that speech inspired a generation \u2014 and profoundly shaped the launch of the Peace Corps in 1961. Here are the last three paragraphs. For the 60th anniversary of this speech, we asked returned Volunteers and members of the Peace Corps community from around the world to share how these words resonate across the years.",
+      "President Kennedy had of course been the archenemy and imperialist hawk in the mouth of communist propaganda, but during the Prague Spring of 1968 there appeared more objective articles about him in the media, including those beautiful concluding words of his inaugural speech. Yes, away with the humiliating submissiveness that was our life and which led us to a blind and passive acceptance. ... Under communism in Czechoslovakia, Posp\u00ed\u0161il was an organizer of the underground university, a network of resistance to the authoritarian regime. After the Velvet Revolution in 1989, he led the country\u2019s leading educational foundation, hosted one of the first Peace Corps Volunteers, and worked to transform civil society.",
+      "The energy, the faith, the devotion which we bring to this endeavor will light our country and all who serve it \u2014 and the glow from that fire can truly light the world. And so, my fellow Americans: ask not what your country can do for you \u2014 ask what you can do for your country.",
+      "As we begin 2021, the U.S. continues to grapple with a racial reckoning, global pandemic, and government transition, reaffirming the importance of togetherness. JFK\u2019s sentiments still ring true today. Earlier in the speech he says, \u201cLet us begin anew\u2014remembering on both sides that civility is not a sign of weakness.\u201d We cannot move forward together without first acknowledging each person\u2019s grievances."
+     ],
+     "search_operators_fallback": false
+    }
+   ],
+   "family_friendly": true
+  }
+ }
+}

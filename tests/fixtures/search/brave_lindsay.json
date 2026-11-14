@@ -1,0 +1,502 @@
+{
+ "status": 200,
+ "headers": {
+  "x-ratelimit-limit": "50, 0",
+  "x-ratelimit-policy": "50;w=1, 0;w=2592000",
+  "x-ratelimit-remaining": "49, 0",
+  "x-ratelimit-reset": "1, 1414445"
+ },
+ "body": {
+  "type": "search",
+  "query": {
+   "original": "All Ears English podcast co-host Lindsay",
+   "show_strict_warning": false,
+   "is_navigational": false,
+   "is_news_breaking": false,
+   "spellcheck_off": false,
+   "country": "us",
+   "bad_results": false,
+   "should_fallback": false,
+   "postal_code": "",
+   "city": "",
+   "header_country": "",
+   "more_results_available": true,
+   "state": "",
+   "related_queries": []
+  },
+  "mixed": {
+   "type": "mixed",
+   "main": [
+    {
+     "type": "web",
+     "index": 0,
+     "all": false
+    },
+    {
+     "type": "web",
+     "index": 1,
+     "all": false
+    },
+    {
+     "type": "videos",
+     "all": true
+    },
+    {
+     "type": "web",
+     "index": 2,
+     "all": false
+    },
+    {
+     "type": "web",
+     "index": 3,
+     "all": false
+    },
+    {
+     "type": "web",
+     "index": 4,
+     "all": false
+    },
+    {
+     "type": "web",
+     "index": 5,
+     "all": false
+    },
+    {
+     "type": "web",
+     "index": 6,
+     "all": false
+    },
+    {
+     "type": "web",
+     "index": 7,
+     "all": false
+    },
+    {
+     "type": "web",
+     "index": 8,
+     "all": false
+    },
+    {
+     "type": "web",
+     "index": 9,
+     "all": false
+    },
+    {
+     "type": "web",
+     "index": 10,
+     "all": false
+    },
+    {
+     "type": "web",
+     "index": 11,
+     "all": false
+    },
+    {
+     "type": "web",
+     "index": 12,
+     "all": false
+    },
+    {
+     "type": "web",
+     "index": 13,
+     "all": false
+    },
+    {
+     "type": "web",
+     "index": 14,
+     "all": false
+    },
+    {
+     "type": "web",
+     "index": 15,
+     "all": false
+    },
+    {
+     "type": "web",
+     "index": 16,
+     "all": false
+    },
+    {
+     "type": "web",
+     "index": 17,
+     "all": false
+    },
+    {
+     "type": "web",
+     "index": 18,
+     "all": false
+    }
+   ],
+   "top": [],
+   "side": []
+  },
+  "videos": {
+   "type": "videos",
+   "results": [
+    {
+     "type": "video_result",
+     "url": "https://www.youtube.com/watch?v=OoKD9MQkfUo",
+     "title": "All Ears English Podcast 1526: Go for a Drive in English with Lindsay ...",
+     "description": "Subscribe to this channel: https://rb.gy/pqu4sa_____________________________________________________________________Listen and Subscribe to All Ears English:...",
+     "age": "February 22, 2021",
+     "page_age": "2021-02-22T17:00:11",
+     "fetched_content_timestamp": 1719977455,
+     "video": {
+      "duration": "20:54",
+      "views": 4347,
+      "creator": "All Ears English",
+      "publisher": "YouTube"
+     },
+     "meta_url": {
+      "scheme": "https",
+      "netloc": "youtube.com",
+      "hostname": "www.youtube.com",
+      "favicon": "https://imgs.search.brave.com/Wg4wjE5SHAargkzePU3eSLmWgVz84BEZk1SjSglJK_U/rs:fit:32:32:1:0/g:ce/aHR0cDovL2Zhdmlj/b25zLnNlYXJjaC5i/cmF2ZS5jb20vaWNv/bnMvOTkyZTZiMWU3/YzU3Nzc5YjExYzUy/N2VhZTIxOWNlYjM5/ZGVjN2MyZDY4Nzdh/ZDYzMTYxNmI5N2Rk/Y2Q3N2FkNy93d3cu/eW91dHViZS5jb20v",
+      "path": "\u203a watch"
+     },
+     "thumbnail": {
+      "src": "https://imgs.search.brave.com/KRfwePP8kraIlusgZI735ZtyDgttTMABYzukds0sFKo/rs:fit:200:200:1:0/g:ce/aHR0cHM6Ly9pLnl0/aW1nLmNvbS92aS9P/b0tEOU1Ra2ZVby9t/YXhyZXNkZWZhdWx0/LmpwZw",
+      "original": "https://i.ytimg.com/vi/OoKD9MQkfUo/maxresdefault.jpg"
+     }
+    },
+    {
+     "type": "video_result",
+     "url": "https://www.youtube.com/watch?v=MNj6MMjhx2c",
+     "title": "All Ears English Podcast 1583: Take a Deep Breath with ...",
+     "description": "Enjoy the videos and music you love, upload original content, and share it all with friends, family, and the world on YouTube.",
+     "fetched_content_timestamp": 1722952512,
+     "video": {},
+     "meta_url": {
+      "scheme": "https",
+      "netloc": "youtube.com",
+      "hostname": "www.youtube.com",
+      "favicon": "https://imgs.search.brave.com/Wg4wjE5SHAargkzePU3eSLmWgVz84BEZk1SjSglJK_U/rs:fit:32:32:1:0/g:ce/aHR0cDovL2Zhdmlj/b25zLnNlYXJjaC5i/cmF2ZS5jb20vaWNv/bnMvOTkyZTZiMWU3/YzU3Nzc5YjExYzUy/N2VhZTIxOWNlYjM5/ZGVjN2MyZDY4Nzdh/ZDYzMTYxNmI5N2Rk/Y2Q3N2FkNy93d3cu/eW91dHViZS5jb20v",
+      "path": "\u203a watch"
+     },
+     "thumbnail": {
+      "src": "https://imgs.search.brave.com/_6SODdoGIPA1vkSMopJK1Wdt1nLm9nNSMSX95FgOPoY/rs:fit:200:200:1:0/g:ce/aHR0cHM6Ly9pLnl0/aW1nLmNvbS92aS9N/Tmo2TU1qaHgyYy9t/YXhyZXNkZWZhdWx0/LmpwZw",
+      "original": "https://i.ytimg.com/vi/MNj6MMjhx2c/maxresdefault.jpg"
+     }
+    },
+    {
+     "type": "video_result",
+     "url": "https://www.youtube.com/watch?v=TMcYKGU04zc",
+     "title": "All Ears English Podcast 1502: How to Sing Someone's Praises in ...",
+     "description": "Subscribe to this channel: https://rb.gy/pqu4sa_____________________________________________________________________Listen and Subscribe to All Ears English:...",
+     "age": "January 11, 2021",
+     "page_age": "2021-01-11T17:30:01",
+     "fetched_content_timestamp": 1793729646,
+     "video": {
+      "duration": "14:04",
+      "creator": "All Ears English",
+      "publisher": "YouTube"
+     },
+     "meta_url": {
+      "scheme": "https",
+      "netloc": "youtube.com",
+      "hostname": "www.youtube.com",
+      "favicon": "https://imgs.search.brave.com/Wg4wjE5SHAargkzePU3eSLmWgVz84BEZk1SjSglJK_U/rs:fit:32:32:1:0/g:ce/aHR0cDovL2Zhdmlj/b25zLnNlYXJjaC5i/cmF2ZS5jb20vaWNv/bnMvOTkyZTZiMWU3/YzU3Nzc5YjExYzUy/N2VhZTIxOWNlYjM5/ZGVjN2MyZDY4Nzdh/ZDYzMTYxNmI5N2Rk/Y2Q3N2FkNy93d3cu/eW91dHViZS5jb20v",
+      "path": "\u203a watch"
+     },
+     "thumbnail": {
+      "src": "https://imgs.search.brave.com/0wwleS39Zr746E67JndMd-bUD3fmy00m9UluiaT1L9I/rs:fit:200:200:1:0/g:ce/aHR0cHM6Ly9pLnl0/aW1nLmNvbS92aS9U/TWNZS0dVMDR6Yy9t/YXhyZXNkZWZhdWx0/LmpwZw",
+      "original": "https://i.ytimg.com/vi/TMcYKGU04zc/maxresdefault.jpg"
+     }
+    },
+    {
+     "type": "video_result",
+     "url": "https://www.youtube.com/watch?v=i99Hi2qpWQs",
+     "title": "How to Be Resilient with One Key English Expression - All Ears ...",
+     "description": "Take our short, free quiz and find out your English level: allearsenglish.com/fluencyscore.Have you ever heard the phrase \u201cmind over matter\u201d used in English?...",
+     "age": "October 13, 2020",
+     "page_age": "2020-10-13T09:00:14",
+     "fetched_content_timestamp": 1793580358,
+     "video": {
+      "duration": "18:17",
+      "creator": "All Ears English",
+      "publisher": "YouTube"
+     },
+     "meta_url": {
+      "scheme": "https",
+      "netloc": "youtube.com",
+      "hostname": "www.youtube.com",
+      "favicon": "https://imgs.search.brave.com/Wg4wjE5SHAargkzePU3eSLmWgVz84BEZk1SjSglJK_U/rs:fit:32:32:1:0/g:ce/aHR0cDovL2Zhdmlj/b25zLnNlYXJjaC5i/cmF2ZS5jb20vaWNv/bnMvOTkyZTZiMWU3/YzU3Nzc5YjExYzUy/N2VhZTIxOWNlYjM5/ZGVjN2MyZDY4Nzdh/ZDYzMTYxNmI5N2Rk/Y2Q3N2FkNy93d3cu/eW91dHViZS5jb20v",
+      "path": "\u203a watch"
+     },
+     "thumbnail": {
+      "src": "https://imgs.search.brave.com/3QDV00QYjJeCQBoS--WxRhdOwcGN4QrvnugAEb7HCYc/rs:fit:200:200:1:0/g:ce/aHR0cHM6Ly9pLnl0/aW1nLmNvbS92aS9p/OTlIaTJxcFdRcy9t/YXhyZXNkZWZhdWx0/LmpwZw",
+      "original": "https://i.ytimg.com/vi/i99Hi2qpWQs/maxresdefault.jpg"
+     }
+    },
+    {
+     "type": "video_result",
+     "url": "https://www.youtube.com/watch?v=wG62RbJtghs",
+     "title": "Running Uptown with Aubrey and Lindsay - All Ears English Podcast ...",
+     "description": "You may have to hoof it if you're travelling and want to explore a city! Today you learn fun English idioms to talk about walking. Listen in for these native...",
+     "age": "April 21, 2022",
+     "page_age": "2022-04-21T07:00:42",
+     "fetched_content_timestamp": 1717123422,
+     "video": {
+      "duration": "14:29",
+      "views": 4544,
+      "creator": "All Ears English",
+      "publisher": "YouTube"
+     },
+     "meta_url": {
+      "scheme": "https",
+      "netloc": "youtube.com",
+      "hostname": "www.youtube.com",
+      "favicon": "https://imgs.search.brave.com/Wg4wjE5SHAargkzePU3eSLmWgVz84BEZk1SjSglJK_U/rs:fit:32:32:1:0/g:ce/aHR0cDovL2Zhdmlj/b25zLnNlYXJjaC5i/cmF2ZS5jb20vaWNv/bnMvOTkyZTZiMWU3/YzU3Nzc5YjExYzUy/N2VhZTIxOWNlYjM5/ZGVjN2MyZDY4Nzdh/ZDYzMTYxNmI5N2Rk/Y2Q3N2FkNy93d3cu/eW91dHViZS5jb20v",
+      "path": "\u203a watch"
+     },
+     "thumbnail": {
+      "src": "https://imgs.search.brave.com/i_3biF1qke98-7MLLaEzuNdeVZNl0YtAZX7eURZbw_s/rs:fit:200:200:1:0/g:ce/aHR0cHM6Ly9pLnl0/aW1nLmNvbS92aS93/RzYyUmJKdGdocy9t/YXhyZXNkZWZhdWx0/LmpwZw",
+      "original": "https://i.ytimg.com/vi/wG62RbJtghs/maxresdefault.jpg"
+     }
+    },
+    {
+     "type": "video_result",
+     "url": "https://www.youtube.com/watch?v=cjJq4nyHv_Y",
+     "title": "Jump Start Your Business English with Today's Idioms - All ...",
+     "description": "Enjoy the videos and music you love, upload original content, and share it all with friends, family, and the world on YouTube.",
+     "fetched_content_timestamp": 1722596870,
+     "video": {},
+     "meta_url": {
+      "scheme": "https",
+      "netloc": "youtube.com",
+      "hostname": "www.youtube.com",
+      "favicon": "https://imgs.search.brave.com/Wg4wjE5SHAargkzePU3eSLmWgVz84BEZk1SjSglJK_U/rs:fit:32:32:1:0/g:ce/aHR0cDovL2Zhdmlj/b25zLnNlYXJjaC5i/cmF2ZS5jb20vaWNv/bnMvOTkyZTZiMWU3/YzU3Nzc5YjExYzUy/N2VhZTIxOWNlYjM5/ZGVjN2MyZDY4Nzdh/ZDYzMTYxNmI5N2Rk/Y2Q3N2FkNy93d3cu/eW91dHViZS5jb20v",
+      "path": "\u203a watch"
+     },
+     "thumbnail": {
+      "src": "https://imgs.search.brave.com/eQkUf6dfISoaLojYa5VwixCqYah19tzuwvOM3q9edAk/rs:fit:200:200:1:0/g:ce/aHR0cHM6Ly9pLnl0/aW1nLmNvbS92aS9j/akpxNG55SHZfWS9t/YXhyZXNkZWZhdWx0/LmpwZw",
+      "original": "https://i.ytimg.com/vi/cjJq4nyHv_Y/maxresdefault.jpg"
+     }
+    }
+   ],
+   "mutated_by_goggles": false
+  },
+  "web": {
+   "type": "search",
+   "results": [
+    {
+     "title": "All Ears English Podcast - Podcast - Apple Podcasts",
+     "url": "https://podcasts.apple.com/us/podcast/all-ears-english-podcast/id751574016",
+     "is_source_local": false,
+     "is_source_both": false,
+     "description": "Listen to <strong>Lindsay McMahon</strong> and Michelle Kaplan&#x27;s All Ears English Podcast podcast with Aubrey Carter, Jessica Beck, <strong>Lindsay McMahon</strong> and more on Apple Podcasts.",
+     "page_age": "2026-11-19T08:00:00",
+     "profile": {
+      "name": "Apple Podcasts",
+      "url": "https://podcasts.apple.com/us/podcast/all-ears-english-podcast/id751574016",
+      "long_name": "podcasts.apple.com",
+      "img": "https://imgs.search.brave.com/dxbA4M8-73m6A8NYgRdVT93XnsZiSwqXaI4E3C6P0LU/rs:fit:32:32:1:0/g:ce/aHR0cDovL2Zhdmlj/b25zLnNlYXJjaC5i/cmF2ZS5jb20vaWNv/bnMvOTRmOTI2M2Yy/YTMzOGQ0ZWZhZDU4/YWVmYTU5ZjkwNzE2/ZGM0NGM5ZDQxZWE1/YjE0YThhYTFmNTI0/ZTM4ZDkzZS9wb2Rj/YXN0cy5hcHBsZS5j/b20v"
+     },
+     "language": "en",
+     "family_friendly": true,
+     "type": "search_result",
+     "subtype": "creative_work",
+     "is_live": false,
+     "meta_url": {
+      "scheme": "https",
+      "netloc": "podcasts.apple.com",
+      "hostname": "podcasts.apple.com",
+      "favicon": "https://imgs.search.brave.com/dxbA4M8-73m6A8NYgRdVT93XnsZiSwqXaI4E3C6P0LU/rs:fit:32:32:1:0/g:ce/aHR0cDovL2Zhdmlj/b25zLnNlYXJjaC5i/cmF2ZS5jb20vaWNv/bnMvOTRmOTI2M2Yy/YTMzOGQ0ZWZhZDU4/YWVmYTU5ZjkwNzE2/ZGM0NGM5ZDQxZWE1/YjE0YThhYTFmNTI0/ZTM4ZDkzZS9wb2Rj/YXN0cy5hcHBsZS5j/b20v",
+      "path": "\u203a us  \u203a podcast  \u203a all-ears-english-podcast  \u203a id751574016"
+     },
+     "thumbnail": {
+      "src": "https://imgs.search.brave.com/D9To43AmV1SPy1IzWgKQqyua4Yz5vVfUyxVq0f3SbIg/rs:fit:200:200:1:0/g:ce/aHR0cHM6Ly9pczEt/c3NsLm16c3RhdGlj/LmNvbS9pbWFnZS90/aHVtYi9Qb2RjYXN0/czIxMS92NC9jYi9h/MS8xMy9jYmExMTNh/Ny05OTlkLTNjM2Qt/YTU5NC05MDBhZGI2/OTYyNGUvbXphXzc5/OTIxNjExOTI1MDI0/NjkxNTAuanBnLzEy/MDB4MTIwMGJmLndl/YnA",
+      "original": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts211/v4/cb/a1/13/cba113a7-999d-3c3d-a594-900adb69624e/mza_7992161192502469150.jpg/1200x1200bf.webp",
+      "logo": false
+     },
+     "age": "Now",
+     "creative_work": {
+      "name": "All Ears English Podcast",
+      "rating": {
+       "ratingValue": 4.6,
+       "bestRating": 5.0,
+       "reviewCount": 1982,
+       "is_tripadvisor": false
+      },
+      "thumbnail": {
+       "src": "https://imgs.search.brave.com/D9To43AmV1SPy1IzWgKQqyua4Yz5vVfUyxVq0f3SbIg/rs:fit:200:200:1:0/g:ce/aHR0cHM6Ly9pczEt/c3NsLm16c3RhdGlj/LmNvbS9pbWFnZS90/aHVtYi9Qb2RjYXN0/czIxMS92NC9jYi9h/MS8xMy9jYmExMTNh/Ny05OTlkLTNjM2Qt/YTU5NC05MDBhZGI2/OTYyNGUvbXphXzc5/OTIxNjExOTI1MDI0/NjkxNTAuanBnLzEy/MDB4MTIwMGJmLndl/YnA",
+       "original": "https://is1-ssl.mzstatic.com/image/thumb/Podcasts211/v4/cb/a1/13/cba113a7-999d-3c3d-a594-900adb69624e/mza_7992161192502469150.jpg/1200x1200bf.webp"
+      }
+     },
+     "extra_snippets": [
+      "Language Learning Podcast \u00b7 Updated Daily \u00b7 Are you looking for a new and fun way to learn American English? Come hang out with Lindsay and Michelle from Boston and New York City and have fun while you improve your English listening skills! We \u2026",
+      "Connection NOT Perfection! ... Want to know your English level? Take our free English-level quiz here to find out what your current English level is. Do you love All Ears English? Try our other podcasts here: Business English Podcast: Improve your Business English with 3 episodes per week, featuring Lindsay, Michelle, and Aubrey IELTS Energy Podcast: Learn IELTS from a former Examiner and achieve your Band 7 or higher, featuring Lindsay McMahon and Aubrey Carter with Jessica Beck in previous episodes Visit our website here or https://lnk.to/website-sn If you love this podcast, hit the follow button now so that you don't miss five fresh and fun episodes every single week.",
+      "Visit podcastchoices.com/adchoices ... Test your understanding with a 5-minute quiz about All Ears English episode 2721. (For subscribers only.) ... Want to know your English level? Take our free English-level quiz here to find out what your current English level is. Do you love All Ears English? Try our other podcasts here: Business English Podcast: Improve your Business English with 3 episodes per week, featuring Lindsay, Michelle, and Aubrey IELTS Energy Podcast: Learn IELTS from a former Examiner and achieve your Band 7 or higher, featuring Lindsay McMahon and Aubrey Carter with Jessica Beck in previous episodes Visit our website here or https://lnk.to/website-sn If you love this podcast, hit the follow button now so that you don't miss five fresh and fun episodes every single week.",
+      "Send your English question or episode topic idea to support@allearsenglish.com Learn more about your ad choices. Visit podcastchoices.com/adchoices ... Want to check your understanding? Join Lindsay and Aubrey for a fun quiz about All Ears English episode 2720!"
+     ]
+    },
+    {
+     "title": "Learn More About Us \u2022 English Learning App | All Ears English",
+     "url": "https://www.allearsenglish.com/about-english-conversation-listening-podcast/",
+     "is_source_local": false,
+     "is_source_both": false,
+     "description": "Throw away your boring English grammar books! Come hang out with Lindsay, Michelle, and Jessica, and learn advanced, conversational English on the All Ears English Podcast.",
+     "page_age": "2025-06-27T15:16:14",
+     "profile": {
+      "name": "All Ears English",
+      "url": "https://www.allearsenglish.com/about-english-conversation-listening-podcast/",
+      "long_name": "allearsenglish.com",
+      "img": "https://imgs.search.brave.com/nipv2jqpY6pU5dqSHXJJ0NKXpOVedNe5D9ftCSQUwvo/rs:fit:32:32:1:0/g:ce/aHR0cDovL2Zhdmlj/b25zLnNlYXJjaC5i/cmF2ZS5jb20vaWNv/bnMvYzNmNjU5YTZh/M2NmZmIwNjYwMDMz/MTUyZGRiNmY2OTdl/MjgyZmYzZGQ1ODhm/YzQwYjI0ZjU5MjZj/MjUzMTdhOS93d3cu/YWxsZWFyc2VuZ2xp/c2guY29tLw"
+     },
+     "language": "en",
+     "family_friendly": true,
+     "type": "search_result",
+     "subtype": "generic",
+     "is_live": false,
+     "meta_url": {
+      "scheme": "https",
+      "netloc": "allearsenglish.com",
+      "hostname": "www.allearsenglish.com",
+      "favicon": "https://imgs.search.brave.com/nipv2jqpY6pU5dqSHXJJ0NKXpOVedNe5D9ftCSQUwvo/rs:fit:32:32:1:0/g:ce/aHR0cDovL2Zhdmlj/b25zLnNlYXJjaC5i/cmF2ZS5jb20vaWNv/bnMvYzNmNjU5YTZh/M2NmZmIwNjYwMDMz/MTUyZGRiNmY2OTdl/MjgyZmYzZGQ1ODhm/YzQwYjI0ZjU5MjZj/MjUzMTdhOS93d3cu/YWxsZWFyc2VuZ2xp/c2guY29tLw",
+      "path": "  \u203a home  \u203a about us"
+     },
+     "thumbnail": {
+      "src": "https://imgs.search.brave.com/dQUqIHlwn0-jD80JiTzk8Vs1We7s4OGVYE7xYKnKIu8/rs:fit:200:200:1:0/g:ce/aHR0cHM6Ly93d3cu/YWxsZWFyc2VuZ2xp/c2guY29tL3dwLWNv/bnRlbnQvdXBsb2Fk/cy8yMDE5LzA5L0Fs/bC1FYXJzLUVuZ2xp/c2gtVHJhbnNjcmlw/dHMtOS5wbmc",
+      "original": "https://www.allearsenglish.com/wp-content/uploads/2019/09/All-Ears-English-Transcripts-9.png",
+      "logo": false
+     },
+     "age": "June 27, 2025",
+     "organization": {
+      "type": "organization",
+      "name": "All Ears English",
+      "contact_points": []
+     },
+     "extra_snippets": [
+      "Throw away your boring old textbook! You should feel inspired when you learn English. We believe the purpose of learning English is to connect with people. Don\u2019t get stuck in perfection by focusing on your mistakes. Come hang out with Lindsay, Michelle, Jessica and Aubrey!",
+      "This website uses cookies to improve your experience while you navigate through the website. Out of these cookies, the cookies that are categorized as necessary are stored on your browser as they are essential for the working of basic functionalities of the website.",
+      "We also use third-party cookies that help us analyze and understand how you use this website. These cookies will be stored in your browser only with your consent. You also have the option to opt-out of these cookies.",
+      "Any cookies that may not be particularly necessary for the website to function and is used specifically to collect user personal data via analytics, ads, other embedded contents are termed as non-necessary cookies."
+     ]
+    },
+    {
+     "title": "All Ears English Podcast | Podchaser",
+     "url": "https://www.podchaser.com/podcasts/all-ears-english-podcast-19923",
+     "is_source_local": false,
+     "is_source_both": false,
+     "description": "Are you looking for a new and fun way to learn American English? Come hang out with Lindsay and Michelle from Boston and New York City and have fun while you improve your English listening skills! We are an English as a Second Language (ESL) podcast for intermediate to advanced English learners around the world.",
+     "profile": {
+      "name": "Podchaser",
+      "url": "https://www.podchaser.com/podcasts/all-ears-english-podcast-19923",
+      "long_name": "podchaser.com",
+      "img": "https://imgs.search.brave.com/5EuOPM-t5HtjoE2ltWIEmeUtvCUMQV6ntzXX6UgCxB4/rs:fit:32:32:1:0/g:ce/aHR0cDovL2Zhdmlj/b25zLnNlYXJjaC5i/cmF2ZS5jb20vaWNv/bnMvYjM1ZjQ5ZjI2/ZjUzYjI4NTc2OWYz/ODJmZGI1NzhlNWMy/ZjM2YjNlOWI5MWIw/ODkyZjU3NDIwODMz/N2RlNTg5Yi93d3cu/cG9kY2hhc2VyLmNv/bS8"
+     },
+     "language": "en",
+     "family_friendly": true,
+     "type": "search_result",
+     "subtype": "creative_work",
+     "is_live": false,
+     "meta_url": {
+      "scheme": "https",
+      "netloc": "podchaser.com",
+      "hostname": "www.podchaser.com",
+      "favicon": "https://imgs.search.brave.com/5EuOPM-t5HtjoE2ltWIEmeUtvCUMQV6ntzXX6UgCxB4/rs:fit:32:32:1:0/g:ce/aHR0cDovL2Zhdmlj/b25zLnNlYXJjaC5i/cmF2ZS5jb20vaWNv/bnMvYjM1ZjQ5ZjI2/ZjUzYjI4NTc2OWYz/ODJmZGI1NzhlNWMy/ZjM2YjNlOWI5MWIw/ODkyZjU3NDIwODMz/N2RlNTg5Yi93d3cu/cG9kY2hhc2VyLmNv/bS8",
+      "path": "\u203a podcasts  \u203a all-ears-english-podcast-19923"
+     },
+     "thumbnail": {
+      "src": "https://imgs.search.brave.com/P8nu7QHY5QjkLn9nmJFmlfGdTaBw-Gi4OOqRMTDUfOY/rs:fit:200:200:1:0/g:ce/aHR0cHM6Ly9tZWdh/cGhvbmUuaW1naXgu/bmV0L3BvZGNhc3Rz/Lzg4Yjg1ZjEwLWEw/YzAtMTFlYy05ZTUy/LWJmY2Y5NDQxZjc0/Mi9pbWFnZS9BbGxf/RWFyc19FbmdsaXNo/X05ld19Db3Zlcl93/aXRoX01pY2hlbGxl/X1VuZGVyXzUwMF9L/Qi5qcGc_aXhsaWI9/cmFpbHMtNC4zLjEm/bWF4LXc9MzAwMCZt/YXgtaD0zMDAwJmZp/dD1jcm9wJmF1dG89/Zm9ybWF0JTJDY29t/cHJlc3M",
+      "original": "https://megaphone.imgix.net/podcasts/88b85f10-a0c0-11ec-9e52-bfcf9441f742/image/All_Ears_English_New_Cover_with_Michelle_Under_500_KB.jpg?ixlib=rails-4.3.1&max-w=3000&max-h=3000&fit=crop&auto=format%2Ccompress",
+      "logo": false
+     },
+     "creative_work": {
+      "name": "All Ears English Podcast",
+      "rating": {
+       "ratingValue": 5.0,
+       "bestRating": 5.0,
+       "reviewCount": 17,
+       "is_tripadvisor": false
+      },
+      "thumbnail": {
+       "src": "https://imgs.search.brave.com/P8nu7QHY5QjkLn9nmJFmlfGdTaBw-Gi4OOqRMTDUfOY/rs:fit:200:200:1:0/g:ce/aHR0cHM6Ly9tZWdh/cGhvbmUuaW1naXgu/bmV0L3BvZGNhc3Rz/Lzg4Yjg1ZjEwLWEw/YzAtMTFlYy05ZTUy/LWJmY2Y5NDQxZjc0/Mi9pbWFnZS9BbGxf/RWFyc19FbmdsaXNo/X05ld19Db3Zlcl93/aXRoX01pY2hlbGxl/X1VuZGVyXzUwMF9L/Qi5qcGc_aXhsaWI9/cmFpbHMtNC4zLjEm/bWF4LXc9MzAwMCZt/YXgtaD0zMDAwJmZp/dD1jcm9wJmF1dG89/Zm9ybWF0JTJDY29t/cHJlc3M",
+       "original": "https://megaphone.imgix.net/podcasts/88b85f10-a0c0-11ec-9e52-bfcf9441f742/image/All_Ears_English_New_Cover_with_Michelle_Under_500_KB.jpg?ixlib=rails-4.3.1&max-w=3000&max-h=3000&fit=crop&auto=format%2Ccompress"
+      }
+     },
+     "organization": {
+      "type": "organization",
+      "name": "Podchaser",
+      "contact_points": []
+     },
+     "extra_snippets": [
+      "Are you looking for a new and fun way to learn American English? Come hang out with Lindsay and Michelle from Boston and New York City and have fun while you improve your English listening skills! We are an English as a Second Language (ESL) podcast for intermediate to advanced English learners around the world.",
+      "Connection NOT Perfection! ... AEE Bonus: Avoid Business Fails with This Vocabulary and Get a Webclass Invitation! ... I've found out this podcast during the Quarentine and I've been hearding It since then. I love the energy of the hosts and the topics they bring.",
+      "I've been listening to your podcast for more than a year, and ultimately it became a habit and it's fascinating to listen to your effervescent voices and getting new ways to develop vital communication skills. Thanks guys... ... Do you host or manage this podcast?",
+      "Click on the different category headings to find out more and change our default settings. However, blocking some types of cookies may impact your experience of the site and the services we are able to offer."
+     ]
+    },
+    {
+     "title": "Lindsay McMahon - All Ears English Education | LinkedIn",
+     "url": "https://www.linkedin.com/in/lindsaymcmahon/",
+     "is_source_local": false,
+     "is_source_both": false,
+     "description": "Lindsay can introduce you to 1 people at All Ears English Education ... By clicking Continue to join or sign in, you agree to LinkedIn\u2019s User Agreement, Privacy Policy, and Cookie Policy. ... By clicking Continue to join or sign in, you agree to LinkedIn\u2019s User Agreement, Privacy Policy, and Cookie Policy. ... By clicking Continue to join or sign in, you agree to LinkedIn\u2019s User Agreement, Privacy Policy, and Cookie Policy. ... We\u2019re hiring a new podcast co-host at All Ears English!",
+     "page_age": "2025-01-28T15:26:32",
+     "profile": {
+      "name": "LinkedIn",
+      "url": "https://www.linkedin.com/in/lindsaymcmahon/",
+      "long_name": "linkedin.com",
+      "img": "https://imgs.search.brave.com/B3dmoKTAgUkkbrvzAxFg_MfHAm5WmWy0N-4kH1AGWOo/rs:fit:32:32:1:0/g:ce/aHR0cDovL2Zhdmlj/b25zLnNlYXJjaC5i/cmF2ZS5jb20vaWNv/bnMvNGE1YzZjOWNj/NmNiODQ4NzI0ODg1/MGY5ZGQ2YzhjZTRm/N2NjOGIzZjc1NTlj/NDM2ZGI5Yjk3ZWI1/YzBmNzJmZS93d3cu/bGlua2VkaW4uY29t/Lw"
+     },
+     "language": "en",
+     "family_friendly": true,
+     "type": "search_result",
+     "subtype": "article",
+     "is_live": false,
+     "meta_url": {
+      "scheme": "https",
+      "netloc": "linkedin.com",
+      "hostname": "www.linkedin.com",
+      "favicon": "https://imgs.search.brave.com/B3dmoKTAgUkkbrvzAxFg_MfHAm5WmWy0N-4kH1AGWOo/rs:fit:32:32:1:0/g:ce/aHR0cDovL2Zhdmlj/b25zLnNlYXJjaC5i/cmF2ZS5jb20vaWNv/bnMvNGE1YzZjOWNj/NmNiODQ4NzI0ODg1/MGY5ZGQ2YzhjZTRm/N2NjOGIzZjc1NTlj/NDM2ZGI5Yjk3ZWI1/YzBmNzJmZS93d3cu/bGlua2VkaW4uY29t/Lw",
+      "path": "\u203a in  \u203a lindsaymcmahon"
+     },
+     "thumbnail": {
+      "src": "https://imgs.search.brave.com/amTXWEGjGCkFRt2HkWqfJ_-XD-I5AB4W9cUAPAdlYsk/rs:fit:200:200:1:0/g:ce/aHR0cHM6Ly9tZWRp/YS5saWNkbi5jb20v/ZG1zL2ltYWdlL3Yy/L0M0RTAzQVFIOUhz/QkVVTlg5d0EvcHJv/ZmlsZS1kaXNwbGF5/cGhvdG8tc2hyaW5r/XzIwMF8yMDAvcHJv/ZmlsZS1kaXNwbGF5/cGhvdG8tc2hyaW5r/XzIwMF8yMDAvMC8x/NTE2MzQ2OTg5ODQ5/P2U9MjE0NzQ4MzY0/NyZhbXA7dj1iZXRh/JmFtcDt0PVRqbGRE/Nk1JcGlHaEs4ZjBr/TGpyZ0pMbEV6T1Aw/akVDYlRpdFRJWFBn/TWc",
+      "original": "https://media.licdn.com/dms/image/v2/C4E03AQH9HsBEUNX9wA/profile-displayphoto-shrink_200_200/profile-displayphoto-shrink_200_200/0/1516346989849?e=2147483647&amp;v=beta&amp;t=TjldD6MIpiGhK8f0kLjrgJLlEzOP0jECbTitTIXPgMg",
+      "logo": false
+     },
+     "age": "January 28, 2025",
+     "extra_snippets": [
+      "Lindsay is an education technology (Edtech) entrepreneur in the field of ESL (English as\u2026 \u00b7 Experience: All Ears English Education \u00b7 Education: Lesley University \u00b7 Location: Denver \u00b7 500+ connections on LinkedIn. View Lindsay McMahon\u2019s profile on LinkedIn, a professional community of 1 billion members.",
+      "The All Ears English Podcast was selected for the Best of Apple Podcasts list in various categories and countries in December of 2017 ... The IELTS Energy English Podcast appeared in the Best of Apple Podcasts list in 2017 for the Language Learning Category in Brazil. \u201cLindsay is an excellent person to work for.",
+      "Lindsay can introduce you to 1 people at All Ears English Education ... By clicking Continue to join or sign in, you agree to LinkedIn\u2019s User Agreement, Privacy Policy, and Cookie Policy. ... By clicking Continue to join or sign in, you agree to LinkedIn\u2019s User Agreement, Privacy Policy, and Cookie Policy. ... By clicking Continue to join or sign in, you agree to LinkedIn\u2019s User Agreement, Privacy Policy, and Cookie Policy. ... We\u2019re hiring a new podcast co-host at All Ears English!",
+      "I love seeing podcasters come together to develop our industry. On Aug 22, I\u2019ll be speaking on a panel about independent podcasting versus being part of a network hosted by David Segura from Glassbox Media and I\u2019ll be in a second panel on the topic of supporting and challenging women in podcasting, hosted by Odile Beniflah from Ausha \ud83d\ude80. It should be a great week!...more ... A new guest episode is live on All Ears English."
+     ]
+    },
+    {
+     "title": "All Ears English - YouTube",
+     "url": "https://www.youtube.com/@AllEarsEnglishPodcast",
+     "is_source_local": false,
+     "is_source_both": false,
+     "description": "AboutPressCopyrightContact usCreatorsAdvertiseDevelopersTermsPrivacyPolicy &amp; SafetyHow YouTube worksTest new features \u00b7 \u00a9 2026 Google LLC \u00b7 All Ears English - YouTube",
+     "profile": {
+      "name": "YouTube",
+      "url": "https://www.youtube.com/@AllEarsEnglishPodcast",
+      "long_name": "youtube.com",
+      "img": "https://imgs.search.brave.com/Wg4wjE5SHAargkzePU3eSLmWgVz84BEZk1SjSglJK_U/rs:fit:32:32:1:0/g:ce/aHR0cDovL2Zhdmlj/b25zLnNlYXJjaC5i/cmF2ZS5jb20vaWNv/bnMvOTkyZTZiMWU3/YzU3Nzc5YjExYzUy/N2VhZTIxOWNlYjM5/ZGVjN2MyZDY4Nzdh/ZDYzMTYxNmI5N2Rk/Y2Q3N2FkNy93d3cu/eW91dHViZS5jb20v"
+     },
+     "language": "en",
+     "family_friendly": true,
+     "type": "search_result",
+     "subtype": "generic",
+     "is_live": false,
+     "meta_url": {
+      "scheme": "https",
+      "netloc": "youtube.com",
+      "hostname": "www.youtube.com",
+      "favicon": "https://imgs.search.brave.com/Wg4wjE5SHAargkzePU3eSLmWgVz84BEZk1SjSglJK_U/rs:fit:32:32:1:0/g:ce/aHR0cDovL2Zhdmlj/b25zLnNlYXJjaC5i/cmF2ZS5jb20vaWNv/bnMvOTkyZTZiMWU3/YzU3Nzc5YjExYzUy/N2VhZTIxOWNlYjM5/ZGVjN2MyZDY4Nzdh/ZDYzMTYxNmI5N2Rk/Y2Q3N2FkNy93d3cu/eW91dHViZS5jb20v",
+      "path": "\u203a @AllEarsEnglishPodcast"
+     },
+     "thumbnail": {
+      "src": "https://imgs.search.brave.com/DxKnK9kQ_8ycSujHqd8RmdSwaZMWrIuF3aSUDuso8-k/rs:fit:200:200:1:0/g:ce/aHR0cHM6Ly95dDMu/Z29vZ2xldXNlcmNv/bnRlbnQuY29tLzIw/MEJVb241aFowb0lT/SUo1TjlyMjA5TGdK/SkVNUUhURktyZzVq/ZmIxUFY2WG85clV1/TW1nOHIzSWVoLWp5/cXVxLWExYkZRWnpH/ST1zOTAwLWMtay1j/MHgwMGZmZmZmZi1u/by1yag",
+      "original": "https://yt3.googleusercontent.com/200BUon5hZ0oISIJ5N9r209LgJJEMQHTFKrg5jfb1PV6Xo9rUuMmg8r3Ieh-jyquq-a1bFQZzGI=s900-c-k-c0x00ffffff-no-rj",
+      "logo": false
+     }
+    }
+   ],
+   "family_friendly": true
+  }
+ }
+}

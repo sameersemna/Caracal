@@ -1,0 +1,24 @@
+{
+ "brave": {
+  "status": 422,
+  "body": {
+   "error": {
+    "code": "SUBSCRIPTION_TOKEN_INVALID",
+    "detail": "The provided subscription token is invalid.",
+    "meta": {
+     "component": "authentication"
+    },
+    "status": 422
+   },
+   "type": "ErrorResponse"
+  }
+ },
+ "exa": {
+  "status": 401,
+  "body": {
+   "requestId": "cb66eca7cb9a17b0231518477167a133",
+   "error": "Invalid API key. Provide a valid key using 'Authorization: Bearer <key>' or 'x-api-key: <key>'. Create a key at https://dashboard.exa.ai/api-keys",
+   "tag": "INVALID_API_KEY"
+  }
+ }
+}

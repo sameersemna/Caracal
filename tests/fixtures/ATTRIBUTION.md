@@ -11,3 +11,5 @@
 - `ollama/*.json` — real responses of Ollama cloud `gemma4:31b` (2026-11-14) for the German test transcript in `ollama/README.json`:
   tool call with pydantic `$defs` schema (invented field names, upper-case enums), tool call with inlined schema (correct fields, enum
   synonyms such as `location`), `format:"json"` without tools (fenced JSON), `format:<schema>` without tools (ignored → markdown).
+- `search/*.json` — real Brave Web Search and Exa `/search` responses recorded 2026-11-14 (keys removed): "All Ears English podcast co-host Lindsay"
+  (both name Lindsay McMahon), the JFK quote query, and both providers' invalid-key error responses (Brave 422 `SUBSCRIPTION_TOKEN_INVALID`, Exa 401).
