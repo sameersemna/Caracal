@@ -24,6 +24,12 @@ JSON-Schema keyword names (`type`, `items`, `properties`, `enum`, `format`, `req
 pydantic aliases; evidence lists are normalised by extracting `(seg|meta|web|vp|caption|hint):[A-Za-z0-9_.-]+` tokens; transcript lines are
 rendered `[seg:12] S2 03:14.2 | text` (id alone inside the brackets).
 
+**Measured on the full content schema** (7 sections): tool calls validate but are never complete (0/6 — whole sections omitted) and
+sometimes come back **empty** (Ollama drops a malformed tool call). **JSON mode** (`format:"json"`, schema in the system prompt, "fill every
+field") → 5/6 complete, 0/87 unknown ids. Nullable float fields (`start`/`end`) trigger empty replies — LLM-facing models reference segment ids
+instead of times. Rule: big multi-section outputs use json mode + a completeness re-ask; small schemas may use tool mode, with an automatic
+json-mode retry on an empty reply.
+
 `call_tool` algorithm:
 0. **Schema preparation** (cached per model class): `model_json_schema()` → inline every `$ref` from `$defs`, drop `title`, append
    `Must be exactly one of: a, b, c.` to the description of every `enum`/`Literal` field.
