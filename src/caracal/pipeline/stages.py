@@ -21,6 +21,9 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
+from caracal.analysis.content import analyse_content
+from caracal.analysis.planner import PlanInputs
+from caracal.analysis.planner import plan as build_plan
 from caracal.asr import (
     Segment,
     Transcript,
@@ -39,6 +42,7 @@ from caracal.errors import CaracalError, ErrorCode
 from caracal.ingest import ytdlp
 from caracal.ingest.direct import download_direct
 from caracal.ingest.ssrf import Resolver
+from caracal.llm.client import LLMClient
 from caracal.log import get_logger
 from caracal.speakers.align import assign_speakers, retime_outside_speech, speaker_stats
 from caracal.speakers.diarize import Diarizer, Turn
@@ -55,6 +59,7 @@ logger = get_logger("caracal.pipeline.stages")
 
 _MIB = 1024 * 1024
 _M1_NOT_IMPLEMENTED = "not implemented in M1"
+_PENDING_STAGE = "not implemented yet"
 
 
 class Stage(StrEnum):
@@ -65,10 +70,10 @@ class Stage(StrEnum):
     CHUNK = "chunk"
     TRANSCRIBE = "transcribe"
     LANGID = "langid"
+    PLAN = "plan"
     DIARIZE = "diarize"
     ALIGN = "align"
     VOICEPRINT = "voiceprint"
-    PLAN = "plan"
     CONTENT = "content"
     IDENTITY = "identity"
     VERIFY = "verify"
@@ -138,6 +143,7 @@ class StageContext:
     load: Callable[[Stage], Awaitable[dict[str, object] | None]]
     progress: Callable[[float, str], Awaitable[None]]
     whisper: WhisperClient | None = None
+    llm: LLMClient | None = None
     diarizer: Diarizer | None = None
     resolver: Resolver | None = None
     redis: Redis | None = None
@@ -661,6 +667,190 @@ async def stage_langid(ctx: StageContext) -> StageResult:
     )
 
 
+_PLAN_METADATA_KEYS = (
+    "title",
+    "description",
+    "channel",
+    "uploader",
+    "upload_date",
+    "tags",
+    "categories",
+)
+
+
+def _metadata_text(value: object) -> str | None:
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    if isinstance(value, (list, tuple)):
+        joined = ", ".join(str(item).strip() for item in value if str(item).strip())
+        return joined or None
+    return None
+
+
+def _metadata_mapping(
+    platform: dict[str, object] | None,
+    fallback_title: str | None,
+) -> dict[str, str]:
+    meta: dict[str, str] = {}
+    if platform is not None:
+        for key in _PLAN_METADATA_KEYS:
+            text = _metadata_text(platform.get(key))
+            if text is not None:
+                meta[key] = text
+    if "title" not in meta and fallback_title:
+        meta["title"] = fallback_title
+    if "description" in meta:
+        meta["description"] = meta["description"][:2000]
+    return meta
+
+
+def _search_configured(settings: Settings) -> bool:
+    for provider in settings.SEARCH_PROVIDERS:
+        if provider == "brave" and settings.BRAVE_API_KEY is not None:
+            return True
+        if provider == "exa" and settings.EXA_API_KEY is not None:
+            return True
+    return False
+
+
+async def _plan_skip(ctx: StageContext, stage: Stage) -> str | None:
+    """The plan's skip reason for ``stage``, or ``None`` when it should run."""
+    plan = await _stage_output(ctx, Stage.PLAN)
+    if plan is None:
+        return None
+    run = plan.get("run")
+    if not isinstance(run, dict):
+        return None
+    if run.get(stage.value) is not False:
+        return None
+    reasons = plan.get("reasons")
+    if isinstance(reasons, dict):
+        reason = reasons.get(stage.value)
+        if isinstance(reason, str) and reason.strip():
+            return reason
+    return "skipped by plan"
+
+
+async def _ingest_platform(ctx: StageContext) -> dict[str, object] | None:
+    ingest = await _stage_output(ctx, Stage.INGEST)
+    if ingest is None:
+        return None
+    platform = ingest.get("platform")
+    return cast("dict[str, object]", platform) if isinstance(platform, dict) else None
+
+
+async def _job_title(ctx: StageContext) -> str | None:
+    job = await ctx.repos.jobs.get(ctx.job_id)
+    return job.title if job is not None else None
+
+
+async def stage_plan(ctx: StageContext) -> StageResult:
+    """Build the deterministic stage plan right after language identification (docs/04 §2)."""
+    transcript = _load_transcript(ctx)
+    normalize = await _stage_output(ctx, Stage.NORMALIZE)
+    if normalize is None:
+        raise CaracalError(ErrorCode.INTERNAL, "normalize checkpoint is missing")
+    stats = _as_dict(normalize.get("stats"), "normalize")
+    duration_s = _as_number(stats.get("duration_s"), "normalize")
+    speech_ratio = _as_number(stats.get("speech_ratio"), "normalize")
+
+    languages: list[dict[str, object]] = []
+    langid = await _stage_output(ctx, Stage.LANGID)
+    if langid is not None:
+        for raw in _as_list(langid.get("languages", []), "langid"):
+            languages.append(_as_dict(raw, "langid"))
+
+    meta = _metadata_mapping(await _ingest_platform(ctx), await _job_title(ctx))
+    diarizer_available = ctx.diarizer is not None and ctx.diarizer.available()
+    inputs = PlanInputs(
+        duration=duration_s,
+        speech_ratio=speech_ratio,
+        options=ctx.options,
+        transcript=transcript,
+        languages=languages,
+        metadata=meta,
+        diarizer_available=diarizer_available,
+        search_configured=_search_configured(ctx.settings),
+        default_target_langs=ctx.settings.CARACAL_DEFAULT_TARGET_LANGS,
+        search_max_queries=ctx.settings.SEARCH_MAX_QUERIES_PER_JOB,
+        report_language=ctx.settings.CARACAL_REPORT_LANGUAGE,
+    )
+    stage_plan_value = await build_plan(inputs, llm=ctx.llm)
+    logger.info(
+        "plan complete",
+        extra={
+            "job_id": str(ctx.job_id),
+            "music_detected": stage_plan_value.music_detected,
+            "skipped": sorted(stage for stage, enabled in stage_plan_value.run.items() if not enabled),
+            "genre": stage_plan_value.content_profile.likely_genre,
+        },
+    )
+    return StageResult(status="done", output=stage_plan_value.model_dump(mode="json"))
+
+
+def _content_hints(options: JobOptions) -> list[str]:
+    hints: list[str] = []
+    if options.context_hint is not None and options.context_hint.strip():
+        hints.append(options.context_hint.strip())
+    hints.extend(hint.strip() for hint in options.speaker_hints if hint.strip())
+    return hints
+
+
+async def stage_content(ctx: StageContext) -> StageResult:
+    """Run the evidence-cited content analysis (docs/04 §6)."""
+    reason = await _plan_skip(ctx, Stage.CONTENT)
+    if reason is not None:
+        return StageResult(status="skipped", reason=reason)
+    if ctx.llm is None:
+        return StageResult(status="skipped", reason="llm unavailable")
+    transcript = _load_transcript(ctx)
+    meta = _metadata_mapping(await _ingest_platform(ctx), await _job_title(ctx))
+    analysis = await analyse_content(
+        transcript,
+        meta,
+        _content_hints(ctx.options),
+        ctx.options,
+        ctx.settings,
+        llm=ctx.llm,
+    )
+    logger.info(
+        "content complete",
+        extra={
+            "job_id": str(ctx.job_id),
+            "chapters": len(analysis.chapters),
+            "entities": len(analysis.entities),
+            "claims": len(analysis.claims),
+            "llm_calls": analysis.llm_meta.calls,
+        },
+    )
+    return StageResult(status="done", output=analysis.model_dump(mode="json"))
+
+
+async def stage_identity(ctx: StageContext) -> StageResult:
+    """Identity resolution is gated by the plan; the resolver itself lands in a later card."""
+    reason = await _plan_skip(ctx, Stage.IDENTITY)
+    if reason is not None:
+        return StageResult(status="skipped", reason=reason)
+    return StageResult(status="skipped", reason=_PENDING_STAGE)
+
+
+async def stage_verify(ctx: StageContext) -> StageResult:
+    """Cross-verification is gated by the plan; the verifier itself lands in a later card."""
+    reason = await _plan_skip(ctx, Stage.VERIFY)
+    if reason is not None:
+        return StageResult(status="skipped", reason=reason)
+    return StageResult(status="skipped", reason=_PENDING_STAGE)
+
+
+async def stage_translate(ctx: StageContext) -> StageResult:
+    """Translation is gated by the plan; the translator itself lands in a later card."""
+    reason = await _plan_skip(ctx, Stage.TRANSLATE)
+    if reason is not None:
+        return StageResult(status="skipped", reason=reason)
+    return StageResult(status="skipped", reason=_PENDING_STAGE)
+
+
 def _turns(value: object, what: str) -> list[Turn]:
     turns: list[Turn] = []
     for raw in _as_list(value, what):
@@ -685,6 +875,9 @@ async def _done_output(ctx: StageContext, stage: Stage) -> dict[str, object] | N
 
 async def stage_diarize(ctx: StageContext) -> StageResult:
     """Separate speakers with pyannote and checkpoint the turns and embeddings (docs/04 §5)."""
+    plan_reason = await _plan_skip(ctx, Stage.DIARIZE)
+    if plan_reason is not None:
+        return StageResult(status="skipped", reason=plan_reason)
     diarizer = ctx.diarizer
     if ctx.options.diarize == "off" or diarizer is None or not diarizer.available():
         return StageResult(status="skipped", reason="unavailable")
@@ -730,6 +923,9 @@ def _render_subtitles(ctx: StageContext, transcript: Transcript) -> dict[str, ob
 
 async def stage_align(ctx: StageContext) -> StageResult:
     """Re-time intro words, attach speakers and rewrite transcript, segments and subtitles."""
+    plan_reason = await _plan_skip(ctx, Stage.ALIGN)
+    if plan_reason is not None:
+        return StageResult(status="skipped", reason=plan_reason)
     diarize_output = await _done_output(ctx, Stage.DIARIZE)
     if diarize_output is None:
         return StageResult(status="skipped", reason="unavailable")
@@ -768,6 +964,9 @@ async def stage_voiceprint(ctx: StageContext) -> StageResult:
     pipeline run can never attach a name to a voiceprint. A label whose best similarity is
     below ``VOICEPRINT_CANDIDATE_THRESHOLD`` is absent from the output.
     """
+    plan_reason = await _plan_skip(ctx, Stage.VOICEPRINT)
+    if plan_reason is not None:
+        return StageResult(status="skipped", reason=plan_reason)
     diarize_output = await _done_output(ctx, Stage.DIARIZE)
     if diarize_output is None:
         return StageResult(status="skipped", reason="unavailable")
@@ -838,9 +1037,14 @@ def m1_registry() -> dict[Stage, StageFn]:
 
 _M2_STAGES: dict[Stage, StageFn] = {
     **_M1_STAGES,
+    Stage.PLAN: stage_plan,
     Stage.DIARIZE: stage_diarize,
     Stage.ALIGN: stage_align,
     Stage.VOICEPRINT: stage_voiceprint,
+    Stage.CONTENT: stage_content,
+    Stage.IDENTITY: stage_identity,
+    Stage.VERIFY: stage_verify,
+    Stage.TRANSLATE: stage_translate,
 }
 
 
@@ -867,11 +1071,16 @@ __all__ = [
     "m2_registry",
     "stage_align",
     "stage_chunk",
+    "stage_content",
     "stage_diarize",
+    "stage_identity",
     "stage_ingest",
     "stage_langid",
     "stage_normalize",
+    "stage_plan",
     "stage_subtitles",
     "stage_transcribe",
+    "stage_translate",
+    "stage_verify",
     "stage_voiceprint",
 ]

@@ -124,6 +124,7 @@ class Settings(BaseSettings):
     CARACAL_JOB_TIMEOUT_S: int = 10800
     CARACAL_MAX_UPLOAD_MB: int = 2048
     CARACAL_MAX_DURATION_S: int = 14400
+    CARACAL_REPORT_LANGUAGE: str = "en"
     CARACAL_DEFAULT_TARGET_LANGS: Annotated[list[str], NoDecode] = ["en"]
 
     YTDLP_COOKIES_FILE: Path | None = None
@@ -196,6 +197,14 @@ class Settings(BaseSettings):
         if isinstance(value, str) and not value.strip():
             return None
         return value
+
+    @field_validator("CARACAL_REPORT_LANGUAGE")
+    @classmethod
+    def _normalise_report_language(cls, value: str) -> str:
+        language = value.strip()
+        if not language:
+            raise ValueError("CARACAL_REPORT_LANGUAGE must not be empty")
+        return language
 
     @field_validator("CARACAL_LOG_LEVEL")
     @classmethod

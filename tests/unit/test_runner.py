@@ -349,7 +349,7 @@ async def test_non_critical_failure_continues_and_job_finishes_done(
     )
 
     assert status == "done"
-    assert calls == ["ok", "diarize", "plan"]
+    assert calls == ["ok", "plan", "diarize"]
     stages = {row.name: row for row in await repos.jobs.list_stages(job_id)}
     assert stages["diarize"].status == "failed"
     assert stages["diarize"].reason == "dependency_down: no pyannote"

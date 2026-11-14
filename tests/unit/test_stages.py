@@ -20,6 +20,7 @@ from typing import Any
 import httpx
 import pytest
 from tests.fakes.diarizer import FakeDiarizer
+from tests.fakes.ollama import FakeOllama, message_response, tool_call_message
 from tests.fakes.redis import RecordingRedis
 from tests.fakes.repo import make_fake_repos
 from tests.fakes.resolver import FakeResolver
@@ -33,6 +34,7 @@ from caracal.db.repo import JobRecord
 from caracal.errors import CaracalError, ErrorCode
 from caracal.ingest.direct import DirectInfo
 from caracal.ingest.ytdlp import CaptionTrack, DownloadedAudio, PlatformMetadata
+from caracal.llm.client import LLMClient
 from caracal.pipeline.runner import RunnerDeps, run_pipeline
 from caracal.pipeline.stages import (
     JobOptions,
@@ -43,12 +45,18 @@ from caracal.pipeline.stages import (
     m2_registry,
     stage_align,
     stage_chunk,
+    stage_content,
     stage_diarize,
+    stage_identity,
     stage_ingest,
     stage_langid,
     stage_normalize,
+    stage_plan,
     stage_subtitles,
     stage_transcribe,
+    stage_translate,
+    stage_verify,
+    stage_voiceprint,
 )
 from caracal.queue import Keys, whisper_lock
 from caracal.speakers.diarize import DiarizationResult, Diarizer, Turn
@@ -111,6 +119,7 @@ def _context(
     keys: Keys | None = None,
     cancelled: Callable[[], Awaitable[bool]] | None = None,
     job_id: uuid.UUID | None = None,
+    llm: LLMClient | None = None,
 ) -> StageContext:
     async def load(stage: Stage) -> dict[str, object] | None:
         value = files.read_json(files.stage(stage))
@@ -128,6 +137,7 @@ def _context(
         load=load,
         progress=progress,
         whisper=whisper,
+        llm=llm,
         resolver=FakeResolver(),
         redis=redis,
         keys=keys,
@@ -1027,3 +1037,186 @@ def test_m2_registry_wires_diarize_and_align_and_keeps_m1_stages() -> None:
     assert registry[Stage.ALIGN] is stage_align
     assert registry[Stage.TRANSCRIBE] is stage_transcribe
     assert registry[Stage.SUBTITLES] is stage_subtitles
+
+
+# --- T2.5 planner and content ----------------------------------------------------------
+
+
+def test_stage_order_puts_plan_right_after_langid() -> None:
+    assert [stage.value for stage in Stage] == [
+        "ingest",
+        "normalize",
+        "chunk",
+        "transcribe",
+        "langid",
+        "plan",
+        "diarize",
+        "align",
+        "voiceprint",
+        "content",
+        "identity",
+        "verify",
+        "translate",
+        "subtitles",
+        "review",
+        "assemble",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("stage", "stage_fn"),
+    [
+        (Stage.DIARIZE, stage_diarize),
+        (Stage.ALIGN, stage_align),
+        (Stage.VOICEPRINT, stage_voiceprint),
+        (Stage.CONTENT, stage_content),
+        (Stage.IDENTITY, stage_identity),
+        (Stage.VERIFY, stage_verify),
+        (Stage.TRANSLATE, stage_translate),
+    ],
+)
+async def test_stages_honour_a_plan_skip(
+    stage: Stage,
+    stage_fn: Callable[[StageContext], Awaitable[StageResult]],
+    make_settings: MakeSettings,
+    tmp_path: Path,
+) -> None:
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    _write_output(
+        files,
+        Stage.PLAN,
+        {
+            "run": {stage.value: False},
+            "reasons": {stage.value: "plan says no"},
+            "content_profile": {
+                "likely_genre": "talk",
+                "expected_speakers": None,
+                "needs_identity": True,
+                "checkworthy_domain": False,
+            },
+            "budgets": {"search_queries": 0, "llm_calls": 0, "claims": 0},
+            "music_detected": False,
+            "languages": None,
+        },
+    )
+
+    result = await stage_fn(_context(settings, repos, files, job_id=job.id))
+
+    assert result.status == "skipped"
+    assert result.reason == "plan says no"
+
+
+async def test_stage_plan_detects_music_and_overrides_the_language(
+    make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    transcript = _transcript(["🎵🎵🎵"] * 4)
+    files.write_json(files.transcript_json, transcript.to_dict())
+    _write_output(
+        files,
+        Stage.NORMALIZE,
+        {
+            "stats": {
+                "duration_s": 8.0,
+                "speech_ratio": 1.0,
+                "loudness_lufs": -20.0,
+                "quality": "good",
+                "silences": [],
+            }
+        },
+    )
+    _write_output(
+        files,
+        Stage.LANGID,
+        {
+            "languages": [
+                {
+                    "code": "nn",
+                    "name": "Nynorsk",
+                    "share": 1.0,
+                    "spans": [{"start": 0.0, "end": 8.0}],
+                    "confidence": 0.4,
+                }
+            ],
+            "caption_agreement": None,
+            "caption_lang": None,
+        },
+    )
+
+    result = await stage_plan(_context(settings, repos, files, job_id=job.id))
+
+    assert result.status == "done"
+    assert result.output["music_detected"] is True
+    assert result.output["run"]["diarize"] is False
+    assert result.output["reasons"]["diarize"] == "music detected"
+    languages = result.output["languages"]
+    assert isinstance(languages, list)
+    assert languages[0]["code"] == "und"
+    assert languages[0]["spans"] == [{"start": 0.0, "end": 8.0}]
+
+
+async def test_stage_content_writes_a_content_checkpoint_with_llm_meta(
+    make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    transcript = _transcript(["alpha beta gamma", "delta epsilon zeta"])
+    files.write_json(files.transcript_json, transcript.to_dict())
+    _write_output(
+        files,
+        Stage.PLAN,
+        {
+            "run": {"content": True},
+            "reasons": {"content": "content analysis"},
+            "content_profile": {
+                "likely_genre": "talk",
+                "expected_speakers": 1,
+                "needs_identity": False,
+                "checkworthy_domain": False,
+            },
+            "budgets": {"search_queries": 0, "llm_calls": 1, "claims": 8},
+            "music_detected": False,
+            "languages": None,
+        },
+    )
+    arguments = {
+        "summary": {
+            "one_line": "Two short lines.",
+            "short": "Two short lines about letters.",
+            "detailed": "Two short lines about Greek letters.",
+            "evidence": ["seg:0"],
+        },
+        "context": {
+            "genre": "talk",
+            "tone": ["calm"],
+            "evidence": ["seg:0"],
+            "confidence": 0.7,
+        },
+    }
+    fake = FakeOllama([message_response(tool_call_message(arguments, name="record_content"))])
+    http = httpx.AsyncClient(transport=fake.transport())
+    client = LLMClient(settings, http)
+    try:
+        result = await stage_content(_context(settings, repos, files, job_id=job.id, llm=client))
+    finally:
+        await http.aclose()
+
+    assert result.status == "done"
+    summary = result.output["summary"]
+    assert isinstance(summary, dict)
+    assert summary["one_line"] == "Two short lines."
+    llm_meta = result.output["llm_meta"]
+    assert isinstance(llm_meta, dict)
+    assert llm_meta["calls"] == 1
+    assert result.output["claims"] == []
