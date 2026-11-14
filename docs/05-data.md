@@ -23,7 +23,8 @@ Dedup: a new job whose source `sha256` (uploads) or `webpage_url` (platform) mat
 
 Conventions: all ids are `uuid` generated in Python (`uuid.uuid4()`); timestamps `timestamptz` set by the DB
 (`server_default=now()`, updated with `now()` in UPDATE statements); `jsonb` for structured columns; names are
-snake_case; no column is named with a SQL reserved word (hence `start_s`/`end_s`). Everything lives in the schema
+snake_case; no column is named with a SQL reserved word (hence `start_s`/`end_s`). Stage semantics: `attempts` increments on each entry into `running`; re-entering `running` clears `ended_at`;
+`list_stages` of an unknown job returns `[]`. Everything lives in the schema
 `CARACAL_DB_SCHEMA` (default `public`), including alembic's `alembic_version` table.
 
 ## 2. Redis — every key starts with `REDIS_PREFIX`

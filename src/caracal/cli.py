@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 from typing import cast
 
+from alembic import command
+from alembic.config import Config as AlembicConfig
 from pydantic import SecretStr, ValidationError
 
 from caracal.config import Settings, get_settings
 from caracal.log import configure_logging, get_logger
+
+_MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 
 _COMMANDS = ("serve", "worker", "mcp-stdio", "migrate", "doctor")
 
@@ -46,19 +51,19 @@ def _secret_values(settings: Settings) -> list[str]:
     return values
 
 
+def _invalid_config_fields(exc: ValidationError) -> list[str]:
+    return sorted(
+        {".".join(str(part) for part in error["loc"]) or "<root>" for error in exc.errors(include_url=False)}
+    )
+
+
 def _doctor() -> int:
     configure_logging("INFO")
     logger = get_logger("caracal.doctor")
     try:
         settings = get_settings()
     except ValidationError as exc:
-        fields = sorted(
-            {
-                ".".join(str(part) for part in error["loc"]) or "<root>"
-                for error in exc.errors(include_url=False)
-            }
-        )
-        logger.error("config invalid", extra={"fields": fields})
+        logger.error("config invalid", extra={"fields": _invalid_config_fields(exc)})
         return 1
     configure_logging(settings.CARACAL_LOG_LEVEL, secrets=_secret_values(settings))
     logger.info(
@@ -69,6 +74,29 @@ def _doctor() -> int:
             "data_dir": str(settings.CARACAL_DATA_DIR),
         },
     )
+    return 0
+
+
+def _migrate() -> int:
+    """Apply ``alembic upgrade head`` programmatically (docs/01 §3)."""
+    configure_logging("INFO")
+    logger = get_logger("caracal.migrate")
+    try:
+        settings = get_settings()
+    except ValidationError as exc:
+        logger.error("config invalid", extra={"fields": _invalid_config_fields(exc)})
+        return 1
+
+    configure_logging(settings.CARACAL_LOG_LEVEL, secrets=_secret_values(settings))
+    config = AlembicConfig()
+    config.set_main_option("script_location", str(_MIGRATIONS_DIR))
+    logger.info("applying migrations", extra={"revision": "head"})
+    try:
+        command.upgrade(config, "head")
+    except Exception as exc:
+        logger.error("migration failed", extra={"error": str(exc)})
+        return 1
+    logger.info("migrations applied", extra={"revision": "head"})
     return 0
 
 
@@ -89,6 +117,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if command == "doctor":
         return _doctor()
+    if command == "migrate":
+        return _migrate()
 
     sys.stderr.write(f"{command}: available from a later milestone\n")
     return 2

@@ -19,6 +19,7 @@ _DATABASE_SCHEME = re.compile(
     r"^(?P<scheme>postgresql|postgres)(?:\+[A-Za-z0-9_]+)?://",
     re.IGNORECASE,
 )
+_DB_SCHEMA = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 _OLLAMA_SUFFIXES = ("/api", "/v1")
 _LOG_LEVELS = frozenset({"CRITICAL", "DEBUG", "ERROR", "INFO", "WARNING"})
 
@@ -87,6 +88,7 @@ class Settings(BaseSettings):
     CARACAL_KEEP_MEDIA: bool = False
 
     DATABASE_URL: SecretStr
+    CARACAL_DB_SCHEMA: str = "public"
     REDIS_URL: SecretStr
     REDIS_PREFIX: str = "caracal:"
 
@@ -138,6 +140,14 @@ class Settings(BaseSettings):
         if value is None:
             return value
         return normalise_database_url(str(_as_plain(value)))
+
+    @field_validator("CARACAL_DB_SCHEMA")
+    @classmethod
+    def _validate_db_schema(cls, value: str) -> str:
+        schema = value.strip()
+        if not _DB_SCHEMA.fullmatch(schema):
+            raise ValueError("CARACAL_DB_SCHEMA must match ^[a-z_][a-z0-9_]{0,62}$")
+        return schema
 
     @field_validator("REDIS_PREFIX")
     @classmethod

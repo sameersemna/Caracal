@@ -38,6 +38,7 @@ No other module reads `os.environ` (enforced by `scripts/check_rules.py`). Secre
 | `EXA_API_KEY` | SecretStr? | none | provider disabled if absent |
 | `SEARCH_MAX_QUERIES_PER_JOB` | int | `24` | hard budget |
 | `SEARCH_CACHE_TTL_S` | int | `86400` | |
+| `CARACAL_RATE_LIMIT_PER_MIN` | int | `30` | job creations per token+IP per minute (docs/06 S11) |
 | `CARACAL_WORKER_CONCURRENCY` | int | `2` | |
 | `CARACAL_JOB_TIMEOUT_S` | int | `10800` | |
 | `CARACAL_MAX_UPLOAD_MB` | int | `2048` | |
