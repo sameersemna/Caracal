@@ -7,18 +7,20 @@ that collides with the JSON-Schema keyword (0/6 valid; renaming gave 6/6), so
 :func:`prepare_schema` rejects such wire names and pydantic validation aliases are the
 escape hatch. :func:`coerce` repairs the model's arguments before pydantic validation,
 including evidence lists, which gemma4 copies as whole transcript line prefixes
-(``"seg:2 S1"``).
+(``"seg:2 S1"``) or with sentence punctuation (``"seg:2."``). The ids themselves are typed
+and shared with the report through :data:`caracal.report.evidence.EVIDENCE_ID_RE`.
 """
 
 from __future__ import annotations
 
 import copy
-import re
 from collections.abc import Mapping
 from functools import cache
 from typing import Any, TypeVar, cast
 
 from pydantic import BaseModel
+
+from caracal.report.evidence import EVIDENCE_ID_RE
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
@@ -39,8 +41,6 @@ RESERVED_FIELD_NAMES: frozenset[str] = frozenset(
         "$ref",
     }
 )
-
-_EVIDENCE_ID_RE = re.compile(r"(?:seg|meta|web|vp|caption|hint):[A-Za-z0-9_.-]+")
 
 DEFAULT_SYNONYMS: dict[str, str] = {
     # entity type: place
@@ -307,8 +307,9 @@ def _is_evidence_property(name: str, schema: Mapping[str, Any]) -> bool:
 def _normalise_evidence(value: Any) -> list[str]:
     """Flatten a value into de-duplicated evidence ids, dropping strings without one.
 
-    gemma4 copies the whole rendered line prefix (``"seg:2 S1"``) or a comma-separated list
-    (``"seg:2, seg:5"``); only the ids themselves are evidence (docs/04 §1, §9).
+    gemma4 copies the whole rendered line prefix (``"seg:2 S1"``), a comma-separated list
+    (``"seg:2, seg:5"``) or sentence punctuation (``"seg:2."``); only the typed id itself is
+    evidence (docs/04 §1, §9).
     """
     if isinstance(value, str):
         candidates: list[Any] = [value]
@@ -321,7 +322,7 @@ def _normalise_evidence(value: Any) -> list[str]:
     for candidate in candidates:
         if not isinstance(candidate, str):
             continue
-        for found in _EVIDENCE_ID_RE.findall(candidate):
+        for found in EVIDENCE_ID_RE.findall(candidate):
             if found in seen:
                 continue
             seen.add(found)
