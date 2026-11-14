@@ -9,6 +9,7 @@ import socket
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -23,6 +24,7 @@ from caracal.errors import CaracalError, ErrorCode
 from caracal.ingest.ssrf import Resolver, SystemResolver
 from caracal.llm.client import LLMClient
 from caracal.log import get_logger
+from caracal.ops import MetricsRegistry, run_retention
 from caracal.pipeline.runner import RunnerDeps, run_pipeline, run_translate
 from caracal.pipeline.stages import Repos, Stage, StageFn, m2_registry
 from caracal.queue import (
@@ -66,6 +68,7 @@ class WorkerIntervals:
     block_ms: int = 5000
     max_deliveries: int = 3
     shutdown_grace_s: float = 30.0
+    retention_s: float = 86_400.0
 
 
 _DEFAULT_INTERVALS = WorkerIntervals()
@@ -106,6 +109,7 @@ class Worker:
         self.intervals = intervals
         self.keys = Keys(settings.REDIS_PREFIX)
         self.queue = JobQueue(redis, self.keys)
+        self.metrics = MetricsRegistry(redis, self.keys)
         self._in_flight: set[asyncio.Task[None]] = set()
 
         # Process-wide stage clients (docs/01 §4): one HTTP client, one whisper client whose
@@ -152,12 +156,14 @@ class Worker:
         await self.queue.ensure_group()
         heartbeat = asyncio.create_task(self._heartbeat())
         reclaim = asyncio.create_task(self._reclaim_loop(stop))
+        retention = asyncio.create_task(self._retention_loop(stop))
         try:
             await self._consume_loop(stop)
         finally:
             heartbeat.cancel()
             reclaim.cancel()
-            await asyncio.gather(heartbeat, reclaim, return_exceptions=True)
+            retention.cancel()
+            await asyncio.gather(heartbeat, reclaim, retention, return_exceptions=True)
             await self._drain()
             if self._owns_http:
                 await self._http.aclose()
@@ -300,7 +306,63 @@ class Worker:
                 },
             )
             return
+        if delivery.kind == "pipeline" and status in JOB_TERMINAL_STATUSES:
+            await self._record_metrics(delivery.job_id, status)
         await self._ack(delivery.entry_id)
+
+    async def _record_metrics(self, job_id: uuid.UUID, status: str) -> None:
+        """Mirror the finished job into the shared Prometheus counters; never fail the job."""
+        try:
+            await self.metrics.incr_job(status)
+            for stage in await self.repos.jobs.list_stages(job_id):
+                if stage.started_at is None or stage.ended_at is None:
+                    continue
+                await self.metrics.observe_stage(
+                    stage.name,
+                    (stage.ended_at - stage.started_at).total_seconds(),
+                )
+        except Exception as exc:  # metrics are best-effort and must never fail a finished job
+            logger.warning(
+                "could not record job metrics",
+                extra={"job_id": str(job_id), "error": type(exc).__name__},
+            )
+
+    async def _retention_loop(self, stop: asyncio.Event) -> None:
+        """Run the documented daily retention pass under its singleton lock (docs/05 §3)."""
+        while not stop.is_set():
+            try:
+                async with redis_lock(
+                    self.redis,
+                    self.keys.lock_retention(),
+                    acquire_timeout_s=0.0,
+                ):
+                    report = await run_retention(
+                        self.settings,
+                        self.repos,
+                        now=datetime.now(UTC),
+                    )
+                if report.media_files or report.uploads:
+                    logger.info(
+                        "retention completed",
+                        extra={
+                            "jobs": report.jobs,
+                            "media_files": report.media_files,
+                            "media_bytes": report.media_bytes,
+                            "uploads": report.uploads,
+                            "upload_bytes": report.upload_bytes,
+                        },
+                    )
+            except CaracalError as exc:
+                logger.warning(
+                    "retention run skipped or failed",
+                    extra={"code": exc.code.value, "error": exc.message},
+                )
+            except Exception as exc:  # a broken retention pass must not stop the worker
+                logger.warning("retention run crashed", extra={"error": type(exc).__name__})
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=self.intervals.retention_s)
+            except TimeoutError:
+                continue
 
     async def _touch_entry(self, entry_id: str) -> None:
         while True:

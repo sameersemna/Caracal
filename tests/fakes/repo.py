@@ -348,6 +348,9 @@ class FakeUploadRepo:
         ]
         return sorted(records, key=lambda record: (record.created_at, record.id))
 
+    async def delete(self, upload_id: uuid.UUID) -> None:
+        self._store.uploads.pop(upload_id, None)
+
 
 class FakeReportRepo:
     """In-memory :class:`caracal.db.repo.ReportRepo`."""
@@ -580,3 +583,21 @@ def make_fake_repos() -> Repos:
         speakers=FakeSpeakerRepo(store),
         cleanup=cleanup,
     )
+
+
+def force_finished_at(repos: Repos, job_id: uuid.UUID, when: datetime) -> None:
+    """Test helper: backdate a fake job's ``finished_at`` to exercise retention age rules."""
+    repo = repos.jobs
+    if not isinstance(repo, FakeJobRepo):
+        raise TypeError("force_finished_at only works with the fake job repo")
+    record = repo._store.jobs[job_id]
+    repo._store.jobs[job_id] = replace(record, finished_at=when)
+
+
+def force_upload_created_at(repos: Repos, upload_id: uuid.UUID, when: datetime) -> None:
+    """Test helper: backdate a fake upload's ``created_at`` for the 24 h retention rule."""
+    repo = repos.uploads
+    if not isinstance(repo, FakeUploadRepo):
+        raise TypeError("force_upload_created_at only works with the fake upload repo")
+    record = repo._store.uploads[upload_id]
+    repo._store.uploads[upload_id] = replace(record, created_at=when)

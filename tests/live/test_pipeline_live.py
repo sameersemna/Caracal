@@ -35,6 +35,7 @@ from caracal.db.repo import (
     PostgresJobRepo,
     PostgresReportRepo,
     PostgresSegmentRepo,
+    PostgresSpeakerRepo,
     PostgresUploadRepo,
 )
 from caracal.ingest.ssrf import SystemResolver
@@ -114,6 +115,7 @@ async def live(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> AsyncIterator
             uploads=PostgresUploadRepo(engine),
             reports=PostgresReportRepo(engine),
             segments=PostgresSegmentRepo(engine),
+            speakers=PostgresSpeakerRepo(engine),
             cleanup=_noop_cleanup,
         )
         redis = make_redis(settings)

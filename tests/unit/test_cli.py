@@ -17,10 +17,39 @@ from caracal.cli import _run_worker, _serve, main
 from caracal.config import Settings, get_settings
 from caracal.db.repo import PostgresJobRepo
 from caracal.log import get_logger
+from caracal.ops import DoctorCheck, RetentionReport
 from caracal.queue import JobQueue, Keys
 from caracal.services import JobService
 
-SUBCOMMANDS = ("serve", "worker", "mcp-stdio", "migrate", "doctor")
+SUBCOMMANDS = ("serve", "worker", "mcp-stdio", "migrate", "doctor", "retention")
+
+
+def _fake_doctor(
+    monkeypatch: pytest.MonkeyPatch,
+    checks: list[DoctorCheck],
+    calls: list[tuple[bool, bool]] | None = None,
+) -> None:
+    async def fake_run(settings: Settings, *, deep: bool = False) -> list[DoctorCheck]:
+        if calls is not None:
+            calls.append((settings.CARACAL_PORT == 11404, deep))
+        return checks
+
+    monkeypatch.setattr("caracal.cli.run_doctor", fake_run)
+
+
+def _ok_checks() -> list[DoctorCheck]:
+    return [
+        DoctorCheck("config", "ok", "valid", required=True),
+        DoctorCheck("postgres", "ok", "postgres ok", required=True),
+        DoctorCheck("redis", "ok", "redis ok", required=True),
+        DoctorCheck("whisper", "ok", "whisper ok", required=True),
+        DoctorCheck("ollama", "ok", "ollama ok", required=True),
+        DoctorCheck("ffmpeg", "ok", "ffmpeg ok", required=True),
+        DoctorCheck("ytdlp", "ok", "yt-dlp ok"),
+        DoctorCheck("pyannote", "warn", "pyannote missing"),
+        DoctorCheck("search", "ok", "keys present"),
+        DoctorCheck("disk", "ok", "100 GiB free"),
+    ]
 
 
 def _set_required(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -224,22 +253,59 @@ def test_no_command_prints_usage_and_exits_two(capsys: pytest.CaptureFixture[str
     assert "usage:" in captured.err.lower()
 
 
-def test_doctor_reports_valid_config(
+def test_doctor_reports_every_check_on_stderr(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _set_required(monkeypatch)
+    _fake_doctor(monkeypatch, _ok_checks())
     assert main(["doctor"]) == 0
     captured = capsys.readouterr()
     assert captured.out == ""
+    lines = captured.err.splitlines()
+    assert len(lines) == 10
+    assert lines[0].startswith("config: ok - ")
+    assert any(line.startswith("postgres: ok - ") for line in lines)
+    assert any(line.startswith("pyannote: warn - ") for line in lines)
+
+
+def test_doctor_json_output_is_one_object_per_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _set_required(monkeypatch)
+    _fake_doctor(monkeypatch, _ok_checks())
+    assert main(["doctor", "--json"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == ""
     records = _records(captured.err)
-    assert any(record["msg"] == "config valid" for record in records)
-    assert all(record["level"] != "ERROR" for record in records)
-    valid = next(record for record in records if record["msg"] == "config valid")
-    assert valid["port"] == 11404
-    assert valid["host"] == "127.0.0.1"
-    assert "js_runtime" in valid
-    assert "node" in valid["js_runtime"]
-    assert "yt_dlp_ejs" in valid["js_runtime"]
+    assert [record["check"] for record in records][:3] == ["config", "postgres", "redis"]
+    assert records[0] == {"check": "config", "status": "ok", "detail": "valid"}
+
+
+def test_doctor_passes_deep_flag_and_exits_one_on_required_failure(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _set_required(monkeypatch)
+    calls: list[tuple[bool, bool]] = []
+    checks = _ok_checks()
+    checks[1] = DoctorCheck("postgres", "fail", "postgres down", required=True)
+    _fake_doctor(monkeypatch, checks, calls)
+    assert main(["doctor", "--deep"]) == 1
+    assert calls == [(True, True)]
+    assert "postgres: fail - postgres down" in capsys.readouterr().err
+
+
+def test_doctor_non_required_failure_does_not_change_the_exit_code(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _set_required(monkeypatch)
+    checks = _ok_checks()
+    checks[6] = DoctorCheck("ytdlp", "fail", "node missing")
+    checks[9] = DoctorCheck("disk", "warn", "10 GiB free")
+    _fake_doctor(monkeypatch, checks)
+    assert main(["doctor"]) == 0
+    err = capsys.readouterr().err
+    assert "ytdlp: fail - node missing" in err
+    assert "disk: warn - 10 GiB free" in err
 
 
 def test_doctor_reports_invalid_config_without_leaking_secrets(
@@ -250,10 +316,9 @@ def test_doctor_reports_invalid_config_without_leaking_secrets(
     assert main(["doctor"]) == 1
     captured = capsys.readouterr()
     assert captured.out == ""
-    records = _records(captured.err)
-    invalid = next(record for record in records if record["msg"] == "config invalid")
-    assert invalid["level"] == "ERROR"
-    assert any("CARACAL_API_TOKEN" in field for field in invalid["fields"])
+    line = captured.err.splitlines()[0]
+    assert line.startswith("config: fail - invalid:")
+    assert "CARACAL_API_TOKEN" in line
     assert "too-short" not in captured.err
 
 
@@ -261,8 +326,9 @@ def test_doctor_defaults_are_valid(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _set_required(monkeypatch)
+    _fake_doctor(monkeypatch, _ok_checks())
     assert main(["doctor"]) == 0
-    assert any(record["msg"] == "config valid" for record in _records(capsys.readouterr().err))
+    assert "config: ok" in capsys.readouterr().err
 
 
 def test_doctor_registers_loaded_secrets_for_exact_match_redaction(
@@ -271,6 +337,7 @@ def test_doctor_registers_loaded_secrets_for_exact_match_redaction(
     _set_required(monkeypatch)
     sample = "exa-registered-secret-value"
     monkeypatch.setenv("EXA_API_KEY", sample)
+    _fake_doctor(monkeypatch, _ok_checks())
     assert main(["doctor"]) == 0
     capsys.readouterr()
 
@@ -279,6 +346,52 @@ def test_doctor_registers_loaded_secrets_for_exact_match_redaction(
     assert captured.out == ""
     assert sample not in captured.err
     assert "***" in captured.err
+
+
+def test_retention_dry_run_prints_counts_and_bytes(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _set_required(monkeypatch)
+    calls: list[tuple[bool, bool]] = []
+
+    async def fake_retention(settings: Settings, repos: Any, *, dry_run: bool = False) -> RetentionReport:
+        calls.append((settings.CARACAL_RETENTION_DAYS == 30, dry_run))
+        return RetentionReport(
+            dry_run=dry_run,
+            jobs=2,
+            media_files=3,
+            media_bytes=1800,
+            uploads=1,
+            upload_bytes=42,
+        )
+
+    monkeypatch.setattr("caracal.cli.run_retention", fake_retention)
+
+    assert main(["retention", "--dry-run"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert calls == [(True, True)]
+    assert "would delete 3 job media files (1800 bytes) across 2 expired jobs" in captured.err
+    assert "1 uploads (42 bytes)" in captured.err
+
+
+def test_retention_reports_deletions_without_dry_run(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _set_required(monkeypatch)
+    dry_runs: list[bool] = []
+
+    async def fake_retention(settings: Settings, repos: Any, *, dry_run: bool = False) -> RetentionReport:
+        dry_runs.append(dry_run)
+        return RetentionReport(
+            dry_run=dry_run, jobs=0, media_files=0, media_bytes=0, uploads=0, upload_bytes=0
+        )
+
+    monkeypatch.setattr("caracal.cli.run_retention", fake_retention)
+
+    assert main(["retention"]) == 0
+    assert dry_runs == [False]
+    assert "retention: deleted 0 job media files (0 bytes)" in capsys.readouterr().err
 
 
 def test_migrate_upgrades_head_programmatically(

@@ -378,6 +378,8 @@ class UploadRepo(Protocol):
 
     async def list_unconsumed_older_than(self, hours: int) -> UploadList: ...
 
+    async def delete(self, upload_id: uuid.UUID) -> None: ...
+
 
 class ReportRepo(Protocol):
     """Persistence for the final report JSON of a job."""
@@ -696,6 +698,12 @@ class PostgresUploadRepo:
         async with session_scope(self._engine) as connection:
             rows = (await connection.execute(statement)).mappings().all()
         return [_upload_record(row) for row in rows]
+
+    async def delete(self, upload_id: uuid.UUID) -> None:
+        """Delete an upload row; idempotent so a retention race cannot fail the pass."""
+        statement = sa.delete(uploads).where(uploads.c.id == upload_id)
+        async with session_scope(self._engine) as connection:
+            await connection.execute(statement)
 
 
 class PostgresReportRepo:
