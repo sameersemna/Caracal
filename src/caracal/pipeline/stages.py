@@ -40,6 +40,8 @@ from caracal.ingest import ytdlp
 from caracal.ingest.direct import download_direct
 from caracal.ingest.ssrf import Resolver
 from caracal.log import get_logger
+from caracal.speakers.align import assign_speakers, retime_outside_speech, speaker_stats
+from caracal.speakers.diarize import Diarizer, Turn
 from caracal.storage import JobFiles
 from caracal.subtitles import cues_from_transcript, to_srt, to_vtt
 
@@ -132,6 +134,7 @@ class StageContext:
     load: Callable[[Stage], Awaitable[dict[str, object] | None]]
     progress: Callable[[float, str], Awaitable[None]]
     whisper: WhisperClient | None = None
+    diarizer: Diarizer | None = None
     resolver: Resolver | None = None
     redis: Redis | None = None
     keys: Keys | None = None
@@ -449,11 +452,35 @@ def _spec_chunk(spec: dict[str, object]) -> Chunk:
 
 
 def _transcript_text(transcript: Transcript) -> str:
-    lines = [
-        f"[{int(segment.start // 60):02d}:{int(segment.start % 60):02d}] {segment.text}"
+    lines: list[str] = []
+    for segment in transcript.segments:
+        stamp = f"{int(segment.start // 60):02d}:{int(segment.start % 60):02d}"
+        if segment.speaker is not None:
+            lines.append(f"[{stamp}] {segment.speaker}: {segment.text}")
+        else:
+            lines.append(f"[{stamp}] {segment.text}")
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def _write_transcript(ctx: StageContext, transcript: Transcript) -> None:
+    """Persist the canonical transcript JSON and its human-readable text form."""
+    ctx.files.write_json(ctx.files.transcript_json, transcript.to_dict())
+    ctx.files.write_text(ctx.files.transcript_txt, _transcript_text(transcript))
+
+
+def _segment_rows(ctx: StageContext, transcript: Transcript) -> list[SegmentRow]:
+    return [
+        SegmentRow(
+            job_id=ctx.job_id,
+            seg_id=segment.id,
+            start_s=segment.start,
+            end_s=segment.end,
+            speaker=segment.speaker,
+            lang=segment.lang,
+            text=segment.text,
+        )
         for segment in transcript.segments
     ]
-    return "\n".join(lines) + ("\n" if lines else "")
 
 
 async def stage_transcribe(ctx: StageContext) -> StageResult:
@@ -476,23 +503,8 @@ async def stage_transcribe(ctx: StageContext) -> StageResult:
         )
 
     transcript = merge_chunks(results, chunks)
-    ctx.files.write_json(ctx.files.transcript_json, transcript.to_dict())
-    ctx.files.write_text(ctx.files.transcript_txt, _transcript_text(transcript))
-    await ctx.repos.segments.replace_for_job(
-        ctx.job_id,
-        [
-            SegmentRow(
-                job_id=ctx.job_id,
-                seg_id=segment.id,
-                start_s=segment.start,
-                end_s=segment.end,
-                speaker=None,
-                lang=segment.lang,
-                text=segment.text,
-            )
-            for segment in transcript.segments
-        ],
-    )
+    _write_transcript(ctx, transcript)
+    await ctx.repos.segments.replace_for_job(ctx.job_id, _segment_rows(ctx, transcript))
     shutil.rmtree(ctx.files.chunks_dir, ignore_errors=True)
     logger.info(
         "transcribe complete",
@@ -645,25 +657,109 @@ async def stage_langid(ctx: StageContext) -> StageResult:
     )
 
 
-async def stage_subtitles(ctx: StageContext) -> StageResult:
-    """Render the source-language SRT and WebVTT cues (docs/04 §10)."""
-    transcript = _load_transcript(ctx)
+def _turns(value: object, what: str) -> list[Turn]:
+    turns: list[Turn] = []
+    for raw in _as_list(value, what):
+        item = _as_dict(raw, what)
+        turns.append(
+            Turn(
+                start=_as_number(item.get("start"), what),
+                end=_as_number(item.get("end"), what),
+                label=_as_str(item.get("label"), what),
+            )
+        )
+    return turns
+
+
+async def _done_output(ctx: StageContext, stage: Stage) -> dict[str, object] | None:
+    """The ``output`` object of a checkpoint whose status is ``done``, else ``None``."""
+    checkpoint = await ctx.load(stage)
+    if checkpoint is None or checkpoint.get("status") != "done":
+        return None
+    return _as_dict(checkpoint.get("output"), f"{stage.value} checkpoint")
+
+
+async def stage_diarize(ctx: StageContext) -> StageResult:
+    """Separate speakers with pyannote and checkpoint the turns and embeddings (docs/04 §5)."""
+    diarizer = ctx.diarizer
+    if ctx.options.diarize == "off" or diarizer is None or not diarizer.available():
+        return StageResult(status="skipped", reason="unavailable")
+
+    result = await diarizer.run(ctx.files.audio_wav)
+    await ctx.progress(100.0, f"diarized {result.num_speakers} speakers")
+    logger.info(
+        "diarize complete",
+        extra={
+            "job_id": str(ctx.job_id),
+            "num_speakers": result.num_speakers,
+            "turns": len(result.turns),
+            "exclusive_turns": len(result.exclusive_turns),
+        },
+    )
+    return StageResult(status="done", output=result.to_dict())
+
+
+def _retimed_word_count(before: Transcript, after: Transcript) -> int:
+    count = 0
+    for old_segment, new_segment in zip(before.segments, after.segments, strict=False):
+        for old_word, new_word in zip(old_segment.words, new_segment.words, strict=False):
+            if (old_word.start, old_word.end) != (new_word.start, new_word.end):
+                count += 1
+    return count
+
+
+def _render_subtitles(ctx: StageContext, transcript: Transcript) -> dict[str, object]:
+    """Write the source SRT/VTT for a transcript; VTT carries ``<v S1>`` voice tags."""
     cues = cues_from_transcript(transcript)
     srt = ctx.files.subtitle("source", "srt")
     vtt = ctx.files.subtitle("source", "vtt")
     ctx.files.write_text(srt, to_srt(cues))
     ctx.files.write_text(vtt, to_vtt(cues))
-    logger.info("subtitles complete", extra={"job_id": str(ctx.job_id), "cues": len(cues)})
-    return StageResult(
-        status="done",
-        output={
-            "cues": len(cues),
-            "files": {
-                "source.srt": _relative(ctx, srt),
-                "source.vtt": _relative(ctx, vtt),
-            },
+    return {
+        "cues": len(cues),
+        "files": {
+            "source.srt": _relative(ctx, srt),
+            "source.vtt": _relative(ctx, vtt),
+        },
+    }
+
+
+async def stage_align(ctx: StageContext) -> StageResult:
+    """Re-time intro words, attach speakers and rewrite transcript, segments and subtitles."""
+    diarize_output = await _done_output(ctx, Stage.DIARIZE)
+    if diarize_output is None:
+        return StageResult(status="skipped", reason="unavailable")
+
+    transcript = _load_transcript(ctx)
+    turns = _turns(diarize_output.get("turns"), "diarize")
+    exclusive_turns = _turns(diarize_output.get("exclusive_turns"), "diarize")
+
+    retimed = retime_outside_speech(transcript, turns)
+    retimed_words = _retimed_word_count(transcript, retimed)
+    aligned = assign_speakers(retimed, exclusive_turns)
+
+    _write_transcript(ctx, aligned)
+    await ctx.repos.segments.replace_for_job(ctx.job_id, _segment_rows(ctx, aligned))
+    _render_subtitles(ctx, aligned)
+    stats = speaker_stats(aligned)
+    logger.info(
+        "align complete",
+        extra={
+            "job_id": str(ctx.job_id),
+            "speakers": len(stats),
+            "retimed_words": retimed_words,
         },
     )
+    return StageResult(status="done", output={"speakers": stats, "retimed_words": retimed_words})
+
+
+async def stage_subtitles(ctx: StageContext) -> StageResult:
+    """Render the source-language SRT and WebVTT cues (docs/04 §10)."""
+    transcript = _load_transcript(ctx)
+    output = _render_subtitles(ctx, transcript)
+    cues = cast("int", output["cues"])
+    logger.info("subtitles complete", extra={"job_id": str(ctx.job_id), "cues": cues})
+    return StageResult(status="done", output=output)
 
 
 async def _stub_stage(ctx: StageContext) -> StageResult:
@@ -689,6 +785,18 @@ def m1_registry() -> dict[Stage, StageFn]:
     return {stage: _M1_STAGES.get(stage, _m1_stub_stage) for stage in Stage}
 
 
+_M2_STAGES: dict[Stage, StageFn] = {
+    **_M1_STAGES,
+    Stage.DIARIZE: stage_diarize,
+    Stage.ALIGN: stage_align,
+}
+
+
+def m2_registry() -> dict[Stage, StageFn]:
+    """The production M2 registry: M1 plus diarization and speaker alignment."""
+    return {stage: _M2_STAGES.get(stage, _m1_stub_stage) for stage in Stage}
+
+
 def default_registry() -> dict[Stage, StageFn]:
     """The M0 registry used by runner tests: every stage is a clean no-op checkpoint."""
     return {stage: _stub_stage for stage in Stage}
@@ -704,7 +812,10 @@ __all__ = [
     "StageResult",
     "default_registry",
     "m1_registry",
+    "m2_registry",
+    "stage_align",
     "stage_chunk",
+    "stage_diarize",
     "stage_ingest",
     "stage_langid",
     "stage_normalize",

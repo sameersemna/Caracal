@@ -23,7 +23,7 @@ from caracal.errors import CaracalError, ErrorCode
 from caracal.ingest.ssrf import Resolver, SystemResolver
 from caracal.log import get_logger
 from caracal.pipeline.runner import RunnerDeps, run_pipeline
-from caracal.pipeline.stages import Repos, Stage, StageFn, m1_registry
+from caracal.pipeline.stages import Repos, Stage, StageFn, m2_registry
 from caracal.queue import (
     Delivery,
     JobQueue,
@@ -32,6 +32,7 @@ from caracal.queue import (
     publish_event,
     whisper_lock,
 )
+from caracal.speakers.diarize import Diarizer
 
 logger = get_logger("caracal.worker")
 
@@ -118,7 +119,9 @@ class Worker:
             )
         )
         self.resolver: Resolver = resolver if resolver is not None else SystemResolver()
-        self.registry = registry if registry is not None else m1_registry()
+        # The pyannote pipeline is loaded lazily on the first diarized job (docs/04 §5).
+        self.diarizer = Diarizer(settings)
+        self.registry = registry if registry is not None else m2_registry()
 
     @property
     def concurrency(self) -> int:
@@ -342,6 +345,7 @@ class Worker:
             cancel_check=self._cancelled,
             still_owner=still_owner,
             whisper=self.whisper,
+            diarizer=self.diarizer,
             resolver=self.resolver,
             redis=self.redis,
             keys=self.keys,

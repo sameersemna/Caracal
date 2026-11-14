@@ -13,12 +13,13 @@ import json
 import shutil
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
+from tests.fakes.diarizer import FakeDiarizer
 from tests.fakes.redis import RecordingRedis
 from tests.fakes.repo import make_fake_repos
 from tests.fakes.resolver import FakeResolver
@@ -39,7 +40,10 @@ from caracal.pipeline.stages import (
     StageContext,
     StageResult,
     m1_registry,
+    m2_registry,
+    stage_align,
     stage_chunk,
+    stage_diarize,
     stage_ingest,
     stage_langid,
     stage_normalize,
@@ -47,6 +51,7 @@ from caracal.pipeline.stages import (
     stage_transcribe,
 )
 from caracal.queue import Keys, whisper_lock
+from caracal.speakers.diarize import DiarizationResult, Diarizer, Turn
 from caracal.storage import JobFiles, UploadFiles
 
 MakeSettings = Callable[..., Settings]
@@ -805,3 +810,220 @@ async def test_m1_pipeline_runs_end_to_end_on_an_uploaded_tone(
     assert len(acquisitions) == 1
     assert [event["type"] for event in events if event["type"] == "end"] == ["end"]
     assert events[-1]["status"] == "done"
+
+
+# --- diarize and align (M2) ------------------------------------------------------------
+
+
+def _diarization_result() -> DiarizationResult:
+    return DiarizationResult(
+        turns=[Turn(0.0, 2.0, "S1"), Turn(2.0, 4.0, "S2")],
+        exclusive_turns=[Turn(0.0, 2.0, "S1"), Turn(2.0, 4.0, "S2")],
+        embeddings={"S1": [1.0, 0.0], "S2": [0.0, 1.0]},
+        num_speakers=2,
+    )
+
+
+def _word_speakers(transcript: Transcript) -> list[str | None]:
+    return [word.speaker for segment in transcript.segments for word in segment.words]
+
+
+async def test_diarize_skips_when_the_diarizer_is_unavailable(
+    make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    fake = FakeDiarizer(result=_diarization_result(), available_flag=False)
+    ctx = replace(_context(settings, repos, files, job_id=job.id), diarizer=fake)
+
+    result = await stage_diarize(ctx)
+
+    assert result.status == "skipped"
+    assert result.reason == "unavailable"
+    assert fake.calls == []
+
+
+async def test_diarize_skips_without_a_hf_token(make_settings: MakeSettings, tmp_path: Path) -> None:
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    diarizer = Diarizer(settings)
+    assert diarizer.available() is False
+    ctx = replace(_context(settings, repos, files, job_id=job.id), diarizer=diarizer)
+
+    result = await stage_diarize(ctx)
+
+    assert result.status == "skipped"
+    assert result.reason == "unavailable"
+
+
+async def test_diarize_skips_when_the_option_is_off(make_settings: MakeSettings, tmp_path: Path) -> None:
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    fake = FakeDiarizer(result=_diarization_result())
+    context = _context(settings, repos, files, job_id=job.id)
+    ctx = replace(context, diarizer=fake, options=JobOptions(diarize="off"))
+
+    result = await stage_diarize(ctx)
+
+    assert result.status == "skipped"
+    assert result.reason == "unavailable"
+    assert fake.calls == []
+
+
+async def test_diarize_checkpoints_turns_exclusive_turns_and_embeddings(
+    make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    fake = FakeDiarizer(result=_diarization_result())
+    ctx = replace(_context(settings, repos, files, job_id=job.id), diarizer=fake)
+
+    result = await stage_diarize(ctx)
+
+    assert result.status == "done"
+    assert result.output == {
+        "num_speakers": 2,
+        "turns": [
+            {"start": 0.0, "end": 2.0, "label": "S1"},
+            {"start": 2.0, "end": 4.0, "label": "S2"},
+        ],
+        "exclusive_turns": [
+            {"start": 0.0, "end": 2.0, "label": "S1"},
+            {"start": 2.0, "end": 4.0, "label": "S2"},
+        ],
+        "embeddings": {"S1": [1.0, 0.0], "S2": [0.0, 1.0]},
+    }
+    assert fake.calls == [(files.audio_wav, None)]
+
+
+def _speaker_transcript() -> Transcript:
+    def word(text: str, start: float, end: float, *, space_before: bool = True) -> Word:
+        return Word(text=text, start=start, end=end, prob=0.9, space_before=space_before)
+
+    intro = [
+        word("and", 0.18, 0.48, space_before=False),
+        word("so", 0.6, 0.9),
+        word("my", 1.0, 1.3),
+        word("fellow", 3.8, 4.2),
+    ]
+    first = [word("americans", 13.4, 13.9, space_before=False), word("today", 14.0, 14.5)]
+    second = [word("friends", 15.4, 15.9, space_before=False), word("welcome", 16.0, 16.5)]
+    segments = tuple(
+        Segment(
+            id=index,
+            start=words[0].start,
+            end=words[-1].end,
+            text=" ".join(item.text for item in words),
+            words=tuple(words),
+            avg_logprob=-0.1,
+            no_speech_prob=0.0,
+            lang="en",
+        )
+        for index, words in enumerate((intro, first, second))
+    )
+    return Transcript(segments=segments, language_code="en", dropped={})
+
+
+def _diarize_checkpoint(files: JobFiles, status: str = "done") -> None:
+    files.write_json(
+        files.stage(Stage.DIARIZE),
+        {
+            "status": status,
+            "reason": None if status == "done" else "unavailable",
+            "output": {
+                "num_speakers": 2,
+                "turns": [
+                    {"start": 13.2, "end": 15.0, "label": "S1"},
+                    {"start": 15.2, "end": 20.0, "label": "S2"},
+                ],
+                "exclusive_turns": [
+                    {"start": 13.2, "end": 15.0, "label": "S1"},
+                    {"start": 15.2, "end": 20.0, "label": "S2"},
+                ],
+                "embeddings": {"S1": [1.0, 0.0], "S2": [0.0, 1.0]},
+            },
+        },
+    )
+
+
+async def test_align_retimes_intro_words_assigns_speakers_and_rewrites_artifacts(
+    make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    files.write_json(files.transcript_json, _speaker_transcript().to_dict())
+    _diarize_checkpoint(files)
+
+    result = await stage_align(_context(settings, repos, files, job_id=job.id))
+
+    assert result.status == "done"
+    assert result.output["retimed_words"] == 4
+    stats = result.output["speakers"]
+    assert isinstance(stats, dict)
+    assert set(stats) == {"S1", "S2"}
+    assert sum(float(stats[label]["share"]) for label in stats) == pytest.approx(1.0)
+
+    payload = json.loads(files.transcript_json.read_text(encoding="utf-8"))
+    speakers = [segment["speaker"] for segment in payload["segments"]]
+    assert speakers == ["S1", "S1", "S2"]
+    first_segment = payload["segments"][0]
+    assert first_segment["start"] == pytest.approx(13.2)
+    assert first_segment["end"] == pytest.approx(13.75)
+    assert [word["speaker"] for word in first_segment["words"]] == ["S1"] * 4
+    text = files.transcript_txt.read_text(encoding="utf-8")
+    assert text.startswith("[00:13] S1: and so my fellow")
+
+    vtt = files.subtitle("source", "vtt").read_text(encoding="utf-8")
+    assert "<v S1>" in vtt
+    assert "<v S2>" in vtt
+    for block in vtt.split("\n\n")[1:]:
+        _timing, body = block.split("\n", 1)
+        assert not ("<v S1>" in body and "<v S2>" in body)
+
+    assert len(await repos.segments.search("friends")) == 1
+    assert len(await repos.segments.search("fellow")) == 1
+
+
+async def test_align_skips_and_keeps_the_transcript_when_diarize_was_skipped(
+    make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    transcript = _speaker_transcript()
+    files.write_json(files.transcript_json, transcript.to_dict())
+    before = files.transcript_json.read_bytes()
+    _diarize_checkpoint(files, status="skipped")
+
+    result = await stage_align(_context(settings, repos, files, job_id=job.id))
+
+    assert result.status == "skipped"
+    assert result.reason == "unavailable"
+    assert files.transcript_json.read_bytes() == before
+    assert _word_speakers(transcript) == [None] * 8
+
+
+def test_m2_registry_wires_diarize_and_align_and_keeps_m1_stages() -> None:
+    registry = m2_registry()
+
+    assert registry[Stage.DIARIZE] is stage_diarize
+    assert registry[Stage.ALIGN] is stage_align
+    assert registry[Stage.TRANSCRIBE] is stage_transcribe
+    assert registry[Stage.SUBTITLES] is stage_subtitles

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib
+import importlib.util
 import signal
 import sys
 from pathlib import Path
@@ -72,6 +74,27 @@ def _invalid_config_fields(exc: ValidationError) -> list[str]:
     )
 
 
+def _importable(name: str) -> bool:
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _diarization_status() -> dict[str, object]:
+    """Report the optional speakers extra: pyannote importable and CUDA usable."""
+    pyannote = _importable("pyannote.audio")
+    torch_installed = _importable("torch")
+    cuda = False
+    if torch_installed:
+        try:
+            torch_module = importlib.import_module("torch")
+            cuda = bool(torch_module.cuda.is_available())
+        except Exception:
+            cuda = False
+    return {"pyannote": pyannote, "torch": torch_installed, "cuda": cuda}
+
+
 def _doctor() -> int:
     configure_logging("INFO")
     logger = get_logger("caracal.doctor")
@@ -87,6 +110,7 @@ def _doctor() -> int:
             "host": settings.CARACAL_HOST,
             "port": settings.CARACAL_PORT,
             "data_dir": str(settings.CARACAL_DATA_DIR),
+            "diarization": _diarization_status(),
         },
     )
     return 0
