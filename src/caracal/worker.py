@@ -33,6 +33,7 @@ from caracal.queue import (
     publish_event,
     whisper_lock,
 )
+from caracal.search import BraveProvider, ExaProvider, SearchProvider, SearchRouter
 from caracal.speakers.diarize import Diarizer
 
 logger = get_logger("caracal.worker")
@@ -95,6 +96,7 @@ class Worker:
         whisper: WhisperClient | None = None,
         llm: LLMClient | None = None,
         resolver: Resolver | None = None,
+        search: SearchRouter | None = None,
     ) -> None:
         self.settings = settings
         self.redis = redis
@@ -124,9 +126,21 @@ class Worker:
         )
         self.llm = llm if llm is not None else LLMClient(settings, self._http)
         self.resolver: Resolver = resolver if resolver is not None else SystemResolver()
+        # One search router per process: budget, cache and provider fallback live here
+        # (docs/01 §5, docs/04 §8).
+        self.search = search if search is not None else self._build_search()
         # The pyannote pipeline is loaded lazily on the first diarized job (docs/04 §5).
         self.diarizer = Diarizer(settings)
         self.registry = registry if registry is not None else m2_registry()
+
+    def _build_search(self) -> SearchRouter:
+        """Build the configured providers over the process HTTP client (docs/04 §8)."""
+        providers: list[SearchProvider] = []
+        if self.settings.BRAVE_API_KEY is not None:
+            providers.append(BraveProvider(self.settings.BRAVE_API_KEY.get_secret_value(), self._http))
+        if self.settings.EXA_API_KEY is not None:
+            providers.append(ExaProvider(self.settings.EXA_API_KEY.get_secret_value(), self._http))
+        return SearchRouter(self.settings, self.redis, self.keys, providers)
 
     @property
     def concurrency(self) -> int:
@@ -355,6 +369,7 @@ class Worker:
             resolver=self.resolver,
             redis=self.redis,
             keys=self.keys,
+            search=self.search,
         )
 
     async def _still_owner(self, entry_id: str) -> bool:

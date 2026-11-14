@@ -97,6 +97,9 @@ SOLE_SPEAKER_METADATA_SCORE: Final = 0.75
 HINT_SCORE: Final = 0.70
 BARE_HINT_SCORE: Final = 0.40
 VOICEPRINT_CANDIDATE_FACTOR: Final = 0.60
+#: The cross-verification stage's contributions (docs/04 §8 steps 5-6).
+WEB_CONFIRM_SCORE: Final = 0.15
+WEB_ATTRIBUTION_SCORE: Final = 0.50
 MAX_CONFIDENCE: Final = 0.98
 PROMOTION_MARGIN: Final = 0.20
 PROMOTION_MIN_CONFIDENCE: Final = 0.60
@@ -246,6 +249,24 @@ class VoiceprintMatch:
     name: str
     similarity: float
     match_class: MatchClass
+
+
+@dataclass(frozen=True)
+class WebSource:
+    """One ``web`` source the verify stage feeds back into the fusion (docs/04 §8).
+
+    ``replace`` names the existing candidate a confirmation expands (``Lindsay`` →
+    ``Lindsay McMahon``). When it is ``None`` the source either strengthens a candidate
+    with the same name or adds a new one at ``score`` (a quote attribution is 0.5 and can
+    never be promoted on its own). ``flag`` becomes an informational review flag.
+    """
+
+    label: str
+    name: str
+    score: float
+    evidence: Sequence[str]
+    replace: str | None = None
+    flag: str | None = None
 
 
 @dataclass
@@ -526,6 +547,130 @@ def _candidate(group: _Group) -> SpeakerCandidate:
         sources=sources,
         evidence=evidence,
     )
+
+
+def _promote_speaker(speaker: SpeakerIdentity, *, sole: bool, flags: list[ReviewFlag]) -> None:
+    """Apply the documented promotion rule to a speaker's already-fused candidates.
+
+    This is the one place that decides whether a candidate becomes the speaker's ``name``
+    (docs/04 §7): the top candidate must lead the runner-up by ``PROMOTION_MARGIN`` and be
+    at least ``PROMOTION_MIN_CONFIDENCE``; a candidate backed only by metadata can promote
+    in the sole-speaker case at ``SOLE_SPEAKER_METADATA_SCORE``. Two competing candidates
+    that do not resolve add the "ambiguous identity" flag.
+    """
+    candidates = sorted(
+        speaker.candidates,
+        key=lambda candidate: (-candidate.confidence, candidate.name.casefold()),
+    )
+    speaker.candidates = candidates
+    promoted: SpeakerCandidate | None = None
+    if candidates:
+        top = candidates[0]
+        second = candidates[1] if len(candidates) > 1 else None
+        metadata_only = set(top.sources) <= {"metadata"}
+        metadata_promotable = (
+            sole and top.confidence >= SOLE_SPEAKER_METADATA_SCORE and "metadata" in top.sources
+        )
+        leads = second is None or top.confidence - second.confidence >= PROMOTION_MARGIN
+        confident = top.confidence >= PROMOTION_MIN_CONFIDENCE
+        if leads and confident and (not metadata_only or metadata_promotable):
+            promoted = top
+        elif len(candidates) >= 2:
+            flags.append(
+                ReviewFlag(
+                    severity="warn",
+                    field=f"speakers.{speaker.label}.name",
+                    message="ambiguous identity",
+                )
+            )
+    speaker.name = promoted.name if promoted is not None else None
+    speaker.confidence = promoted.confidence if promoted is not None else 0.0
+
+
+def _noisy_or(left: float, right: float) -> float:
+    """Combine two independent source scores, capped at ``MAX_CONFIDENCE``."""
+    combined = 1.0 - (1.0 - min(max(left, 0.0), 1.0)) * (1.0 - min(max(right, 0.0), 1.0))
+    return min(round(combined, 6), MAX_CONFIDENCE)
+
+
+def _merge_unique(existing: Sequence[str], extra: Sequence[str]) -> list[str]:
+    """``existing`` followed by the unseen entries of ``extra``."""
+    merged = list(existing)
+    for item in extra:
+        if item not in merged:
+            merged.append(item)
+    return merged
+
+
+def _apply_web_source(speaker: SpeakerIdentity, source: WebSource) -> None:
+    """Fold one web source into a speaker's candidate groups (docs/04 §8 step 5-6)."""
+    display = " ".join(source.name.split())
+    key = _group_key(display)
+    if not key:
+        return
+    target: SpeakerCandidate | None = None
+    if source.replace is not None:
+        replace_key = _group_key(source.replace)
+        target = next(
+            (candidate for candidate in speaker.candidates if _group_key(candidate.name) == replace_key),
+            None,
+        )
+        if target is None:
+            return
+    else:
+        target = next(
+            (candidate for candidate in speaker.candidates if _group_key(candidate.name) == key),
+            None,
+        )
+    if target is None:
+        target = SpeakerCandidate(name=display, confidence=0.0, sources=[], evidence=[])
+        speaker.candidates.append(target)
+    target.name = display
+    target.confidence = _noisy_or(target.confidence, source.score)
+    if "web" not in target.sources:
+        target.sources.append("web")
+    target.evidence = _merge_unique(target.evidence, source.evidence)
+    speaker.evidence = _merge_unique(speaker.evidence, source.evidence)
+
+
+def apply_web_sources(
+    speakers: Sequence[SpeakerIdentity],
+    flags: Sequence[ReviewFlag],
+    sources: Sequence[WebSource],
+) -> IdentityResult:
+    """Re-run the deterministic identity fusion with the verify stage's web sources.
+
+    The verify stage never rewrites the identity checkpoint (docs/04 §8 step 5): it hands the
+    already-fused speakers back to this function, which adds each web source with the noisy-or
+    rule (confirm +0.15, attribution 0.5), expands a given name to the full name found on the
+    web, and re-applies the same promotion rule. ``ambiguous identity`` flags are recomputed
+    from the refined candidates so confirming a name can resolve a previous ambiguity, while
+    every other flag (performance content, ...) is carried through unchanged.
+    """
+    refined = [speaker.model_copy(deep=True) for speaker in speakers]
+    by_label = {speaker.label: speaker for speaker in refined}
+    for source in sources:
+        speaker = by_label.get(source.label)
+        if speaker is not None:
+            _apply_web_source(speaker, source)
+
+    kept = [flag for flag in flags if flag.message != "ambiguous identity"]
+    stats: dict[str, Mapping[str, float | int]] = {
+        speaker.label: {"share": speaker.share} for speaker in refined
+    }
+    sole = _sole_labels(stats)
+    for speaker in refined:
+        _promote_speaker(speaker, sole=speaker.label in sole, flags=kept)
+    for source in sources:
+        if source.flag:
+            kept.append(
+                ReviewFlag(
+                    severity="info",
+                    field=f"speakers.{source.label}.name",
+                    message=source.flag,
+                )
+            )
+    return IdentityResult(speakers=refined, flags=kept)
 
 
 def _safe_description(info: _LlmSpeakerInfo | None, role: IdentityRole) -> str:
@@ -813,29 +958,6 @@ async def resolve_identities(
             (_candidate(group) for group in groups.values()),
             key=lambda candidate: (-candidate.confidence, candidate.name.casefold()),
         )
-        by_name = {group.display: group for group in groups.values()}
-
-        promoted: SpeakerCandidate | None = None
-        if candidates:
-            top = candidates[0]
-            second = candidates[1] if len(candidates) > 1 else None
-            top_group = by_name[top.name]
-            metadata_only = set(top.sources) <= {"metadata"}
-            metadata_promotable = (
-                label in sole and top_group.scores.get("metadata", 0.0) >= SOLE_SPEAKER_METADATA_SCORE
-            )
-            leads = second is None or top.confidence - second.confidence >= PROMOTION_MARGIN
-            confident = top.confidence >= PROMOTION_MIN_CONFIDENCE
-            if leads and confident and (not metadata_only or metadata_promotable):
-                promoted = top
-            elif len(candidates) >= 2:
-                flags.append(
-                    ReviewFlag(
-                        severity="warn",
-                        field=f"speakers.{label}.name",
-                        message="ambiguous identity",
-                    )
-                )
 
         all_evidence: list[str] = []
         for candidate in candidates:
@@ -857,24 +979,24 @@ async def resolve_identities(
             default=None,
         )
 
-        identities.append(
-            SpeakerIdentity(
-                label=label,
-                talk_time_s=float(values.get("talk_time_s", 0.0)),
-                share=float(values.get("share", 0.0)),
-                first_seen_s=float(values.get("first_seen_s", 0.0)),
-                name=promoted.name if promoted is not None else None,
-                confidence=promoted.confidence if promoted is not None else 0.0,
-                role=roles.get(label),
-                candidates=candidates,
-                known_speaker_id=matched_group.known_speaker_id if matched_group is not None else None,
-                voiceprint_similarity=(
-                    matched_group.voiceprint_similarity if matched_group is not None else None
-                ),
-                description=_safe_description(infos.get(label), roles[label]),
-                evidence=all_evidence,
-            )
+        identity = SpeakerIdentity(
+            label=label,
+            talk_time_s=float(values.get("talk_time_s", 0.0)),
+            share=float(values.get("share", 0.0)),
+            first_seen_s=float(values.get("first_seen_s", 0.0)),
+            name=None,
+            confidence=0.0,
+            role=roles.get(label),
+            candidates=candidates,
+            known_speaker_id=matched_group.known_speaker_id if matched_group is not None else None,
+            voiceprint_similarity=(
+                matched_group.voiceprint_similarity if matched_group is not None else None
+            ),
+            description=_safe_description(infos.get(label), roles[label]),
+            evidence=all_evidence,
         )
+        _promote_speaker(identity, sole=label in sole, flags=flags)
+        identities.append(identity)
 
     logger.info(
         "identity resolved",
@@ -900,8 +1022,12 @@ __all__ = [
     "SELF_INTRO_SCORE",
     "SINGLE_NAME_SELF_INTRO_SCORE",
     "SOLE_SPEAKER_METADATA_SCORE",
+    "WEB_ATTRIBUTION_SCORE",
+    "WEB_CONFIRM_SCORE",
     "IdentityResult",
     "IdentityRole",
     "VoiceprintMatch",
+    "WebSource",
+    "apply_web_sources",
     "resolve_identities",
 ]

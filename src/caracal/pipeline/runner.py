@@ -31,6 +31,7 @@ from caracal.pipeline.stages import (
     default_registry,
 )
 from caracal.queue import Keys
+from caracal.search.router import SearchRouter
 from caracal.speakers.diarize import Diarizer
 from caracal.storage import JobFiles
 
@@ -67,6 +68,7 @@ class RunnerDeps:
     resolver: Resolver | None = None
     redis: Redis | None = None
     keys: Keys | None = None
+    search: SearchRouter | None = None
 
 
 def _now() -> str:
@@ -197,6 +199,7 @@ async def run_pipeline(
         resolver=deps.resolver,
         redis=deps.redis,
         keys=deps.keys,
+        search=deps.search,
         cancelled=cancelled,
     )
 

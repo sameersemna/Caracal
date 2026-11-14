@@ -25,6 +25,7 @@ from caracal.analysis.content import analyse_content
 from caracal.analysis.identity import VoiceprintMatch, resolve_identities
 from caracal.analysis.planner import PlanInputs
 from caracal.analysis.planner import plan as build_plan
+from caracal.analysis.verify import verify as verify_targets
 from caracal.asr import (
     Segment,
     Transcript,
@@ -46,8 +47,9 @@ from caracal.ingest.ssrf import Resolver
 from caracal.llm.client import LLMClient
 from caracal.log import get_logger
 from caracal.report.assemble import assemble_report
-from caracal.report.model import SCHEMA_VERSION, Entity
+from caracal.report.model import SCHEMA_VERSION, Claim, Entity, KeyQuote, ReviewFlag, SpeakerIdentity
 from caracal.report.render_md import render_markdown
+from caracal.search.router import SearchRouter
 from caracal.speakers.align import assign_speakers, retime_outside_speech, speaker_stats
 from caracal.speakers.diarize import Diarizer, Turn
 from caracal.speakers.voiceprint import classify
@@ -152,6 +154,7 @@ class StageContext:
     resolver: Resolver | None = None
     redis: Redis | None = None
     keys: Keys | None = None
+    search: SearchRouter | None = None
     cancelled: Callable[[], Awaitable[bool]] = _never_cancelled
 
 
@@ -923,6 +926,58 @@ def _content_entities(value: dict[str, object] | None) -> list[Entity]:
     return entities
 
 
+def _content_claims(value: dict[str, object] | None) -> list[Claim]:
+    """The content stage's claims, validated for the verify stage's target selection."""
+    if value is None:
+        return []
+    claims: list[Claim] = []
+    for item in _as_list(value.get("claims", []), "content"):
+        try:
+            claims.append(Claim.model_validate(item))
+        except ValidationError as exc:
+            raise _malformed("content") from exc
+    return claims
+
+
+def _content_key_quotes(value: dict[str, object] | None) -> list[KeyQuote]:
+    """The content stage's key quotes, used for quote-attribution searches."""
+    if value is None:
+        return []
+    quotes: list[KeyQuote] = []
+    for item in _as_list(value.get("key_quotes", []), "content"):
+        try:
+            quotes.append(KeyQuote.model_validate(item))
+        except ValidationError as exc:
+            raise _malformed("content") from exc
+    return quotes
+
+
+def _identity_speakers(value: dict[str, object] | None) -> list[SpeakerIdentity]:
+    """The identity checkpoint's speakers, re-validated for the fusion step."""
+    if value is None:
+        return []
+    speakers: list[SpeakerIdentity] = []
+    for item in _as_list(value.get("speakers", []), "identity"):
+        try:
+            speakers.append(SpeakerIdentity.model_validate(item))
+        except ValidationError as exc:
+            raise _malformed("identity") from exc
+    return speakers
+
+
+def _identity_flags(value: dict[str, object] | None) -> list[ReviewFlag]:
+    """The identity checkpoint's review flags (performance content, ambiguity, ...)."""
+    if value is None:
+        return []
+    flags: list[ReviewFlag] = []
+    for item in _as_list(value.get("flags", []), "identity"):
+        try:
+            flags.append(ReviewFlag.model_validate(item))
+        except ValidationError as exc:
+            raise _malformed("identity") from exc
+    return flags
+
+
 def _profile_genre(value: dict[str, object] | None) -> str | None:
     """The plan's ``content_profile.likely_genre`` when the checkpoint carries one."""
     if value is None:
@@ -1010,12 +1065,75 @@ async def stage_identity(ctx: StageContext) -> StageResult:
     )
 
 
+async def _budget_exhausted(ctx: StageContext) -> bool:
+    """Whether the router already refused a query because the job budget is spent."""
+    if ctx.redis is None or ctx.keys is None:
+        return False
+    raw = await ctx.redis.get(ctx.keys.search_budget(ctx.job_id))
+    try:
+        used = int(raw or 0)
+    except (TypeError, ValueError):
+        return False
+    return used > ctx.settings.SEARCH_MAX_QUERIES_PER_JOB
+
+
 async def stage_verify(ctx: StageContext) -> StageResult:
-    """Cross-verification is gated by the plan; the verifier itself lands in a later card."""
+    """Cross-verify claims, identities and quotes against the web (docs/04 §8, T3.2).
+
+    The plan gates the stage first. Without a configured search provider (or without a router
+    in the process) the stage skips with ``no search provider`` rather than pretending every
+    claim is unverified. Search itself goes through the process-wide router, so the per-job
+    budget, cache and provider fallback apply; the refined speakers and the web hits are
+    written to this stage's own checkpoint and never back into the identity checkpoint.
+    """
     reason = await _plan_skip(ctx, Stage.VERIFY)
     if reason is not None:
         return StageResult(status="skipped", reason=reason)
-    return StageResult(status="skipped", reason=_PENDING_STAGE)
+    if ctx.search is None or not _search_configured(ctx.settings):
+        return StageResult(status="skipped", reason="no search provider")
+    if ctx.llm is None:
+        return StageResult(status="skipped", reason="llm unavailable")
+
+    transcript = _load_transcript(ctx)
+    content = await _done_output(ctx, Stage.CONTENT)
+    identity = await _done_output(ctx, Stage.IDENTITY)
+    metadata = _metadata_mapping(await _ingest_platform(ctx), await _job_title(ctx))
+    result = await verify_targets(
+        transcript=transcript,
+        claims=_content_claims(content),
+        speakers=_identity_speakers(identity),
+        flags=_identity_flags(identity),
+        key_quotes=_content_key_quotes(content),
+        metadata=metadata,
+        depth=ctx.options.depth,
+        settings=ctx.settings,
+        llm=ctx.llm,
+        search=ctx.search,
+        job_id=ctx.job_id,
+        budget_exhausted=lambda: _budget_exhausted(ctx),
+    )
+    logger.info(
+        "verify complete",
+        extra={
+            "job_id": str(ctx.job_id),
+            "verifications": len(result.verifications),
+            "speakers": len(result.speakers),
+            "hits": len(result.hits),
+            "queries_used": result.queries_used,
+            "cost_usd": round(result.cost_usd, 6),
+        },
+    )
+    return StageResult(
+        status="done",
+        output={
+            "verifications": [item.model_dump(mode="json") for item in result.verifications],
+            "speakers": [speaker.model_dump(mode="json") for speaker in result.speakers],
+            "flags": [flag.model_dump(mode="json") for flag in result.flags],
+            "hits": [hit.to_dict() for hit in result.hits],
+            "queries_used": result.queries_used,
+            "cost_usd": result.cost_usd,
+        },
+    )
 
 
 async def stage_translate(ctx: StageContext) -> StageResult:
