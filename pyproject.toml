@@ -77,6 +77,8 @@ addopts = "-m 'not live'"
 [dependency-groups]
 dev = [
     "fakeredis[lua]==2.40.0",
+    "linkify-it-py==2.0.3",
+    "markdown-it-py==3.0.0",
     "mypy>=2.4.1",
     "pytest>=9.2.0",
     "pytest-asyncio>=1.5.0",

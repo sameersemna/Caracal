@@ -8,13 +8,44 @@ that originated from content. Only the literal scaffolding written here is unesc
 
 from __future__ import annotations
 
+import re
+
 from caracal.report.evidence import EvidenceItem
 from caracal.report.model import Entity, Report
 
 #: Characters that can turn content into markup, links or images (docs/06 S9).
 _ESCAPE_CHARS = "`*_[]()#|!"
 
+#: Bidi embedding/override/isolate controls ("Trojan Source"). The directional marks
+#: U+200E/U+200F are deliberately kept: right-to-left text needs them.
+_BIDI_CONTROLS = frozenset(
+    [chr(codepoint) for codepoint in range(0x202A, 0x202F)]
+    + [chr(codepoint) for codepoint in range(0x2066, 0x206A)]
+)
+
+#: A URL in untrusted text. Bare URLs are linkified by GFM viewers, so they are masked.
+_URL_PATTERN = re.compile(r"(?:https?|ftp)://[^\s<>]+|www\.[^\s<>]+", re.IGNORECASE)
+
 _DEFAULT_TITLE = "Audio intelligence report"
+
+
+def _code_span(url: str) -> str:
+    """Wrap ``url`` in an inline code span whose fence beats every backtick run inside it."""
+    longest_run = max((len(run) for run in re.findall(r"`+", url)), default=0)
+    fence = "`" * (longest_run + 1)
+    # A fence glued to a leading/trailing backtick would merge into a longer run that no
+    # longer matches, so pad those cases; CommonMark strips one space from each side.
+    content = f" {url} " if url.startswith("`") or url.endswith("`") else url
+    return f"{fence}{content}{fence}"
+
+
+def _escape_literal(text: str) -> str:
+    """Escape a run of ordinary text exactly as Markdown literal content."""
+    escaped = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    escaped = escaped.replace("\\", "\\\\")
+    for character in _ESCAPE_CHARS:
+        escaped = escaped.replace(character, f"\\{character}")
+    return escaped
 
 
 def md_escape(text: str, *, inline: bool = False) -> str:
@@ -22,19 +53,25 @@ def md_escape(text: str, *, inline: bool = False) -> str:
 
     ``&`` and angle brackets become HTML entities (so a ``<script>`` in a transcript can never
     be raw HTML), backslashes are doubled, then every Markdown-significant character is
-    escaped. ASCII control characters are removed except ``\\n``; ``inline`` collapses all
-    whitespace (including newlines) to single spaces, which is what table cells and
-    blockquotes need.
+    escaped. URLs are wrapped in inline code spans so linkify/autolink cannot turn them into
+    live links. ASCII control characters and bidi override/isolate controls are removed except
+    ``\\n``; ``inline`` collapses all whitespace (including newlines) to single spaces, which
+    is what table cells and blockquotes need.
     """
     cleaned = "".join(
         character
         for character in str(text)
-        if character == "\n" or (ord(character) >= 0x20 and ord(character) != 0x7F)
+        if character not in _BIDI_CONTROLS
+        and (character == "\n" or (ord(character) >= 0x20 and ord(character) != 0x7F))
     )
-    escaped = cleaned.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    escaped = escaped.replace("\\", "\\\\")
-    for character in _ESCAPE_CHARS:
-        escaped = escaped.replace(character, f"\\{character}")
+    parts: list[str] = []
+    cursor = 0
+    for match in _URL_PATTERN.finditer(cleaned):
+        parts.append(_escape_literal(cleaned[cursor : match.start()]))
+        parts.append(_code_span(match.group()))
+        cursor = match.end()
+    parts.append(_escape_literal(cleaned[cursor:]))
+    escaped = "".join(parts)
     if inline:
         escaped = " ".join(escaped.split())
     return escaped

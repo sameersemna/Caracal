@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import UTC, datetime
 
 import pytest
+from markdown_it import MarkdownIt
 
 from caracal.report.evidence import EvidenceItem
 from caracal.report.model import (
@@ -35,6 +37,17 @@ JOB_ID = uuid.UUID("6f5c5f4e-0d5b-4a3e-9d1e-2f6b0f3f9a10")
 CREATED_AT = datetime(2026, 11, 14, 12, 0, tzinfo=UTC)
 
 INJECTION = "<script>alert(1)</script> [click](http://evil) ![x](http://e/x.png) | a | b | # heading"
+
+HOSTILE_PAYLOADS = (
+    "http://evil.example",
+    "www.evil.example/x",
+    "<https://evil/a>",
+    "[x](javascript:alert(1))",
+    "<img src=x onerror=1>",
+    "http://evil.example/`tick`",
+    "safe\u202egnp.exe",
+)
+HOSTILE = " ".join(HOSTILE_PAYLOADS)
 
 HEADINGS = [
     "# How to stay calm when you know you'll be stressed",
@@ -184,6 +197,80 @@ def _report() -> Report:
     )
 
 
+def _hostile_report() -> Report:
+    """``_report()`` with every free-text field the renderer prints set to hostile content."""
+    report = _report()
+    report.source.url = HOSTILE
+    report.source.title = HOSTILE
+    report.source.uploader = HOSTILE
+    report.source.channel = HOSTILE
+    report.source.upload_date = HOSTILE
+    report.source.platform = HOSTILE
+    report.source.original_format = HOSTILE
+    report.source.sha256 = HOSTILE
+    report.source.description_excerpt = HOSTILE
+    report.audio.notes = [HOSTILE]
+
+    report.languages[0].code = HOSTILE
+    report.languages[0].name = HOSTILE
+
+    speaker = report.speakers[0]
+    speaker.label = HOSTILE
+    speaker.name = HOSTILE
+    speaker.role = HOSTILE
+    speaker.description = HOSTILE
+    speaker.candidates[0].name = HOSTILE
+    speaker.candidates[0].sources = [HOSTILE]
+
+    report.summary.one_line = HOSTILE
+    report.summary.short = HOSTILE
+    report.summary.detailed = HOSTILE
+
+    context = report.context
+    context.genre = HOSTILE
+    context.setting = HOSTILE
+    context.audience = HOSTILE
+    context.purpose = HOSTILE
+    context.tone = [HOSTILE]
+    context.recorded_when = HOSTILE
+    context.recorded_where = HOSTILE
+
+    report.chapters[0].title = HOSTILE
+    report.chapters[0].summary = HOSTILE
+    report.topics[0].label = HOSTILE
+
+    entity = report.entities[0]
+    entity.text = HOSTILE
+    entity.mentions = [HOSTILE]
+    entity.canonical = HOSTILE
+    entity.url = HOSTILE
+
+    report.key_quotes[0].text = HOSTILE
+    report.key_quotes[0].speaker = HOSTILE
+
+    claim = report.claims[0]
+    claim.id = HOSTILE
+    claim.text = HOSTILE
+    claim.speaker = HOSTILE
+    verification = report.verification[0]
+    verification.target = f"claim:{HOSTILE}"
+    verification.rationale = HOSTILE
+    verification.sources[0].url = HOSTILE
+    verification.sources[0].title = HOSTILE
+    verification.sources[0].snippet = HOSTILE
+    verification.sources[0].evidence_id = HOSTILE
+
+    report.translations[0].lang = HOSTILE
+    report.translations[0].links = {"srt": HOSTILE}
+
+    report.quality.stages = {HOSTILE: HOSTILE}
+    report.quality.review_flags[0].field = HOSTILE
+    report.quality.review_flags[0].message = HOSTILE
+
+    report.evidence_index = {HOSTILE: EvidenceItem(kind="web", ref=HOSTILE, excerpt=HOSTILE)}
+    return report
+
+
 def test_headings_are_present_in_order() -> None:
     rendered = render_markdown(_report())
 
@@ -240,7 +327,7 @@ def test_evidence_appendix_formats_segment_time_ranges() -> None:
     rendered = render_markdown(_report())
 
     assert "- [seg:12] 03:14.2\u201303:18.0 S2 \u2014 Minus 40 is where they meet." in rendered
-    assert "- [web:0] https://example.org/scales — Celsius and Fahrenheit" in rendered
+    assert "- [web:0] `https://example.org/scales` — Celsius and Fahrenheit" in rendered
 
 
 def test_evidence_appendix_formats_hours() -> None:
@@ -270,14 +357,19 @@ def test_unidentified_speaker_and_empty_sections() -> None:
     ("value", "expected"),
     [
         ("<script>", "&lt;script&gt;"),
-        ("[click](http://evil)", "\\[click\\]\\(http://evil\\)"),
-        ("![x](http://e/x.png)", "\\!\\[x\\]\\(http://e/x.png\\)"),
+        ("[click](http://evil)", "\\[click\\]\\(`http://evil)`"),
+        ("![x](http://e/x.png)", "\\!\\[x\\]\\(`http://e/x.png)`"),
         ("# heading", "\\# heading"),
         ("| a | b |", "\\| a \\| b \\|"),
         ("a_b*c`,", "a\\_b\\*c\\`,"),
         ("back\\slash", "back\\\\slash"),
         ("a\nb", "a\nb"),
         ("a\x00b\x7f", "ab"),
+        ("http://evil.example", "`http://evil.example`"),
+        ("see www.evil.example/x now", "see `www.evil.example/x` now"),
+        ("ftp://evil.example/f", "`ftp://evil.example/f`"),
+        ("<https://evil/a>", "&lt;`https://evil/a`&gt;"),
+        ("http://evil.example/`x`", "`` http://evil.example/`x` ``"),
     ],
 )
 def test_md_escape_table(value: str, expected: str) -> None:
@@ -286,6 +378,12 @@ def test_md_escape_table(value: str, expected: str) -> None:
 
 def test_md_escape_inline_collapses_newlines() -> None:
     assert md_escape("a\n  b", inline=True) == "a b"
+
+
+def test_md_escape_strips_bidi_controls_but_keeps_directional_marks() -> None:
+    value = "a\u202ab\u202bc\u202cd\u202de\u202ef\u2066g\u2067h\u2068i\u2069j\u200ek\u200fl"
+
+    assert md_escape(value) == "abcdefghij\u200ek\u200fl"
 
 
 def test_untrusted_content_renders_inert() -> None:
@@ -314,6 +412,27 @@ def test_untrusted_content_renders_inert() -> None:
     assert "\\# heading" in rendered
     assert "| a | b |" not in rendered
     assert "\\| a \\| b \\|" in rendered
+
+
+def test_gfm_render_of_hostile_report_has_no_content_tags_links_or_bidi() -> None:
+    rendered = render_markdown(_hostile_report())
+    html = MarkdownIt("gfm-like", {"html": True, "linkify": True}).render(rendered)
+
+    # Every payload reached the document, so the renderer was actually exercised.
+    assert "http://evil.example" in html
+    assert "www.evil.example/x" in html
+    assert "javascript:alert(1)" in html
+    assert "safegnp.exe" in html
+    assert "<code>" in html
+
+    # Content never becomes markup: no dangerous tag and no href/src from content.
+    for tag in ("a", "img", "script", "svg", "iframe"):
+        assert re.search(rf"<{tag}\b", html) is None, tag
+    assert re.search(r"<[a-zA-Z][^>]*\b(?:href|src)=", html) is None
+
+    # Bidi embedding/override/isolate controls are gone.
+    for codepoint in (*range(0x202A, 0x202F), *range(0x2066, 0x206A)):
+        assert chr(codepoint) not in html
 
 
 def test_content_cannot_break_a_table_row() -> None:
