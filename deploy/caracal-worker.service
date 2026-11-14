@@ -10,6 +10,8 @@ User=sameer
 Group=sameer
 WorkingDirectory=/home/sameer/Public/Shared/Work/Services/MCP/Caracal
 EnvironmentFile=/home/sameer/Public/Shared/Work/Services/MCP/Caracal/.env
+# pyannote imports matplotlib, whose default config dir (~/.config/matplotlib) is read-only under ProtectHome.
+Environment=MPLCONFIGDIR=/home/sameer/Public/Shared/Work/Services/MCP/Caracal/data/.matplotlib
 ExecStart=/home/sameer/Public/Shared/Work/Services/MCP/Caracal/.venv/bin/caracal worker
 Restart=on-failure
 RestartSec=5
