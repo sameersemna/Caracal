@@ -51,6 +51,15 @@ class JobCreate(BaseModel):
     options: JobOptions = Field(default_factory=JobOptions)
 
 
+class UploadCreated(BaseModel):
+    """The ``POST /v1/uploads`` response (docs/03 §2)."""
+
+    upload_id: uuid.UUID
+    filename: str
+    size_bytes: int
+    sha256: str
+
+
 class JobSummary(BaseModel):
     """One row of ``GET /v1/jobs``."""
 
