@@ -173,7 +173,13 @@ infers protected attributes (gender, age, ethnicity, religion, health) from the 
    except Exa's `text` contents (≤ 2000 chars).
 4. Judge (`verify_judge.md`) gets the target, its evidence, and the hits; returns verdict + rationale + which `web:` ids
    support it. A verdict other than `unverified` must cite ≥1 `web:` id; otherwise it is forced to `unverified`.
-5. Identity results feed back into §7 as the `web` source.
+5. Identity results feed back into §7 as the `web` source: the verify stage re-runs the deterministic identity fusion with the web
+   candidates and writes the refined `speakers` into its own checkpoint; assemble prefers them over the identity checkpoint (a stage never
+   rewrites another stage's checkpoint). Web confirmation of an existing candidate adds a `web` source (score 0.15, noisy-or) and may expand a
+   given name to the full name found on the web ("Lindsay" → "Lindsay McMahon") when ≥ 2 independent hits (different domains) agree.
+6. **Quote attribution** (for a speaker with no candidates): search the speaker's most distinctive sentence in quotes; if ≥ 2 independent
+   hits attribute it to one person, add that person as a `web` candidate with score 0.5 — **never promoted on this alone** (someone may be
+   quoting a famous speech); a ReviewFlag (info) says "quote attributed to X on the web".
 
 ## 9. Evidence rules (`report/evidence.py`)
 
