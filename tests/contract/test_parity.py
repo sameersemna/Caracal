@@ -1,0 +1,221 @@
+"""REST <-> MCP parity, encoded from the docs/03 §0 table (card 15).
+
+Every capability must exist on both sides. Rows whose milestone has not landed are listed
+with ``pending``: the test fails if one side is implemented without the row being promoted
+to available, so a capability can never be added to only one front door.
+"""
+
+from __future__ import annotations
+
+import uuid
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
+
+from fastapi import FastAPI
+from mcp.client import Client
+
+from caracal.pipeline.stages import JobOptions, Stage
+from caracal.storage import JobFiles
+from tests.contract.conftest import AUTH, Harness
+
+_URL = "https://example.com/talk"
+
+
+@dataclass(frozen=True)
+class Row:
+    """One docs/03 §0 capability: its REST routes and its MCP tool(s)."""
+
+    capability: str
+    rest: tuple[tuple[str, str], ...]
+    mcp: tuple[str, ...]
+    pending: str | None = None
+
+
+AVAILABLE: tuple[Row, ...] = (
+    Row(
+        "submit audio",
+        (("POST", "/v1/uploads"), ("POST", "/v1/jobs")),
+        ("analyze_audio",),
+    ),
+    Row("job status / progress", (("GET", "/v1/jobs/{job_id}"),), ("get_job",)),
+    Row("list jobs", (("GET", "/v1/jobs"),), ("list_jobs",)),
+    Row(
+        "transcript / subtitles",
+        (
+            ("GET", "/v1/jobs/{job_id}/transcript"),
+            ("GET", "/v1/jobs/{job_id}/subtitles/{filename:path}"),
+        ),
+        ("get_transcript",),
+    ),
+    Row("cancel / delete", (("DELETE", "/v1/jobs/{job_id}"),), ("cancel_job",)),
+)
+
+PENDING: tuple[Row, ...] = (
+    Row("report", (("GET", "/v1/jobs/{job_id}/report"),), ("get_report",), "T2.7"),
+    Row("translate", (("POST", "/v1/jobs/{job_id}/translate"),), ("translate_job",), "T3.3"),
+    Row("ask", (("POST", "/v1/jobs/{job_id}/ask"),), ("ask_about_audio",), "T3.5"),
+    Row("full-text search", (("GET", "/v1/search"),), ("search_transcripts",), "T3.5"),
+    Row(
+        "speakers",
+        (
+            ("GET", "/v1/speakers"),
+            ("POST", "/v1/speakers/enroll"),
+            ("DELETE", "/v1/speakers/{speaker_id}"),
+        ),
+        ("list_speakers", "enroll_speaker", "delete_speaker"),
+        "T2.3",
+    ),
+)
+
+
+def _iter_routes(routes: Any) -> Any:
+    """Yield leaf routes; FastAPI keeps included routers nested (``_IncludedRouter``)."""
+    for route in routes:
+        original = getattr(route, "original_router", None)
+        if original is not None:
+            yield from _iter_routes(original.routes)
+        else:
+            yield route
+
+
+def _rest_route_exists(app: FastAPI, method: str, template: str) -> bool:
+    for route in _iter_routes(app.routes):
+        if getattr(route, "path", None) != template:
+            continue
+        methods = getattr(route, "methods", None) or set()
+        if method in methods:
+            return True
+    return False
+
+
+async def _tool_names(h: Harness) -> set[str]:
+    server = h.app.state.mcp_server
+    async with Client(server) as client:
+        listed = await client.list_tools()
+    return {tool.name for tool in listed.tools}
+
+
+def _write_artifacts(h: Harness, job_id: uuid.UUID) -> None:
+    files = JobFiles(h.settings.CARACAL_DATA_DIR, job_id)
+    files.ensure()
+    files.write_json(
+        files.transcript_json,
+        {
+            "segments": [
+                {
+                    "id": 0,
+                    "start": 0.0,
+                    "end": 12.5,
+                    "text": "my fellow americans",
+                    "words": [],
+                    "avg_logprob": -0.1,
+                    "no_speech_prob": 0.0,
+                    "lang": "en",
+                }
+            ],
+            "language_code": "en",
+            "dropped": {},
+        },
+    )
+    files.write_text(files.transcript_txt, "[00:00] my fellow americans\n")
+    files.write_json(
+        files.stage(Stage.LANGID),
+        {
+            "status": "done",
+            "reason": None,
+            "output": {
+                "languages": [{"code": "en", "name": "English", "share": 1.0, "confidence": 0.93}],
+                "caption_agreement": None,
+                "caption_lang": None,
+            },
+        },
+    )
+    files.write_text(files.subtitle("source", "srt"), "1\n00:00:00,000 --> 00:00:12,500\nhello\n")
+
+
+async def _done_job(h: Harness) -> uuid.UUID:
+    job = await h.repos.jobs.create(
+        source_kind="platform",
+        source_url=_URL,
+        title="A talk",
+        options=JobOptions().model_dump(),
+    )
+    await h.repos.jobs.upsert_stage(job.id, Stage.INGEST.value, status="done")
+    await h.repos.jobs.set_status(job.id, "done")
+    _write_artifacts(h, job.id)
+    return job.id
+
+
+async def _mcp_call(h: Harness, name: str, arguments: dict[str, Any]) -> Any:
+    server = h.app.state.mcp_server
+    async with Client(server) as client:
+        return await client.call_tool(name, arguments)
+
+
+async def test_every_available_row_exists_on_both_sides(
+    make_harness: Callable[..., Harness],
+) -> None:
+    h = make_harness()
+    tools = await _tool_names(h)
+
+    for row in AVAILABLE:
+        for method, template in row.rest:
+            assert _rest_route_exists(h.app, method, template), (row.capability, method, template)
+        for name in row.mcp:
+            assert name in tools, (row.capability, name)
+
+
+async def test_every_pending_row_is_absent_on_both_sides(
+    make_harness: Callable[..., Harness],
+) -> None:
+    """A route or tool implemented without promoting the row to available must fail here."""
+    h = make_harness()
+    tools = await _tool_names(h)
+
+    for row in PENDING:
+        assert row.pending is not None
+        for method, template in row.rest:
+            assert not _rest_route_exists(h.app, method, template), (
+                f"{row.capability} REST route {method} {template} exists but the row is pending {row.pending}"
+            )
+        for name in row.mcp:
+            assert name not in tools, (
+                f"{row.capability} MCP tool {name} exists but the row is pending {row.pending}"
+            )
+
+
+async def test_get_job_returns_equal_data(make_harness: Callable[..., Harness]) -> None:
+    h = make_harness()
+    job_id = await _done_job(h)
+
+    mcp = await _mcp_call(h, "get_job", {"job_id": str(job_id)})
+    async with h.client() as client:
+        rest = await client.get(f"/v1/jobs/{job_id}", headers=AUTH)
+
+    assert rest.status_code == 200
+    assert mcp.structured_content == rest.json()
+
+
+async def test_list_jobs_returns_equal_data(make_harness: Callable[..., Harness]) -> None:
+    h = make_harness()
+    await _done_job(h)
+
+    mcp = await _mcp_call(h, "list_jobs", {})
+    async with h.client() as client:
+        rest = await client.get("/v1/jobs", headers=AUTH)
+
+    assert rest.status_code == 200
+    assert mcp.structured_content == rest.json()
+
+
+async def test_transcript_json_returns_equal_data(make_harness: Callable[..., Harness]) -> None:
+    h = make_harness()
+    job_id = await _done_job(h)
+
+    mcp = await _mcp_call(h, "get_transcript", {"job_id": str(job_id), "format": "json"})
+    async with h.client() as client:
+        rest = await client.get(f"/v1/jobs/{job_id}/transcript", headers=AUTH)
+
+    assert rest.status_code == 200
+    assert mcp.structured_content == rest.json()

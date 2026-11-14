@@ -7,7 +7,14 @@ from datetime import datetime
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+    model_validator,
+)
 
 from caracal.pipeline.stages import JobOptions
 
@@ -78,11 +85,15 @@ class JobList(BaseModel):
 
 
 class JobSourceStatus(BaseModel):
-    """``JobStatus.source``."""
+    """``JobStatus.source``; absent optional keys are omitted from the JSON (docs/03 §2)."""
 
     kind: str
     url: str | None = None
     title: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialise(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        return {key: value for key, value in handler(self).items() if value is not None}
 
 
 class JobProgress(BaseModel):
@@ -94,13 +105,17 @@ class JobProgress(BaseModel):
 
 
 class StageStatus(BaseModel):
-    """One ``JobStatus.stages`` item."""
+    """One ``JobStatus.stages`` item; absent timestamp keys are omitted (docs/03 §2)."""
 
     name: str
     status: str
     reason: str | None = None
     started_at: datetime | None = None
     ended_at: datetime | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialise(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        return {key: value for key, value in handler(self).items() if value is not None}
 
 
 class JobLinks(BaseModel):
@@ -113,7 +128,11 @@ class JobLinks(BaseModel):
 
 
 class JobStatus(BaseModel):
-    """The ``GET /v1/jobs/{id}`` response (docs/03 §2)."""
+    """The ``GET /v1/jobs/{id}`` response (docs/03 §2).
+
+    ``error`` is omitted entirely while a job is healthy, exactly as the REST contract
+    specifies; the progress sub-object always keeps its three keys.
+    """
 
     job_id: uuid.UUID
     status: str
@@ -124,3 +143,35 @@ class JobStatus(BaseModel):
     stages: list[StageStatus]
     error: dict[str, object] | None = None
     links: JobLinks
+
+    @model_serializer(mode="wrap")
+    def _serialise(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        data: dict[str, object] = handler(self)
+        if data.get("error") is None:
+            data.pop("error", None)
+        return data
+
+
+class JobCreated(BaseModel):
+    """The ``POST /v1/jobs`` response; ``deduplicated`` selects 200 vs 202 in the route."""
+
+    job_id: uuid.UUID
+    status: str
+    deduplicated: bool
+    links: JobLinks
+
+
+class CancelResult(BaseModel):
+    """``DELETE /v1/jobs/{id}`` / MCP ``cancel_job`` when the job still exists."""
+
+    job_id: uuid.UUID
+    status: str
+
+
+class AnalyzeSummary(BaseModel):
+    """The digest MCP ``analyze_audio`` returns once a job is done (card 15)."""
+
+    title: str | None
+    duration_s: float
+    languages: list[dict[str, object]]
+    transcript_preview: str

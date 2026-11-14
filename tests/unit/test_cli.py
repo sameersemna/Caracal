@@ -1,4 +1,4 @@
-"""CLI surface: subcommands, stub exit codes and the doctor command."""
+"""CLI surface: subcommands, entry points and the doctor command."""
 
 from __future__ import annotations
 
@@ -7,12 +7,18 @@ import json
 from collections.abc import Callable
 from typing import Any
 
+import httpx
 import pytest
+from tests.fakes.redis import RecordingRedis
+from tests.fakes.repo import make_fake_repos
 
+from caracal.app import AppDeps
 from caracal.cli import _run_worker, _serve, main
 from caracal.config import Settings, get_settings
 from caracal.db.repo import PostgresJobRepo
 from caracal.log import get_logger
+from caracal.queue import JobQueue, Keys
+from caracal.services import JobService
 
 SUBCOMMANDS = ("serve", "worker", "mcp-stdio", "migrate", "doctor")
 
@@ -35,14 +41,53 @@ def test_help_lists_all_subcommands(capsys: pytest.CaptureFixture[str]) -> None:
         assert name in captured.out
 
 
-@pytest.mark.parametrize("command", ["mcp-stdio"])
-def test_unimplemented_subcommands_exit_two_with_stderr_message(
-    command: str, capsys: pytest.CaptureFixture[str]
+def test_mcp_stdio_builds_the_real_server_and_runs_it(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    assert main([command]) == 2
+    """Card 15: ``mcp-stdio`` is a real entry point, not a stub (no stdout output)."""
+    _set_required(monkeypatch)
+    repos = make_fake_repos()
+    redis = RecordingRedis()
+    keys = Keys("caracal:")
+    http_client = httpx.AsyncClient()
+
+    async def db_ping() -> None:
+        return None
+
+    deps = AppDeps(
+        repos=repos,
+        redis=redis,
+        http=http_client,
+        keys=keys,
+        queue=JobQueue(redis, keys),
+        db_ping=db_ping,
+    )
+    built: dict[str, object] = {}
+
+    class FakeEngine:
+        async def dispose(self) -> None:
+            built["disposed"] = True
+
+    class FakeServer:
+        async def run_stdio_async(self) -> None:
+            built["ran"] = True
+
+    def fake_build_mcp(service: JobService, settings: Settings) -> FakeServer:
+        built["service"] = service
+        built["settings"] = settings
+        return FakeServer()
+
+    monkeypatch.setattr("caracal.cli._build_real_deps", lambda settings: (deps, FakeEngine()))
+    monkeypatch.setattr("caracal.cli.build_mcp", fake_build_mcp)
+
+    assert main(["mcp-stdio"]) == 0
+    assert built["ran"] is True
+    assert built["disposed"] is True
+    service = built["service"]
+    assert isinstance(service, JobService)
+    assert service.data_dir == get_settings().CARACAL_DATA_DIR
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err == f"{command}: available from a later milestone\n"
 
 
 def test_serve_command_runs_the_server(

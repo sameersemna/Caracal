@@ -1,32 +1,29 @@
-"""``/v1`` REST routes and the public ``/healthz`` (docs/03 §1-2, docs/06 S1/S10/S11)."""
+"""``/v1`` REST routes and the public ``/healthz`` (docs/03 §1-2, docs/06 S1/S10/S11).
+
+Every route is a thin adapter: HTTP parsing and status codes live here, behaviour lives in
+:class:`caracal.services.JobService` so the MCP tools return exactly the same models.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import re
-import shutil
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
-from datetime import datetime
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from python_multipart.multipart import parse_options_header
 
 from caracal.api.auth import bearer_token, require_auth
-from caracal.api.schemas import JobCreate, UploadCreated
-from caracal.db.repo import JobRecord, StageRecord
-from caracal.db.tables import JOB_STATUSES, JOB_TERMINAL_STATUSES
+from caracal.api.schemas import JobCreate
+from caracal.db.tables import JOB_TERMINAL_STATUSES
 from caracal.errors import CaracalError, ErrorCode
-from caracal.ingest.router import classify_source_static
-from caracal.ingest.upload import receive_upload
+from caracal.ingest.upload import MultipartFileStream
 from caracal.log import get_logger
-from caracal.pipeline.stages import Stage
-from caracal.queue import rate_limit, set_cancel
-from caracal.storage import JobFiles, UploadFiles
+from caracal.services import JobService
 
 if TYPE_CHECKING:
     from caracal.app import AppDeps
@@ -38,134 +35,35 @@ public_router = APIRouter()
 router = APIRouter(prefix="/v1", dependencies=[Depends(require_auth)])
 
 _TERMINAL = frozenset(JOB_TERMINAL_STATUSES)
-_SUBTITLE_EXTENSIONS = frozenset({"srt", "vtt"})
 # docs/06 S10: ISO 639-1/3 (+ optional region) or the literal "source".
 _LANGUAGE_TAG_RE = re.compile(r"^[a-z]{2,3}(-[A-Za-z]{2,4})?$|^source$")
-_ACTIVE_STATUSES = frozenset({"queued", "running"})
 
 
-def _deps(request: Request) -> AppDeps:
-    return cast("AppDeps", request.app.state.deps)
+def _service(request: Request) -> JobService:
+    service = getattr(request.app.state, "service", None)
+    if not isinstance(service, JobService):
+        raise CaracalError(ErrorCode.INTERNAL, "job service is not configured")
+    return service
 
 
 def _settings(request: Request) -> Settings:
     return cast("Settings", request.app.state.settings)
 
 
-def _iso(value: datetime) -> str:
-    return value.isoformat()
+def _sse(event: str, data: object) -> str:
+    encoded = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    return f"event: {event}\ndata: {encoded}\n\n"
 
 
-def _base(settings: Settings) -> str:
-    return settings.CARACAL_PUBLIC_BASE_URL.rstrip("/")
+async def _file_part(request: Request) -> tuple[str, AsyncIterator[bytes]]:
+    """Parse ``multipart/form-data`` and return the single ``file`` part's stream.
 
-
-def _links(settings: Settings, job_id: uuid.UUID) -> dict[str, object]:
-    base = _base(settings)
-    return {
-        "report": f"{base}/v1/jobs/{job_id}/report",
-        "transcript": f"{base}/v1/jobs/{job_id}/transcript",
-        "events": f"{base}/v1/jobs/{job_id}/events",
-        "subtitles": _subtitle_links(settings, job_id),
-    }
-
-
-def _subtitle_links(settings: Settings, job_id: uuid.UUID) -> dict[str, str]:
-    root = JobFiles(settings.CARACAL_DATA_DIR, job_id).subtitles_dir
-    try:
-        entries = sorted(root.iterdir())
-    except FileNotFoundError:
-        return {}
-    base = _base(settings)
-    links: dict[str, str] = {}
-    for entry in entries:
-        if entry.is_file() and entry.suffix in {".srt", ".vtt"}:
-            links[entry.name] = f"{base}/v1/jobs/{job_id}/subtitles/{entry.name}"
-    return links
-
-
-def _progress(raw: dict[str, Any]) -> dict[str, object]:
-    return {
-        "pct": raw.get("pct", 0),
-        "stage": raw.get("stage"),
-        "message": raw.get("message"),
-    }
-
-
-def _stage(stage: Stage, row: StageRecord | None) -> dict[str, object]:
-    if row is None:
-        return {"name": stage.value, "status": "pending"}
-    item: dict[str, object] = {"name": stage.value, "status": row.status}
-    if row.reason is not None:
-        item["reason"] = row.reason
-    if row.started_at is not None:
-        item["started_at"] = _iso(row.started_at)
-    if row.ended_at is not None:
-        item["ended_at"] = _iso(row.ended_at)
-    return item
-
-
-async def build_job_status(
-    settings: Settings,
-    deps: AppDeps,
-    job: JobRecord,
-) -> dict[str, object]:
-    """Build the ``JobStatus`` object shared by ``GET /v1/jobs/{id}`` and the SSE snapshot."""
-    rows = {row.name: row for row in await deps.repos.jobs.list_stages(job.id)}
-    source: dict[str, object] = {"kind": job.source_kind}
-    if job.source_url is not None:
-        source["url"] = job.source_url
-    if job.title is not None:
-        source["title"] = job.title
-    status: dict[str, object] = {
-        "job_id": str(job.id),
-        "status": job.status,
-        "created_at": _iso(job.created_at),
-        "updated_at": _iso(job.updated_at),
-        "source": source,
-        "progress": _progress(job.progress),
-        "stages": [_stage(stage, rows.get(stage.value)) for stage in Stage],
-        "links": _links(settings, job.id),
-    }
-    if job.error is not None:
-        status["error"] = job.error
-    return status
-
-
-def _not_found(job_id: uuid.UUID) -> CaracalError:
-    return CaracalError(ErrorCode.NOT_FOUND, "job not found", {"job_id": str(job_id)})
-
-
-async def _delete_quietly(deps: AppDeps, job_id: uuid.UUID) -> None:
-    try:
-        await deps.repos.jobs.delete(job_id)
-    except CaracalError as exc:
-        logger.warning(
-            "could not roll back job after upload failure",
-            extra={"job_id": str(job_id), "code": exc.code.value},
-        )
-
-
-def _remove_job_dir(settings: Settings, job_id: uuid.UUID) -> None:
-    jobs_dir = (settings.CARACAL_DATA_DIR / "jobs").resolve()
-    target = (settings.CARACAL_DATA_DIR / "jobs" / str(job_id)).resolve()
-    if target.parent != jobs_dir:
-        logger.warning(
-            "refusing to delete a job directory outside the data dir",
-            extra={"job_id": str(job_id)},
-        )
-        return
-    shutil.rmtree(target, ignore_errors=True)
-
-
-async def create_upload(request: Request) -> JSONResponse:
-    """Stream one multipart ``file`` part to disk (docs/03 §2, docs/06 S6).
-
-    The body is parsed as it arrives and is never buffered whole. Exactly one part named
-    ``file`` carrying a filename is accepted; other form fields are ignored.
+    The body is consumed incrementally: only the first part named ``file`` is streamed, and
+    the iterator raises ``invalid_input`` when the body does not contain exactly one such
+    part (nothing has been persisted by then).
     """
-    deps = _deps(request)
-    settings = _settings(request)
+    from python_multipart.exceptions import MultipartParseError
+
     content_type, options = parse_options_header(request.headers.get("content-type"))
     if content_type != b"multipart/form-data":
         raise CaracalError(
@@ -176,38 +74,47 @@ async def create_upload(request: Request) -> JSONResponse:
     if not boundary:
         raise CaracalError(ErrorCode.INVALID_INPUT, "multipart boundary is required")
 
-    upload_id = uuid.uuid4()
-    files = UploadFiles(settings.CARACAL_DATA_DIR, upload_id)
-    info = await receive_upload(
-        request.stream(),
-        boundary=boundary,
-        files=files,
-        max_bytes=settings.CARACAL_MAX_UPLOAD_MB * 1024 * 1024,
-    )
+    stream = MultipartFileStream(boundary)
+    body = request.stream()
+    pending: list[bytes] = []
     try:
-        record = await deps.repos.uploads.create(
-            upload_id=upload_id,
-            filename=info.filename,
-            size_bytes=info.size_bytes,
-            sha256=info.sha256,
-            path=str(info.path),
+        async for chunk in body:
+            pending.extend(stream.feed(chunk))
+            if stream.headers_seen:
+                break
+    except MultipartParseError as exc:
+        raise CaracalError(ErrorCode.INVALID_INPUT, "malformed multipart body") from exc
+    if not stream.headers_seen:
+        raise CaracalError(
+            ErrorCode.INVALID_INPUT,
+            "multipart body must contain exactly one file part named 'file'",
         )
-    except Exception:
-        # The row is the only reference retained by the API; without it the file is junk.
+    filename = stream.target_filename or ""
+
+    async def chunks() -> AsyncIterator[bytes]:
         try:
-            info.path.unlink(missing_ok=True)
-        except OSError:
-            logger.warning(
-                "could not remove an orphaned upload file", extra={"upload_id": str(info.upload_id)}
+            for buffered in pending:
+                yield buffered
+            async for chunk in body:
+                for data in stream.feed(chunk):
+                    yield data
+            stream.finalize()
+        except MultipartParseError as exc:
+            raise CaracalError(ErrorCode.INVALID_INPUT, "malformed multipart body") from exc
+        if len(stream.file_parts) != 1 or stream.file_parts[0][0] != "file" or not stream.finished:
+            raise CaracalError(
+                ErrorCode.INVALID_INPUT,
+                "multipart body must contain exactly one file part named 'file'",
             )
-        raise
-    body = UploadCreated(
-        upload_id=record.id,
-        filename=record.filename,
-        size_bytes=record.size_bytes,
-        sha256=record.sha256,
-    )
-    return JSONResponse(status_code=201, content=body.model_dump(mode="json"))
+
+    return filename, chunks()
+
+
+async def create_upload(request: Request) -> JSONResponse:
+    """Stream one multipart ``file`` part to disk (docs/03 §2, docs/06 S6)."""
+    filename, chunks = await _file_part(request)
+    created = await _service(request).create_upload_from_chunks(chunks, filename)
+    return JSONResponse(status_code=201, content=created.model_dump(mode="json"))
 
 
 router.add_api_route("/uploads", create_upload, methods=["POST"])
@@ -216,112 +123,17 @@ router.add_api_route("/uploads", create_upload, methods=["POST"])
 @router.post("/jobs")
 async def create_job(payload: JobCreate, request: Request) -> JSONResponse:
     """Validate, deduplicate, persist and enqueue one job (docs/03 §2)."""
-    deps = _deps(request)
-    settings = _settings(request)
-
-    source = payload.source
-    upload_id = source.upload_id
-    url = source.url
-    options = payload.options.model_dump()
-    sha256: str | None = None
-
-    if upload_id is not None:
-        upload = await deps.repos.uploads.get(upload_id)
-        if upload is None:
-            raise CaracalError(ErrorCode.NOT_FOUND, "upload not found", {"upload_id": str(upload_id)})
-        if upload.consumed_by is not None:
-            raise CaracalError(
-                ErrorCode.INVALID_INPUT,
-                "upload already consumed",
-                {"upload_id": str(upload_id)},
-            )
-        sha256 = upload.sha256
-
     client_ip = request.client.host if request.client else ""
     ident_source = f"{bearer_token(request)}{client_ip}".encode()
     ident = hashlib.sha1(ident_source, usedforsecurity=False).hexdigest()
-    allowed, retry_after = await rate_limit(
-        deps.redis,
-        deps.keys,
-        ident,
-        limit=settings.CARACAL_RATE_LIMIT_PER_MIN,
+    created = await _service(request).create_job(
+        payload.source,
+        payload.options,
+        ident_hash=ident,
     )
-    if not allowed:
-        raise CaracalError(
-            ErrorCode.RATE_LIMITED,
-            "rate limit exceeded",
-            {"retry_after_s": retry_after},
-        )
-
-    if options["depth"] != "deep":
-        existing = await deps.repos.jobs.find_recent_done(
-            sha256=sha256,
-            source_url=url if upload_id is None else None,
-            options=options,
-        )
-        if existing is not None:
-            return JSONResponse(
-                status_code=200,
-                content={
-                    "job_id": str(existing.id),
-                    "status": existing.status,
-                    "deduplicated": True,
-                    "links": _links(settings, existing.id),
-                },
-            )
-
-    source_kind: str
-    if url is not None:
-        source_kind = classify_source_static(url)
-    else:
-        source_kind = "upload"
-    job = await deps.repos.jobs.create(
-        source_kind=source_kind,
-        source_url=url,
-        upload_id=upload_id,
-        options=options,
-        sha256=sha256,
-    )
-
-    if upload_id is not None:
-        try:
-            await deps.repos.uploads.consume(upload_id, job.id)
-        except CaracalError as exc:
-            await _delete_quietly(deps, job.id)
-            if exc.code in {ErrorCode.NOT_FOUND, ErrorCode.INVALID_INPUT}:
-                raise CaracalError(
-                    ErrorCode.INVALID_INPUT,
-                    "upload already consumed",
-                    {"upload_id": str(upload_id)},
-                ) from exc
-            raise
-
-    try:
-        await deps.queue.enqueue(job.id, "pipeline")
-    except Exception as exc:
-        try:
-            await deps.repos.jobs.set_status(
-                job.id,
-                "failed",
-                error={"code": ErrorCode.DEPENDENCY_DOWN.value, "message": "queue unavailable"},
-            )
-        except CaracalError:
-            logger.warning("could not mark job failed after enqueue error", extra={"job_id": str(job.id)})
-        raise CaracalError(
-            ErrorCode.DEPENDENCY_DOWN,
-            "queue unavailable",
-            {"job_id": str(job.id)},
-            retryable=True,
-        ) from exc
-
     return JSONResponse(
-        status_code=202,
-        content={
-            "job_id": str(job.id),
-            "status": job.status,
-            "deduplicated": False,
-            "links": _links(settings, job.id),
-        },
+        status_code=200 if created.deduplicated else 202,
+        content=created.model_dump(mode="json"),
     )
 
 
@@ -332,69 +144,14 @@ async def list_jobs(
     limit: int = Query(default=20, ge=1, le=100),
     cursor: str | None = Query(default=None),
 ) -> dict[str, object]:
-    deps = _deps(request)
-    status = status or None
-    cursor = cursor or None
-    if status is not None and status not in JOB_STATUSES:
-        raise CaracalError(ErrorCode.INVALID_INPUT, "invalid job status", {"allowed": list(JOB_STATUSES)})
-    jobs, next_cursor = await deps.repos.jobs.list(status=status, limit=limit, cursor=cursor)
-    items = [
-        {
-            "job_id": str(job.id),
-            "status": job.status,
-            "created_at": _iso(job.created_at),
-            "title": job.title,
-            "source_kind": job.source_kind,
-        }
-        for job in jobs
-    ]
-    return {"items": items, "next_cursor": next_cursor}
+    result = await _service(request).list_jobs(status, limit, cursor)
+    return result.model_dump(mode="json")
 
 
 @router.get("/jobs/{job_id}")
 async def get_job(job_id: uuid.UUID, request: Request) -> dict[str, object]:
-    deps = _deps(request)
-    job = await deps.repos.jobs.get(job_id)
-    if job is None:
-        raise _not_found(job_id)
-    return await build_job_status(_settings(request), deps, job)
-
-
-def _missing_artifact(job: JobRecord) -> CaracalError:
-    """404 for a failed job, 409 while the artifact does not exist yet (docs/03 §2)."""
-    if job.status == "failed":
-        return CaracalError(
-            ErrorCode.NOT_FOUND,
-            "artifact not found",
-            {"job_id": str(job.id), "status": job.status},
-        )
-    return CaracalError(
-        ErrorCode.JOB_NOT_READY,
-        "job is not ready",
-        {"job_id": str(job.id), "status": job.status},
-    )
-
-
-def _artifact_json(path: Path) -> dict[str, object]:
-    raw = path.read_text(encoding="utf-8")
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise CaracalError(ErrorCode.INTERNAL, "stored transcript is not valid JSON") from exc
-    if not isinstance(payload, dict):
-        raise CaracalError(ErrorCode.INTERNAL, "stored transcript is not a JSON object")
-    return cast("dict[str, object]", payload)
-
-
-def _transcript_languages(files: JobFiles) -> list[object]:
-    checkpoint = files.read_json(files.stage(Stage.LANGID))
-    if not isinstance(checkpoint, dict):
-        return []
-    output = checkpoint.get("output")
-    if not isinstance(output, dict):
-        return []
-    languages = output.get("languages")
-    return cast("list[object]", languages) if isinstance(languages, list) else []
+    status = await _service(request).get_status(job_id)
+    return status.model_dump(mode="json")
 
 
 @router.get("/jobs/{job_id}/transcript")
@@ -404,63 +161,27 @@ async def get_transcript(
     format: Literal["json", "txt"] = Query(default="json"),
 ) -> Response:
     """Return the merged transcript as JSON or plain text (docs/03 §2)."""
-    deps = _deps(request)
-    job = await deps.repos.jobs.get(job_id)
-    if job is None:
-        raise _not_found(job_id)
-    files = JobFiles(_settings(request).CARACAL_DATA_DIR, job_id)
-
-    if format == "txt":
-        if not files.transcript_txt.is_file():
-            raise _missing_artifact(job)
-        return Response(
-            content=files.transcript_txt.read_text(encoding="utf-8"),
-            media_type="text/plain",
-        )
-    if not files.transcript_json.is_file():
-        raise _missing_artifact(job)
-    payload = _artifact_json(files.transcript_json)
-    payload["job_id"] = str(job_id)
-    payload["languages"] = _transcript_languages(files)
+    payload = await _service(request).transcript(job_id, format)
+    if isinstance(payload, str):
+        return Response(content=payload, media_type="text/plain")
     return JSONResponse(content=payload)
 
 
 @router.get("/jobs/{job_id}/subtitles/{filename:path}")
 async def get_subtitle(job_id: uuid.UUID, filename: str, request: Request) -> Response:
     """Serve one rendered subtitle file with its registered content type (docs/03 §2)."""
-    deps = _deps(request)
-    job = await deps.repos.jobs.get(job_id)
-    if job is None:
-        raise _not_found(job_id)
     if "." not in filename:
         raise CaracalError(ErrorCode.INVALID_INPUT, "invalid subtitle path", {"filename": filename})
     lang, ext = filename.rsplit(".", 1)
-    if ext not in _SUBTITLE_EXTENSIONS or _LANGUAGE_TAG_RE.fullmatch(lang) is None:
+    if ext not in {"srt", "vtt"} or _LANGUAGE_TAG_RE.fullmatch(lang) is None:
         raise CaracalError(ErrorCode.INVALID_INPUT, "invalid subtitle path", {"filename": filename})
 
-    files = JobFiles(_settings(request).CARACAL_DATA_DIR, job_id)
-    path = files.subtitle(lang, ext)
-    if not path.is_file():
-        if job.status == "failed" or (job.status not in _ACTIVE_STATUSES and lang != "source"):
-            # An unknown language never becomes available; a failed job has no artifacts.
-            raise CaracalError(
-                ErrorCode.NOT_FOUND,
-                "subtitle not found",
-                {"job_id": str(job_id), "lang": lang, "ext": ext},
-            )
-        raise _missing_artifact(job)
-
-    media_type = "application/x-subrip" if ext == "srt" else "text/vtt; charset=utf-8"
+    content, media_type = await _service(request).subtitles(job_id, lang, ext)
     return Response(
-        content=path.read_text(encoding="utf-8"),
+        content=content,
         media_type=media_type,
         headers={"Content-Disposition": f'attachment; filename="{job_id}.{lang}.{ext}"'},
     )
-
-
-def _sse(event: str, data: object) -> str:
-    encoded = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
-    return f"event: {event}\ndata: {encoded}\n\n"
 
 
 async def job_event_stream(
@@ -476,6 +197,14 @@ async def job_event_stream(
     ``after_subscribe`` exists so tests can publish between ``SUBSCRIBE`` and the
     snapshot and prove the event is not lost.
     """
+    service = JobService(
+        settings,
+        deps.repos,
+        deps.redis,
+        deps.keys,
+        deps.queue,
+        settings.CARACAL_DATA_DIR,
+    )
     channel = deps.keys.events(job_id)
     async with deps.redis.pubsub() as pubsub:
         await pubsub.subscribe(channel)
@@ -485,8 +214,9 @@ async def job_event_stream(
         if job is None:
             yield _sse("end", {"job_id": str(job_id)})
             return
-        yield _sse("status", await build_job_status(settings, deps, job))
-        if job.status in _TERMINAL:
+        snapshot = await service.get_status(job_id)
+        yield _sse("status", snapshot.model_dump(mode="json"))
+        if snapshot.status in _TERMINAL:
             yield _sse("end", {"job_id": str(job_id)})
             return
         while True:
@@ -508,16 +238,16 @@ async def job_event_stream(
             if payload.get("type") == "end":
                 yield _sse("end", payload)
                 return
-            event_type = payload.get("type")
-            yield _sse(str(event_type) if isinstance(event_type, str) and event_type else "stage", payload)
+            event_type = str(payload.get("type") or "stage")
+            yield _sse(event_type, payload)
 
 
 @router.get("/jobs/{job_id}/events")
 async def job_events(job_id: uuid.UUID, request: Request) -> StreamingResponse:
-    deps = _deps(request)
+    deps = cast("AppDeps", request.app.state.deps)
     job = await deps.repos.jobs.get(job_id)
     if job is None:
-        raise _not_found(job_id)
+        raise CaracalError(ErrorCode.NOT_FOUND, "job not found", {"job_id": str(job_id)})
     return StreamingResponse(
         job_event_stream(_settings(request), deps, job_id),
         media_type="text/event-stream",
@@ -527,23 +257,15 @@ async def job_events(job_id: uuid.UUID, request: Request) -> StreamingResponse:
 
 @router.delete("/jobs/{job_id}")
 async def delete_job(job_id: uuid.UUID, request: Request) -> Response:
-    deps = _deps(request)
-    job = await deps.repos.jobs.get(job_id)
-    if job is None:
-        raise _not_found(job_id)
-    if job.status not in _TERMINAL:
-        await set_cancel(deps.redis, deps.keys, job_id)
-        return JSONResponse(
-            status_code=202,
-            content={"job_id": str(job_id), "status": "cancelling"},
-        )
-    await deps.repos.jobs.delete(job_id)
-    _remove_job_dir(_settings(request), job_id)
-    return Response(status_code=204)
+    result = await _service(request).cancel_or_delete(job_id, delete_artifacts=True)
+    if result is None:
+        return Response(status_code=204)
+    return JSONResponse(status_code=202, content=result.model_dump(mode="json"))
 
 
 @public_router.get("/healthz")
 async def healthz(request: Request) -> dict[str, object]:
     from caracal.app import health_payload
 
-    return await health_payload(_settings(request), _deps(request))
+    deps = cast("AppDeps", request.app.state.deps)
+    return await health_payload(_settings(request), deps)
