@@ -1,17 +1,16 @@
 ## Task
 
-Several analysis windows of one recording are given below as partial findings. Merge them into one
-content analysis: write the overall summary and context, merge chapters in time order, merge
-topics, de-duplicate entities by their surface text, and keep only claims and quotes that still
-have their evidence ids.
+{mode_note}
 
-Fill EVERY field; lists must not be empty when the transcript supports them.
+Write ONLY two fields: `summary` (one line, a short paragraph, a detailed paragraph) and
+`context` (genre, setting, audience, purpose, tone, when and where it was recorded,
+confidence). Every item must cite the evidence that supports it.
 
 ## DATA and evidence ids
 
-Metadata uses ids such as `[meta:title]`; transcript evidence uses `seg:12`; hints use `[hint:0]`.
-The partial findings already contain evidence ids. Keep those ids; cite the id alone
-(`seg:12`, `meta:title`).
+Metadata uses ids such as `[meta:title]`; transcript evidence uses `seg:12`; hints use
+`[hint:0]`. The partial findings already contain evidence ids. Cite the id alone
+(`seg:12`, `meta:title`), never the whole rendered line. Do not invent evidence ids.
 
 {metadata}
 
@@ -19,18 +18,10 @@ The partial findings already contain evidence ids. Keep those ids; cite the id a
 
 {partials}
 
-## What to record
+## Rules
 
-- `summary`: one line, a short paragraph, and a detailed paragraph covering the whole recording.
-- `context`: genre, setting, audience, purpose, tone, when and where it was recorded, confidence.
-- `chapters`: merge adjacent or overlapping partial chapters. {chapter_guidance}
-  Give each merged chapter the id of its first segment in `first_seg` and of its last one in
-  `last_seg`, plus the evidence ids. Do not give times.
-- `topics`: merge duplicates and keep a weight between 0 and 1.
-- `entities`: one entry per distinct entity, with every supporting segment id. Use `entity_type`.
-- `key_quotes`: verbatim words in `text` with the segment ids that contain them in `seg_ids`.
-- `claims`: at most {claim_limit} checkworthy factual assertions, de-duplicated.
-
-Only state what the evidence supports. Do not invent names, dates, numbers or sources. Quotes and
-entity text stay verbatim in the original language; all other prose is written in this report
-language: {report_language}.
+- The partial findings are the record of what the windows found. Use their chapter
+  summaries and topics to understand the whole recording, but do NOT copy their chapters,
+  topics, entities, quotes or claims into your answer: those are merged deterministically.
+- Only state what the evidence supports. Do not invent names, dates, numbers or sources.
+- All prose is written in this report language: {report_language}.

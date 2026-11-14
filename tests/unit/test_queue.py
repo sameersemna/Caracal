@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 
 import pytest
 from tests.fakes.redis import RecordingRedis, all_keys, make_fake_redis, text
 
+from caracal.config import Settings
 from caracal.errors import CaracalError, ErrorCode
 from caracal.queue import (
     JobQueue,
     Keys,
     is_cancelled,
+    make_redis,
     publish_event,
     rate_limit,
     redis_lock,
@@ -282,3 +284,46 @@ async def test_every_key_and_channel_uses_the_prefix(
     assert all(key.startswith(PREFIX) for key in keys_seen), keys_seen
     assert redis.published and all(channel.startswith(PREFIX) for channel in redis.published)
     assert "XADD" in redis.command_names()
+
+
+def test_make_redis_sets_a_block_outliving_socket_timeout(
+    make_settings: Callable[..., Settings],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = make_settings()
+    sentinel = object()
+    captured: dict[str, object] = {}
+
+    def fake_from_url(url: str, **kwargs: object) -> object:
+        captured["url"] = url
+        captured.update(kwargs)
+        return sentinel
+
+    monkeypatch.setattr("caracal.queue.redis_asyncio.from_url", fake_from_url)
+
+    assert make_redis(settings) is sentinel
+    assert captured == {
+        "url": settings.REDIS_URL.get_secret_value(),
+        "socket_timeout": 15.0,
+        "socket_connect_timeout": 5.0,
+        "health_check_interval": 30,
+        "retry_on_timeout": True,
+    }
+
+
+def test_make_redis_scales_the_socket_timeout_with_the_block(
+    make_settings: Callable[..., Settings],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = make_settings()
+    captured: dict[str, object] = {}
+
+    def fake_from_url(url: str, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr("caracal.queue.redis_asyncio.from_url", fake_from_url)
+
+    make_redis(settings, block_ms=9000)
+
+    assert captured["socket_timeout"] == 19.0

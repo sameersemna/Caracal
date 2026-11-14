@@ -23,6 +23,7 @@ dependencies = [
     "sqlalchemy[asyncio]==2.1.8",
     "uvicorn[standard]==0.54.0",
     "yt-dlp==2026.10.26",
+    "yt-dlp-ejs==0.8.0",
 ]
 
 [project.optional-dependencies]

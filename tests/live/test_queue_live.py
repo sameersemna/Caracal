@@ -12,7 +12,6 @@ import uuid
 from collections.abc import AsyncIterator
 
 import pytest
-import redis.asyncio as redis_asyncio
 from redis.asyncio import Redis
 
 from caracal.config import get_settings
@@ -20,6 +19,7 @@ from caracal.queue import (
     JobQueue,
     Keys,
     is_cancelled,
+    make_redis,
     publish_event,
     rate_limit,
     set_cancel,
@@ -32,7 +32,7 @@ pytestmark = pytest.mark.live
 @pytest.fixture
 async def redis() -> AsyncIterator[Redis]:
     settings = get_settings()
-    client: Redis = redis_asyncio.from_url(settings.REDIS_URL.get_secret_value())
+    client: Redis = make_redis(settings)
     try:
         yield client
     finally:

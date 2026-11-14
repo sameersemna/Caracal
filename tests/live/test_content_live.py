@@ -157,12 +157,41 @@ async def test_live_music_rule_on_a_synthetic_music_transcript() -> None:
     )
 
     assert planned.music_detected is True
-    assert planned.run["diarize"] is False
+    # The plan runs after diarization, so it never skips the diarize stage.
+    assert planned.run["diarize"] is True
+    assert "diarize" not in planned.reasons
     assert planned.run["align"] is False
     assert planned.run["voiceprint"] is False
     assert planned.run["identity"] is False
     assert planned.run["verify"] is False
     assert planned.run["translate"] is False
-    assert planned.reasons["diarize"] == "music detected"
+    assert planned.reasons["align"] == "music detected"
     assert planned.languages is not None
     assert {language["code"] for language in planned.languages} == {"und"}
+
+
+async def test_live_map_reduce_with_a_small_context_budget_is_complete() -> None:
+    settings = get_settings()
+    if settings.OLLAMA_CLOUD_API_KEY is None:
+        pytest.skip("OLLAMA_CLOUD_API_KEY is not configured")
+    settings = settings.model_copy(update={"LLM_CONTEXT_CHARS": 1500})
+
+    transcript = _ted_transcript()
+    async with httpx.AsyncClient() as http:
+        client = LLMClient(settings, http)
+        analysis = await analyse_content(
+            transcript,
+            _META,
+            _HINTS,
+            JobOptions(depth="standard"),
+            settings,
+            llm=client,
+        )
+
+    assert analysis.summary.one_line.strip()
+    assert analysis.context.genre.strip()
+    assert analysis.llm_meta.calls >= 2
+    # The deterministic merge plus the summary/context call and completeness re-ask must
+    # deliver every section, not the empty reduce reply verdict 25 measured.
+    assert set(analysis.llm_meta.completeness) == {"chapters", "entities", "claims", "topics"}
+    assert all(count > 0 for count in analysis.llm_meta.completeness.values()), analysis.llm_meta

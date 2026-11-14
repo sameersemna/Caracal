@@ -73,9 +73,10 @@ def _is_true_constant(node: ast.expr) -> bool:
 class RuleVisitor(ast.NodeVisitor):
     """Report code-rule violations on the AST, resolving local import aliases."""
 
-    def __init__(self, path: Path, text: str, *, is_config: bool) -> None:
+    def __init__(self, path: Path, text: str, *, is_config: bool, is_queue: bool) -> None:
         self.path = path
         self.is_config = is_config
+        self.is_queue = is_queue
         self.lines = text.splitlines()
         self.aliases: dict[str, str] = {}
         self.violations: dict[tuple[int, str], Violation] = {}
@@ -184,6 +185,12 @@ class RuleVisitor(ast.NodeVisitor):
                 self.add(node, "redis-keys")
         elif canonical in _REDIS_FLUSH_NAMES:
             self.add(node, "redis-flush")
+
+        # Every Redis client is built by queue.make_redis (verdict 25 D4); a direct
+        # ``redis*.from_url`` elsewhere bypasses the socket-timeout policy.
+        parts = canonical.split(".")
+        if parts[-1] == "from_url" and "redis" in parts and not self.is_queue:
+            self.add(node, "redis-from-url")
 
 
 _BRACE_RE = re.compile(r"\{([^{}]*)\}")
@@ -295,7 +302,9 @@ def _excerpt(line: str) -> str:
 def check_file(path: Path, root: Path, layout: Layout) -> list[Violation]:
     """Return every rule violation in one Python file."""
     text = path.read_text(encoding="utf-8", errors="replace")
+    relative_path = path.relative_to(root)
     is_config = _is_config_module(path, root)
+    is_queue = relative_path == Path("queue.py")
     violations: list[Violation] = []
     for number, line in enumerate(text.splitlines(), start=1):
         for rule in LINE_RULES:
@@ -311,12 +320,12 @@ def check_file(path: Path, root: Path, layout: Layout) -> list[Violation]:
         excerpt = _excerpt(text.splitlines()[line - 1]) if 0 < line <= len(text.splitlines()) else ""
         violations.append(Violation(path, line, "syntax-error", excerpt))
     else:
-        visitor = RuleVisitor(path, text, is_config=is_config)
+        visitor = RuleVisitor(path, text, is_config=is_config, is_queue=is_queue)
         visitor.collect_aliases(tree)
         visitor.visit(tree)
         violations.extend(visitor.violations.values())
 
-    relative = path.relative_to(root).as_posix()
+    relative = relative_path.as_posix()
     if not layout.matches(relative):
         name = path.name
         parent = relative.rsplit("/", 1)[0] if "/" in relative else ""

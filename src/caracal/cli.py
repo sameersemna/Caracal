@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import importlib
 import importlib.util
+import shutil
 import signal
 import sys
 from pathlib import Path
@@ -14,7 +15,6 @@ from typing import cast
 from alembic import command
 from alembic.config import Config as AlembicConfig
 from pydantic import SecretStr, ValidationError
-from redis import asyncio as redis_asyncio
 
 from caracal.app import _build_real_deps
 from caracal.config import Settings, get_settings
@@ -29,6 +29,7 @@ from caracal.db.repo import (
 from caracal.errors import CaracalError
 from caracal.log import configure_logging, get_logger
 from caracal.mcp.server import build_mcp
+from caracal.queue import make_redis
 from caracal.services import JobService
 from caracal.worker import RepoBundle, Worker
 
@@ -96,6 +97,11 @@ def _diarization_status() -> dict[str, object]:
     return {"pyannote": pyannote, "torch": torch_installed, "cuda": cuda}
 
 
+def _js_runtime_status() -> dict[str, object]:
+    """Report the JS runtime yt-dlp needs for YouTube's challenge (verdict 25 D5)."""
+    return {"node": shutil.which("node"), "yt_dlp_ejs": _importable("yt_dlp_ejs")}
+
+
 def _doctor() -> int:
     configure_logging("INFO")
     logger = get_logger("caracal.doctor")
@@ -112,6 +118,7 @@ def _doctor() -> int:
             "port": settings.CARACAL_PORT,
             "data_dir": str(settings.CARACAL_DATA_DIR),
             "diarization": _diarization_status(),
+            "js_runtime": _js_runtime_status(),
         },
     )
     return 0
@@ -151,7 +158,7 @@ async def _run_worker(settings: Settings) -> int:
         except RuntimeError:
             logger.warning("signal handler unavailable", extra={"signal": handled})
 
-    redis_client = redis_asyncio.from_url(settings.REDIS_URL.get_secret_value())
+    redis_client = make_redis(settings)
     engine = make_engine(settings)
     repos = RepoBundle(
         jobs=PostgresJobRepo(engine),

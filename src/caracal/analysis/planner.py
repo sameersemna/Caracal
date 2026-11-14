@@ -55,6 +55,7 @@ PLANNED_STAGES: Final[tuple[str, ...]] = (
 )
 
 _MUSIC_THRESHOLD: Final = 0.70
+_MUSIC_SPEECH_SHARE: Final = 0.15
 _AMBIENT_THRESHOLD: Final = 0.05
 _SHORT_CLIP_S: Final = 20.0
 _FIRST_WINDOW_S: Final = 180.0
@@ -106,6 +107,7 @@ class PlanInputs:
     duration: float
     speech_ratio: float
     options: AnalysisOptions
+    speech_share: float | None = None
     transcript: Transcript | None = None
     languages: Sequence[Mapping[str, object]] = ()
     metadata: Mapping[str, str] = field(default_factory=dict)
@@ -126,8 +128,15 @@ def _has_lexical_text(text: str) -> bool:
     return any(char.isalpha() or char.isdigit() for char in cleaned if char not in _MUSIC_SYMBOLS)
 
 
-def _music_detected(transcript: Transcript | None) -> bool:
-    """True when at least 70 % of speech time is in non-lexical segments."""
+def _music_detected(transcript: Transcript | None, speech_share: float | None = None) -> bool:
+    """True for non-speech audio.
+
+    With a diarize checkpoint the measured discriminator is the exclusive-turn speech
+    share (music 2 %, talk 87 % — verdict 25 D3). Without one, fall back to the text rule:
+    at least 70 % of segment time is non-lexical (``🎵`` segments or hallucinated tags).
+    """
+    if speech_share is not None:
+        return speech_share < _MUSIC_SPEECH_SHARE
     if transcript is None:
         return False
     total = 0.0
@@ -270,7 +279,7 @@ def _profile_prompt(inputs: PlanInputs) -> str:
 
 async def _profile(inputs: PlanInputs, llm: LLMClient | None) -> tuple[ContentProfile, str]:
     """Return the profile and a reason, never raising for an unavailable or failing LLM."""
-    if inputs.transcript is not None and _music_detected(inputs.transcript):
+    if _music_detected(inputs.transcript, inputs.speech_share):
         return _default_profile(), "music: no profile call"
     if inputs.options.depth == "quick":
         return _default_profile(), "quick depth: default profile"
@@ -299,14 +308,14 @@ async def plan(inputs: PlanInputs, *, llm: LLMClient | None) -> StagePlan:
     """Build the deterministic stage plan, consulting the LLM only for the content profile."""
     run = {stage: True for stage in PLANNED_STAGES}
     reasons: dict[str, str] = {}
-    music = _music_detected(inputs.transcript)
+    music = _music_detected(inputs.transcript, inputs.speech_share)
     languages: list[dict[str, object]] | None = None
 
     if music:
         _skip_group(
             run,
             reasons,
-            ("diarize", "align", "voiceprint", "identity", "verify", "translate"),
+            ("align", "voiceprint", "identity", "verify", "translate"),
             MUSIC_REASON,
         )
         _set_reason(run, reasons, "content", MUSIC_CONTENT_REASON)

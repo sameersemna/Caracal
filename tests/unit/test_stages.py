@@ -1042,15 +1042,15 @@ def test_m2_registry_wires_diarize_and_align_and_keeps_m1_stages() -> None:
 # --- T2.5 planner and content ----------------------------------------------------------
 
 
-def test_stage_order_puts_plan_right_after_langid() -> None:
+def test_stage_order_puts_plan_right_after_diarize() -> None:
     assert [stage.value for stage in Stage] == [
         "ingest",
         "normalize",
         "chunk",
         "transcribe",
         "langid",
-        "plan",
         "diarize",
+        "plan",
         "align",
         "voiceprint",
         "content",
@@ -1066,7 +1066,6 @@ def test_stage_order_puts_plan_right_after_langid() -> None:
 @pytest.mark.parametrize(
     ("stage", "stage_fn"),
     [
-        (Stage.DIARIZE, stage_diarize),
         (Stage.ALIGN, stage_align),
         (Stage.VOICEPRINT, stage_voiceprint),
         (Stage.CONTENT, stage_content),
@@ -1151,16 +1150,89 @@ async def test_stage_plan_detects_music_and_overrides_the_language(
         },
     )
 
-    result = await stage_plan(_context(settings, repos, files, job_id=job.id))
+    ctx = replace(
+        _context(settings, repos, files, job_id=job.id),
+        diarizer=FakeDiarizer(result=_diarization_result()),
+    )
+
+    result = await stage_plan(ctx)
 
     assert result.status == "done"
     assert result.output["music_detected"] is True
-    assert result.output["run"]["diarize"] is False
-    assert result.output["reasons"]["diarize"] == "music detected"
+    assert result.output["run"]["diarize"] is True
+    assert result.output["reasons"].get("diarize") != "music detected"
+    assert result.output["reasons"]["align"] == "music detected"
     languages = result.output["languages"]
     assert isinstance(languages, list)
     assert languages[0]["code"] == "und"
     assert languages[0]["spans"] == [{"start": 0.0, "end": 8.0}]
+
+
+@pytest.mark.parametrize(
+    ("speech_seconds", "expected_music"),
+    [(0.16, True), (7.0, False)],
+)
+async def test_stage_plan_uses_the_diarization_speech_share(
+    make_settings: MakeSettings,
+    tmp_path: Path,
+    speech_seconds: float,
+    expected_music: bool,
+) -> None:
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    files.write_json(files.transcript_json, _transcript(["hello there"] * 4).to_dict())
+    _write_output(
+        files,
+        Stage.NORMALIZE,
+        {
+            "stats": {
+                "duration_s": 8.0,
+                "speech_ratio": 1.0,
+                "loudness_lufs": -20.0,
+                "quality": "good",
+                "silences": [],
+            }
+        },
+    )
+    _write_output(
+        files,
+        Stage.LANGID,
+        {
+            "languages": [
+                {
+                    "code": "en",
+                    "name": "English",
+                    "share": 1.0,
+                    "spans": [{"start": 0.0, "end": 8.0}],
+                    "confidence": 0.9,
+                }
+            ],
+            "caption_agreement": None,
+            "caption_lang": None,
+        },
+    )
+    _write_output(
+        files,
+        Stage.DIARIZE,
+        {
+            "num_speakers": 1,
+            "turns": [{"start": 0.0, "end": speech_seconds, "label": "S1"}],
+            "exclusive_turns": [{"start": 0.0, "end": speech_seconds, "label": "S1"}],
+            "embeddings": {},
+        },
+    )
+
+    result = await stage_plan(_context(settings, repos, files, job_id=job.id))
+
+    assert result.status == "done"
+    assert result.output["music_detected"] is expected_music
+    if expected_music:
+        assert result.output["languages"][0]["code"] == "und"
+    else:
+        assert result.output["languages"] is None
 
 
 async def test_stage_content_writes_a_content_checkpoint_with_llm_meta(
@@ -1222,3 +1294,57 @@ async def test_stage_content_writes_a_content_checkpoint_with_llm_meta(
     assert isinstance(llm_meta, dict)
     assert llm_meta["calls"] == 1
     assert result.output["claims"] == []
+
+
+async def test_stage_content_music_mode_returns_no_quotes_or_claims(
+    make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    transcript = _transcript(["Utak lyder", "Norske musik"])
+    files.write_json(files.transcript_json, transcript.to_dict())
+    _write_output(
+        files,
+        Stage.PLAN,
+        {
+            "run": {"content": True},
+            "reasons": {"content": "music: describe the track, not speech"},
+            "content_profile": {
+                "likely_genre": "unknown",
+                "expected_speakers": None,
+                "needs_identity": False,
+                "checkworthy_domain": False,
+            },
+            "budgets": {"search_queries": 0, "llm_calls": 1, "claims": 8},
+            "music_detected": True,
+            "languages": None,
+        },
+    )
+    arguments = {
+        "summary": {
+            "one_line": "An instrumental track.",
+            "short": "An instrumental track.",
+            "detailed": "An instrumental track.",
+            "evidence": ["meta:title"],
+        },
+        "context": {"genre": "music", "tone": ["instrumental"], "evidence": ["meta:title"]},
+    }
+    fake = FakeOllama([json_response(arguments)])
+    http = httpx.AsyncClient(transport=fake.transport())
+    client = LLMClient(settings, http)
+    try:
+        result = await stage_content(_context(settings, repos, files, job_id=job.id, llm=client))
+    finally:
+        await http.aclose()
+
+    assert result.status == "done"
+    assert result.output["key_quotes"] == []
+    assert result.output["claims"] == []
+    assert result.output["review_flags"] == [
+        {"severity": "warn", "field": "content", "message": "non-speech audio"}
+    ]
+    prompt = fake.body()["messages"][1]["content"]
+    assert "[seg:0]" not in prompt

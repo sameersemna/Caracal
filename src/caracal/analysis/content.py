@@ -17,6 +17,7 @@ import difflib
 import json
 import time
 import unicodedata
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final
@@ -37,6 +38,7 @@ from caracal.report.model import (
     Entity,
     EntityType,
     KeyQuote,
+    ReviewFlag,
     Summary,
     Topic,
 )
@@ -47,6 +49,19 @@ _STANDARD_CLAIMS: Final = 8
 _DEEP_CLAIMS: Final = 15
 _COMPLETENESS_MIN_SEGMENTS: Final = 20
 _COMPLETENESS_SECTIONS: Final[tuple[str, ...]] = ("chapters", "entities", "claims", "topics")
+_CHAPTER_TITLE_RATIO: Final = 0.85
+_CHAPTER_JOIN_GAP_S: Final = 1.0
+_MUSIC_REVIEW_MESSAGE: Final = "non-speech audio"
+_REDUCE_NOTE: Final = (
+    "Merge the partial findings below and write only the overall summary and context. "
+    "Do not repeat or copy the partial chapters, topics, entities, quotes or claims: a "
+    "deterministic merge already did that."
+)
+_MUSIC_NOTE: Final = (
+    "This recording is non-speech audio (music or ambient). Write the summary and context "
+    "from the METADATA ONLY. Do not quote the transcript, do not state claims and do not "
+    "invent lyrics, speakers or names."
+)
 _REASK_NOTE: Final = (
     "\n\n## Missing sections\n\n"
     "These sections are still missing: {sections}. Record only them; the response schema "
@@ -186,6 +201,7 @@ class ContentAnalysis(BaseModel):
     entities: list[Entity] = Field(default_factory=list)
     key_quotes: list[KeyQuote] = Field(default_factory=list)
     claims: list[Claim] = Field(default_factory=list)
+    review_flags: list[ReviewFlag] = Field(default_factory=list)
     llm_meta: ContentLlmMeta = Field(default_factory=ContentLlmMeta)
 
 
@@ -366,23 +382,65 @@ def _chapters(
             continue
         kept.append(chapter.model_copy(update={"start": start}))
         previous_end = chapter.end
-    return kept
+    return _merge_adjacent_chapters(kept)
+
+
+def _similar_titles(left: str, right: str) -> bool:
+    """True when two chapter titles are near-identical after normalisation."""
+    first = _normalise_quote_text(left)
+    second = _normalise_quote_text(right)
+    if not first or not second:
+        return False
+    return difflib.SequenceMatcher(None, first, second).ratio() >= _CHAPTER_TITLE_RATIO
+
+
+def _merge_adjacent_chapters(chapters: Sequence[Chapter]) -> list[Chapter]:
+    """Merge neighbouring chapters with near-identical titles (deterministic reduce)."""
+    merged: list[Chapter] = []
+    for chapter in chapters:
+        if merged:
+            previous = merged[-1]
+            if chapter.start <= previous.end + _CHAPTER_JOIN_GAP_S and _similar_titles(
+                previous.title, chapter.title
+            ):
+                merged[-1] = previous.model_copy(
+                    update={
+                        "end": max(previous.end, chapter.end),
+                        "summary": previous.summary or chapter.summary,
+                        "evidence": list(dict.fromkeys([*previous.evidence, *chapter.evidence])),
+                    }
+                )
+                continue
+        merged.append(chapter)
+    return merged
 
 
 def _topics(values: Sequence[_LlmTopic], scope: _EvidenceScope) -> list[Topic]:
-    topics: list[Topic] = []
+    merged: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
     for value in values:
-        ids = scope.valid(value.evidence)
         label = value.label.strip()
-        if not ids or not label:
+        key = _normalise_quote_text(label)
+        ids = scope.valid(value.evidence)
+        if not label or not key or not ids:
             continue
-        topics.append(Topic(label=label, weight=value.weight, evidence=ids))
-    return topics
+        if key not in merged:
+            order.append(key)
+            merged[key] = {"label": label, "weight": float(value.weight), "evidence": ids}
+            continue
+        entry = merged[key]
+        entry["weight"] = max(entry["weight"], float(value.weight))
+        entry["evidence"] = list(dict.fromkeys([*entry["evidence"], *ids]))
+    return [
+        Topic(label=merged[key]["label"], weight=merged[key]["weight"], evidence=merged[key]["evidence"])
+        for key in order
+    ]
 
 
 def _entities(values: Sequence[_LlmEntity], scope: _EvidenceScope) -> list[Entity]:
     merged: dict[str, dict[str, Any]] = {}
     order: list[str] = []
+    types: dict[str, list[EntityType]] = {}
     for value in values:
         text = value.text.strip()
         ids = scope.valid(value.evidence)
@@ -400,14 +458,22 @@ def _entities(values: Sequence[_LlmEntity], scope: _EvidenceScope) -> list[Entit
                 "url": value.url,
                 "evidence": ids,
             }
-            continue
+            types[key] = []
         entry = merged[key]
+        types[key].append(value.type)
         entry["mentions"] = list(dict.fromkeys([*entry["mentions"], *mentions]))
         entry["evidence"] = list(dict.fromkeys([*entry["evidence"], *ids]))
         if entry["canonical"] is None and value.canonical:
             entry["canonical"] = value.canonical
         if entry["url"] is None and value.url:
             entry["url"] = value.url
+    for key in order:
+        seen_types = types[key]
+        counts = Counter(seen_types)
+        first_index: dict[EntityType, int] = {}
+        for index, kind in enumerate(seen_types):
+            first_index.setdefault(kind, index)
+        merged[key]["type"] = max(counts, key=lambda kind: (counts[kind], -first_index[kind]))
     return [
         Entity(
             text=merged[key]["text"],
@@ -421,23 +487,57 @@ def _entities(values: Sequence[_LlmEntity], scope: _EvidenceScope) -> list[Entit
     ]
 
 
+def _merge_quote_values(values: Sequence[_LlmKeyQuote]) -> list[_LlmKeyQuote]:
+    """De-duplicate quotes by normalised text and union their cited segment ids."""
+    merged: dict[str, _LlmKeyQuote] = {}
+    order: list[str] = []
+    for value in values:
+        text = value.text.strip()
+        key = _normalise_quote_text(text)
+        if not key:
+            continue
+        ids = list(dict.fromkeys([*value.seg_ids, *value.evidence]))
+        if key not in merged:
+            order.append(key)
+            merged[key] = value.model_copy(update={"text": text, "seg_ids": ids, "evidence": ids})
+            continue
+        entry = merged[key]
+        entry.seg_ids = list(dict.fromkeys([*entry.seg_ids, *ids]))
+        entry.evidence = list(dict.fromkeys([*entry.evidence, *ids]))
+        if not entry.speaker and value.speaker:
+            entry.speaker = value.speaker
+        if not entry.why_notable and value.why_notable:
+            entry.why_notable = value.why_notable
+    return [merged[key] for key in order]
+
+
 def _quotes(values: Sequence[_LlmKeyQuote], scope: _EvidenceScope) -> list[KeyQuote]:
     quotes: list[KeyQuote] = []
-    for value in values:
+    for value in _merge_quote_values(values):
         cited_ids = scope.valid([*value.seg_ids, *value.evidence])
         cited = scope.cited_segments(cited_ids)
         text = value.text.strip()
         if not cited or not text:
             continue
-        reference = " ".join(segment.text for segment in cited)
-        ratio = difflib.SequenceMatcher(
+        needle = _normalise_quote_text(text)
+        ordered = sorted(cited, key=lambda segment: (segment.start, segment.end))
+        best = ordered[0]
+        best_ratio = difflib.SequenceMatcher(
             None,
-            _normalise_quote_text(text),
-            _normalise_quote_text(reference),
+            needle,
+            _normalise_quote_text(" ".join(segment.text for segment in ordered)),
         ).ratio()
-        if ratio < _QUOTE_MATCH_RATIO:
+        for segment in ordered:
+            ratio = difflib.SequenceMatcher(
+                None,
+                needle,
+                _normalise_quote_text(segment.text),
+            ).ratio()
+            if ratio > best_ratio:
+                best, best_ratio = segment, ratio
+        if best_ratio < _QUOTE_MATCH_RATIO:
             continue
-        first = cited[0]
+        first = best
         quotes.append(
             KeyQuote(
                 seg_id=f"seg:{first.id}",
@@ -451,17 +551,43 @@ def _quotes(values: Sequence[_LlmKeyQuote], scope: _EvidenceScope) -> list[KeyQu
 
 
 def _claims(values: Sequence[_LlmClaim], scope: _EvidenceScope, limit: int) -> list[Claim]:
-    claims: list[Claim] = []
-    seen_ids: set[str] = set()
+    merged: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
     for value in values:
-        if len(claims) >= limit:
-            break
+        text = value.text.strip()
+        key = _normalise_quote_text(text)
+        if not key:
+            continue
         ids = scope.valid(value.evidence)
         seg_ids = [item for item in scope.valid(value.seg_ids) if item.startswith("seg:")]
         if not ids and not seg_ids:
             continue
-        evidence = ids or seg_ids
-        identifier = (value.id or "").strip()
+        if key not in merged:
+            order.append(key)
+            merged[key] = {
+                "id": (value.id or "").strip(),
+                "text": text,
+                "speaker": (value.speaker or "").strip(),
+                "seg_ids": seg_ids,
+                "kind": value.kind,
+                "checkworthy": value.checkworthy,
+                "evidence": ids,
+            }
+            continue
+        entry = merged[key]
+        entry["seg_ids"] = list(dict.fromkeys([*entry["seg_ids"], *seg_ids]))
+        entry["evidence"] = list(dict.fromkeys([*entry["evidence"], *ids]))
+        entry["checkworthy"] = entry["checkworthy"] or value.checkworthy
+        if not entry["speaker"] and value.speaker:
+            entry["speaker"] = value.speaker.strip()
+
+    claims: list[Claim] = []
+    seen_ids: set[str] = set()
+    for key in order:
+        if len(claims) >= limit:
+            break
+        entry = merged[key]
+        identifier = entry["id"]
         if not identifier or identifier in seen_ids:
             identifier = f"c{len(claims) + 1}"
             while identifier in seen_ids:
@@ -470,12 +596,12 @@ def _claims(values: Sequence[_LlmClaim], scope: _EvidenceScope, limit: int) -> l
         claims.append(
             Claim(
                 id=identifier,
-                text=value.text.strip(),
-                speaker=(value.speaker or "").strip(),
-                seg_ids=seg_ids,
-                kind=value.kind,
-                checkworthy=value.checkworthy,
-                evidence=evidence,
+                text=entry["text"],
+                speaker=entry["speaker"],
+                seg_ids=entry["seg_ids"],
+                kind=entry["kind"],
+                checkworthy=entry["checkworthy"],
+                evidence=entry["evidence"] or entry["seg_ids"],
             )
         )
     return claims
@@ -633,6 +759,84 @@ def _partials_json(partials: Sequence[_LlmWindow]) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
+def _merged_window(partials: Sequence[_LlmWindow]) -> _LlmWindow:
+    """Concatenate every window's findings; the conversion step de-duplicates them."""
+    return _LlmWindow(
+        chapters=[chapter for partial in partials for chapter in partial.chapters],
+        topics=[topic for partial in partials for topic in partial.topics],
+        entities=[entity for partial in partials for entity in partial.entities],
+        key_quotes=[quote for partial in partials for quote in partial.key_quotes],
+        claims=[claim for partial in partials for claim in partial.claims],
+    )
+
+
+def _reduce_prompt(
+    *,
+    metadata: str,
+    hints: str,
+    partials: str,
+    report_language: str,
+    mode_note: str,
+) -> str:
+    return load_prompt(
+        "content_reduce",
+        metadata=metadata,
+        hints=hints,
+        partials=wrap_data("partials", partials),
+        report_language=report_language,
+        mode_note=mode_note,
+    )
+
+
+def _finalise(
+    analysis: ContentAnalysis,
+    *,
+    metals: Sequence[CallMeta],
+    reasked: Sequence[str],
+    started: float,
+) -> ContentAnalysis:
+    analysis.llm_meta = ContentLlmMeta(
+        calls=len(metals),
+        attempts=sum(meta.attempts for meta in metals),
+        coerced=any(meta.coerced for meta in metals),
+        fallback_used=any(meta.fallback_used for meta in metals),
+        duration_s=round(time.monotonic() - started, 3),
+        completeness=_completeness(analysis),
+        reasked=list(reasked),
+    )
+    return analysis
+
+
+async def _music_analysis(
+    *,
+    llm: LLMClient,
+    metadata: str,
+    hints: str,
+    report_language: str,
+    scope: _EvidenceScope,
+    duration: float,
+    depth: Depth,
+) -> tuple[ContentAnalysis, list[CallMeta]]:
+    """Music/ambient mode: summary and context from metadata, no transcript findings."""
+    prompt = _reduce_prompt(
+        metadata=metadata,
+        hints=hints,
+        partials="[]",
+        report_language=report_language,
+        mode_note=_MUSIC_NOTE,
+    )
+    result = await _call(
+        llm,
+        prompt=prompt,
+        model_cls=_LlmQuick,
+        tool_name="record_content",
+        tool_description="Record a metadata-only summary and context for non-speech audio.",
+    )
+    analysis = _to_analysis(result.value, scope, duration, depth)
+    analysis.review_flags = [ReviewFlag(severity="warn", field="content", message=_MUSIC_REVIEW_MESSAGE)]
+    return analysis, [result.meta]
+
+
 async def analyse_content(
     transcript: Transcript,
     meta: Mapping[str, str],
@@ -641,6 +845,7 @@ async def analyse_content(
     settings: Settings,
     *,
     llm: LLMClient,
+    music: bool = False,
 ) -> ContentAnalysis:
     """Analyse a transcript into evidence-cited report sections (docs/04 §6)."""
     started = time.monotonic()
@@ -655,6 +860,18 @@ async def analyse_content(
     metals: list[CallMeta] = []
     reasked: list[str] = []
     analysis: ContentAnalysis
+
+    if music:
+        analysis, metals = await _music_analysis(
+            llm=llm,
+            metadata=metadata,
+            hints=hints_block,
+            report_language=report_language,
+            scope=scope,
+            duration=duration,
+            depth=depth,
+        )
+        return _finalise(analysis, metals=metals, reasked=reasked, started=started)
 
     if len(rendered) <= settings.LLM_CONTEXT_CHARS:
         prompt = load_prompt(
@@ -715,37 +932,33 @@ async def analyse_content(
         )
         metals.extend(result.meta for result in window_results)
         partials = [result.value for result in window_results]
-        reduce_prompt = load_prompt(
-            "content_reduce",
+        merged = _merged_window(partials)
+        reduce_prompt = _reduce_prompt(
             metadata=metadata,
             hints=hints_block,
-            partials=wrap_data("partials", _partials_json(partials)),
+            partials=_partials_json(partials),
             report_language=report_language,
-            chapter_guidance=chapter_guidance,
-            claim_limit=str(claim_limit),
+            mode_note=_REDUCE_NOTE,
         )
+        reduced = await _call(
+            llm,
+            prompt=reduce_prompt,
+            model_cls=_LlmQuick,
+            tool_name="record_content",
+            tool_description="Record only the overall summary and context.",
+        )
+        metals.append(reduced.meta)
         if depth == "quick":
-            quick_reduced = await _call(
-                llm,
-                prompt=reduce_prompt,
-                model_cls=_LlmQuick,
-                tool_name="record_content",
-                tool_description="Merge the window summaries into a summary and context.",
-            )
-            metals.append(quick_reduced.meta)
-            analysis = _to_analysis(quick_reduced.value, scope, duration, depth)
+            analysis = _to_analysis(reduced.value, scope, duration, depth)
         else:
-            full_reduced = await _call(
-                llm,
-                prompt=reduce_prompt,
-                model_cls=_LlmContent,
-                tool_name="record_content",
-                tool_description="Merge the window findings into one cited content analysis.",
+            raw = _LlmContent(
+                summary=reduced.value.summary,
+                context=reduced.value.context,
+                **merged.model_dump(),
             )
-            metals.append(full_reduced.meta)
             analysis, reask_metals, reasked = await _complete(
                 llm,
-                raw=full_reduced.value,
+                raw=raw,
                 prompt=reduce_prompt,
                 scope=scope,
                 duration=duration,
@@ -754,16 +967,7 @@ async def analyse_content(
             )
             metals.extend(reask_metals)
 
-    analysis.llm_meta = ContentLlmMeta(
-        calls=len(metals),
-        attempts=sum(meta.attempts for meta in metals),
-        coerced=any(meta.coerced for meta in metals),
-        fallback_used=any(meta.fallback_used for meta in metals),
-        duration_s=round(time.monotonic() - started, 3),
-        completeness=_completeness(analysis),
-        reasked=reasked,
-    )
-    return analysis
+    return _finalise(analysis, metals=metals, reasked=reasked, started=started)
 
 
 __all__ = [

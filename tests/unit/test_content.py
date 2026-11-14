@@ -177,7 +177,7 @@ async def test_single_call_produces_validated_analysis_with_normalised_ids(
     assert "<<<DATA:transcript>>>" in prompt
 
 
-async def test_map_reduce_windows_overlap_by_one_segment_and_reduce_sees_every_partial(
+async def test_map_reduce_windows_overlap_by_one_segment_and_reduce_merges_deterministically(
     make_settings: MakeSettings,
 ) -> None:
     settings = make_settings(LLM_CONTEXT_CHARS=110)
@@ -196,16 +196,10 @@ async def test_map_reduce_windows_overlap_by_one_segment_and_reduce_sees_every_p
         }
         for index in range(5)
     ]
-    reduce_arguments = _full_args(
-        entities=[
-            {"text": "Alpha", "entity_type": "person", "evidence": ["seg:0"]},
-            {"text": "alpha", "entity_type": "person", "evidence": ["seg:1"]},
-        ]
-    )
     fake = FakeOllama(
         [
             *[_response(arguments) for arguments in window_arguments],
-            _response(reduce_arguments),
+            _response(_full_args()),
         ]
     )
 
@@ -227,11 +221,195 @@ async def test_map_reduce_windows_overlap_by_one_segment_and_reduce_sees_every_p
     assert "<<<DATA:partials>>>" in reduce_prompt
     assert fake.body(-1)["format"] == "json"
     assert "tools" not in fake.body(-1)
+    # The reduce call has a small schema: summary and context only (verdict 25 D1).
+    schema = json.loads(
+        fake.body(-1)["messages"][0]["content"].split("(field names and allowed values):\n", 1)[1]
+    )
+    assert set(schema["properties"]) == {"summary", "context"}
+
     assert analysis.llm_meta.calls == 6
     assert analysis.llm_meta.attempts == 6
+    assert [entity.text for entity in analysis.entities] == [
+        "Entity0",
+        "Entity1",
+        "Entity2",
+        "Entity3",
+        "Entity4",
+    ]
+    assert analysis.entities[0].evidence == ["seg:0"]
+    assert [topic.label for topic in analysis.topics] == [
+        "topic0",
+        "topic1",
+        "topic2",
+        "topic3",
+        "topic4",
+    ]
+
+
+async def test_deterministic_merge_dedupes_entities_topics_chapters_quotes_and_claims(
+    make_settings: MakeSettings,
+) -> None:
+    settings = make_settings(LLM_CONTEXT_CHARS=110)
+    transcript = _transcript(["alpha beta gamma delta"] * 6)
+    window_arguments = [
+        {
+            "chapters": [
+                {
+                    "title": "Introduction",
+                    "summary": "Opening.",
+                    "first_seg": "seg:0",
+                    "last_seg": "seg:0",
+                    "evidence": ["seg:0"],
+                }
+            ],
+            "topics": [{"label": "Letters", "weight": 0.3, "evidence": ["seg:0"]}],
+            "entities": [
+                {
+                    "text": "Alpha",
+                    "entity_type": "person",
+                    "mentions": ["seg:0"],
+                    "evidence": ["seg:0"],
+                }
+            ],
+            "key_quotes": [
+                {"text": "alpha beta gamma delta", "seg_ids": ["seg:0"], "why_notable": "opening"}
+            ],
+            "claims": [
+                {
+                    "text": "Alpha is first.",
+                    "speaker": "S1",
+                    "seg_ids": ["seg:0"],
+                    "kind": "fact",
+                    "checkworthy": True,
+                    "evidence": ["seg:0"],
+                }
+            ],
+        },
+        {
+            "chapters": [
+                {
+                    "title": "Introduction.",
+                    "summary": "Still opening.",
+                    "first_seg": "seg:1",
+                    "last_seg": "seg:1",
+                    "evidence": ["seg:1"],
+                }
+            ],
+            "topics": [{"label": "letters", "weight": 0.9, "evidence": ["seg:1"]}],
+            "entities": [
+                {
+                    "text": "alpha",
+                    "entity_type": "place",
+                    "mentions": ["seg:1"],
+                    "evidence": ["seg:1"],
+                }
+            ],
+            "key_quotes": [{"text": "Alpha beta gamma delta", "seg_ids": ["seg:1"], "why_notable": "repeat"}],
+            "claims": [
+                {
+                    "text": "alpha is first!",
+                    "speaker": "",
+                    "seg_ids": ["seg:1"],
+                    "kind": "fact",
+                    "checkworthy": False,
+                    "evidence": ["seg:1"],
+                }
+            ],
+        },
+        {
+            "chapters": [
+                {
+                    "title": "Middle",
+                    "summary": "The middle.",
+                    "first_seg": "seg:2",
+                    "last_seg": "seg:2",
+                    "evidence": ["seg:2"],
+                }
+            ],
+            "topics": [{"label": "Greek", "weight": 0.5, "evidence": ["seg:2"]}],
+            "entities": [
+                {
+                    "text": "Alpha",
+                    "entity_type": "person",
+                    "mentions": ["seg:2"],
+                    "evidence": ["seg:2"],
+                }
+            ],
+        },
+    ]
+    fake = FakeOllama(
+        [
+            *[_response(arguments) for arguments in window_arguments],
+            *[_response({}) for _ in range(2)],
+            _response(_full_args()),
+        ]
+    )
+
+    analysis = await _analyse(settings, fake, transcript)
+
+    # Entity: one entry, majority type (person 2 vs place 1), evidence unioned.
     assert len(analysis.entities) == 1
     assert analysis.entities[0].text == "Alpha"
-    assert analysis.entities[0].evidence == ["seg:0", "seg:1"]
+    assert analysis.entities[0].type == "person"
+    assert analysis.entities[0].evidence == ["seg:0", "seg:1", "seg:2"]
+    assert analysis.entities[0].mentions == ["seg:0", "seg:1", "seg:2"]
+
+    # Topic: one per normalised label, weight = max, evidence unioned.
+    assert [(topic.label, topic.weight) for topic in analysis.topics] == [
+        ("Letters", 0.9),
+        ("Greek", 0.5),
+    ]
+    assert analysis.topics[0].evidence == ["seg:0", "seg:1"]
+
+    # Chapters: time order, adjacent near-identical titles merged.
+    assert [(chapter.title, chapter.start, chapter.end) for chapter in analysis.chapters] == [
+        ("Introduction", 0.0, 10.0),
+        ("Middle", 10.0, 15.0),
+    ]
+    assert analysis.chapters[0].evidence == ["seg:0", "seg:1"]
+
+    # Quote: deduped by normalised text, matched against the best cited segment.
+    assert len(analysis.key_quotes) == 1
+    assert analysis.key_quotes[0].seg_id == "seg:0"
+
+    # Claim: deduped by normalised text, evidence unioned, checkworthy preserved.
+    assert len(analysis.claims) == 1
+    assert analysis.claims[0].text == "Alpha is first."
+    assert analysis.claims[0].evidence == ["seg:0", "seg:1"]
+    assert analysis.claims[0].checkworthy is True
+
+
+async def test_music_mode_analyses_metadata_only_and_flags_non_speech_audio(
+    make_settings: MakeSettings,
+) -> None:
+    settings = make_settings()
+    fake = FakeOllama([_response(_full_args())])
+    transcript = _transcript(["🎵🎵🎵"] * 3)
+
+    http, client = _client(settings, fake)
+    try:
+        analysis = await analyse_content(
+            transcript,
+            _META,
+            ["a caller hint"],
+            JobOptions(),
+            settings,
+            llm=client,
+            music=True,
+        )
+    finally:
+        await http.aclose()
+
+    assert len(fake.requests) == 1
+    prompt = fake.body()["messages"][1]["content"]
+    assert "[meta:title] A talk" in prompt
+    assert "[seg:0]" not in prompt
+    assert "non-speech audio" in prompt
+    assert analysis.key_quotes == []
+    assert analysis.claims == []
+    assert analysis.chapters == []
+    assert [flag.message for flag in analysis.review_flags] == ["non-speech audio"]
+    assert analysis.review_flags[0].severity == "warn"
 
 
 async def test_chapters_are_derived_from_first_and_last_segment_ids(
@@ -340,6 +518,29 @@ async def test_quotes_are_kept_only_when_they_fuzzy_match_the_cited_segments(
     assert quote.start == 5.0
     assert quote.text == "Epsilon zeta eta theta"
     assert quote.why_notable == "exact"
+
+
+async def test_quote_spanning_two_segments_matches_the_joined_text(
+    make_settings: MakeSettings,
+) -> None:
+    settings = make_settings()
+    arguments = _full_args(
+        key_quotes=[
+            {
+                "text": "epsilon zeta eta theta",
+                "seg_ids": ["seg:1", "seg:2"],
+                "why_notable": "spans two segments",
+            }
+        ]
+    )
+    fake = FakeOllama([_response(arguments)])
+    transcript = _transcript(["alpha beta", "epsilon zeta", "eta theta"])
+
+    analysis = await _analyse(settings, fake, transcript)
+
+    assert len(analysis.key_quotes) == 1
+    assert analysis.key_quotes[0].seg_id == "seg:1"
+    assert analysis.key_quotes[0].start == 5.0
 
 
 async def test_items_without_a_resolving_evidence_id_are_dropped(

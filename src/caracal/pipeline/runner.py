@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ from caracal.db.tables import JOB_TERMINAL_STATUSES
 from caracal.errors import CaracalError, ErrorCode
 from caracal.ingest.ssrf import Resolver
 from caracal.llm.client import LLMClient
+from caracal.log import get_logger
 from caracal.pipeline.stages import (
     CRITICAL_STAGES,
     JobOptions,
@@ -31,6 +33,8 @@ from caracal.pipeline.stages import (
 from caracal.queue import Keys
 from caracal.speakers.diarize import Diarizer
 from caracal.storage import JobFiles
+
+logger = get_logger("caracal.pipeline.runner")
 
 _RETRY_DELAYS: tuple[float, ...] = (2.0, 8.0)
 _CHECKPOINT_TERMINAL = frozenset({"done", "skipped"})
@@ -91,20 +95,23 @@ async def _run_stage(
     fn: StageFn,
     ctx: StageContext,
     deps: RunnerDeps,
-) -> tuple[StageResult | None, CaracalError | None, Exception | None]:
-    """Run one stage function, retrying only retryable :class:`CaracalError` failures."""
+) -> tuple[StageResult | None, CaracalError | None, Exception | None, int]:
+    """Run one stage function, retrying only retryable :class:`CaracalError` failures.
+
+    Returns the outcome plus the number of attempts made, for the ``stage.failed`` log.
+    """
     attempt = 0
     while True:
         try:
-            return await fn(ctx), None, None
+            return await fn(ctx), None, None, attempt + 1
         except CaracalError as exc:
             if exc.retryable and attempt < len(_RETRY_DELAYS):
                 await deps.sleep(_RETRY_DELAYS[attempt])
                 attempt += 1
                 continue
-            return None, exc, None
+            return None, exc, None, attempt + 1
         except Exception as exc:
-            return None, None, exc
+            return None, None, exc, attempt + 1
 
 
 async def run_pipeline(
@@ -228,7 +235,9 @@ async def run_pipeline(
                     ),
                 )
 
-                result, stage_error, other = await _run_stage(active[stage], ctx, deps)
+                started = time.monotonic()
+                result, stage_error, other, attempts = await _run_stage(active[stage], ctx, deps)
+                duration_s = round(time.monotonic() - started, 3)
                 # A stage that was already running when ownership was lost finishes, but its
                 # result must not reach the store or the artifact directory (docs/05 §2).
                 if not await deps.still_owner():
@@ -245,6 +254,26 @@ async def run_pipeline(
                         reason=result.reason,
                     )
                     finished += 1
+                    if result.status == "done":
+                        logger.info(
+                            "stage.done",
+                            extra={
+                                "job_id": str(job_id),
+                                "stage": stage.value,
+                                "duration_s": duration_s,
+                                "attempts": attempts,
+                            },
+                        )
+                    else:
+                        logger.info(
+                            "stage.skipped",
+                            extra={
+                                "job_id": str(job_id),
+                                "stage": stage.value,
+                                "reason": result.reason,
+                                "duration_s": duration_s,
+                            },
+                        )
                     await deps.queue_events(
                         job_id,
                         _event(
@@ -256,6 +285,20 @@ async def run_pipeline(
                     continue
 
                 code, message = _failure(stage_error, other)
+                logger.warning(
+                    "stage.failed %s: %s",
+                    code,
+                    message,
+                    extra={
+                        "job_id": str(job_id),
+                        "stage": stage.value,
+                        "code": code,
+                        "error": message,
+                        "retryable": bool(stage_error is not None and stage_error.retryable),
+                        "attempts": attempts,
+                        "duration_s": duration_s,
+                    },
+                )
                 await deps.repos.jobs.upsert_stage(
                     job_id,
                     stage.value,

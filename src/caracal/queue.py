@@ -16,9 +16,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
 
+from redis import asyncio as redis_asyncio
 from redis.asyncio import Redis
 from redis.exceptions import RedisError, ResponseError
 
+from caracal.config import Settings
 from caracal.errors import CaracalError, ErrorCode
 from caracal.log import get_logger
 
@@ -30,6 +32,14 @@ _RATE_WINDOW_S = 60
 _DEFAULT_LOCK_TTL_MS = 960_000
 _FORBIDDEN_KEY_CHARS = frozenset("*?[]")
 _ACQUIRE_POLL_S = 0.05
+
+#: The consumer blocks for ``block_ms``; the socket must outlive that block or redis-py
+#: raises ``TimeoutError`` at the blocking deadline (verdict 25, measured: BLOCK 5000 timed
+#: out at 5.01 s with the implicit 5 s read timeout).
+_DEFAULT_BLOCK_MS = 5000
+_SOCKET_TIMEOUT_GRACE_S = 10.0
+_SOCKET_CONNECT_TIMEOUT_S = 5.0
+_HEALTH_CHECK_INTERVAL_S = 30
 
 # Release only when we still own the lock; never delete another owner's key.
 _RELEASE_LUA = """
@@ -91,6 +101,24 @@ def _redis_error(operation: str, exc: RedisError) -> CaracalError:
         f"redis {operation} failed",
         {"operation": operation},
         retryable=True,
+    )
+
+
+def make_redis(settings: Settings, *, block_ms: int = _DEFAULT_BLOCK_MS) -> Redis:
+    """The one place that builds a Redis client (verdict 25 D4).
+
+    ``XREADGROUP BLOCK`` holds the connection for ``block_ms``; redis-py's implicit 5 s
+    read timeout would fire first and the worker would log ``queue read failed`` every
+    five seconds. The socket timeout is therefore the block time plus a 10 s grace.
+    """
+    if block_ms < 0:
+        raise ValueError("block_ms must not be negative")
+    return redis_asyncio.from_url(
+        settings.REDIS_URL.get_secret_value(),
+        socket_timeout=block_ms / 1000.0 + _SOCKET_TIMEOUT_GRACE_S,
+        socket_connect_timeout=_SOCKET_CONNECT_TIMEOUT_S,
+        health_check_interval=_HEALTH_CHECK_INTERVAL_S,
+        retry_on_timeout=True,
     )
 
 

@@ -70,8 +70,8 @@ class Stage(StrEnum):
     CHUNK = "chunk"
     TRANSCRIBE = "transcribe"
     LANGID = "langid"
-    PLAN = "plan"
     DIARIZE = "diarize"
+    PLAN = "plan"
     ALIGN = "align"
     VOICEPRINT = "voiceprint"
     CONTENT = "content"
@@ -745,8 +745,33 @@ async def _job_title(ctx: StageContext) -> str | None:
     return job.title if job is not None else None
 
 
+def _speech_share(diarize_output: dict[str, object] | None, duration: float) -> float | None:
+    """Σ exclusive diarization turn durations / audio duration, or ``None`` without a run.
+
+    The exclusive turns do not overlap, so their sum is a direct measure of how much of the
+    file is speech (verdict 25: music 2 %, talk 87 %).
+    """
+    if diarize_output is None or duration <= 0.0:
+        return None
+    raw = diarize_output.get("exclusive_turns")
+    if not isinstance(raw, list):
+        return None
+    spoken = 0.0
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        start = item.get("start")
+        end = item.get("end")
+        if isinstance(start, bool) or isinstance(end, bool):
+            continue
+        if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
+            continue
+        spoken += max(0.0, float(end) - float(start))
+    return min(1.0, spoken / duration)
+
+
 async def stage_plan(ctx: StageContext) -> StageResult:
-    """Build the deterministic stage plan right after language identification (docs/04 §2)."""
+    """Build the deterministic stage plan right after diarization (docs/04 §2)."""
     transcript = _load_transcript(ctx)
     normalize = await _stage_output(ctx, Stage.NORMALIZE)
     if normalize is None:
@@ -763,10 +788,13 @@ async def stage_plan(ctx: StageContext) -> StageResult:
 
     meta = _metadata_mapping(await _ingest_platform(ctx), await _job_title(ctx))
     diarizer_available = ctx.diarizer is not None and ctx.diarizer.available()
+    diarize_output = await _done_output(ctx, Stage.DIARIZE)
+    speech_share = _speech_share(diarize_output, duration_s)
     inputs = PlanInputs(
         duration=duration_s,
         speech_ratio=speech_ratio,
         options=ctx.options,
+        speech_share=speech_share,
         transcript=transcript,
         languages=languages,
         metadata=meta,
@@ -782,6 +810,7 @@ async def stage_plan(ctx: StageContext) -> StageResult:
         extra={
             "job_id": str(ctx.job_id),
             "music_detected": stage_plan_value.music_detected,
+            "speech_share": speech_share,
             "skipped": sorted(stage for stage, enabled in stage_plan_value.run.items() if not enabled),
             "genre": stage_plan_value.content_profile.likely_genre,
         },
@@ -806,6 +835,8 @@ async def stage_content(ctx: StageContext) -> StageResult:
         return StageResult(status="skipped", reason="llm unavailable")
     transcript = _load_transcript(ctx)
     meta = _metadata_mapping(await _ingest_platform(ctx), await _job_title(ctx))
+    plan = await _stage_output(ctx, Stage.PLAN)
+    music = isinstance(plan, dict) and plan.get("music_detected") is True
     analysis = await analyse_content(
         transcript,
         meta,
@@ -813,6 +844,7 @@ async def stage_content(ctx: StageContext) -> StageResult:
         ctx.options,
         ctx.settings,
         llm=ctx.llm,
+        music=music,
     )
     logger.info(
         "content complete",
@@ -874,10 +906,12 @@ async def _done_output(ctx: StageContext, stage: Stage) -> dict[str, object] | N
 
 
 async def stage_diarize(ctx: StageContext) -> StageResult:
-    """Separate speakers with pyannote and checkpoint the turns and embeddings (docs/04 §5)."""
-    plan_reason = await _plan_skip(ctx, Stage.DIARIZE)
-    if plan_reason is not None:
-        return StageResult(status="skipped", reason=plan_reason)
+    """Separate speakers with pyannote and checkpoint the turns and embeddings (docs/04 §5).
+
+    Diarization runs before the plan so its speech share can drive the music rule, so it
+    is not gated by a plan checkpoint; only the caller's option and model availability
+    can skip it.
+    """
     diarizer = ctx.diarizer
     if ctx.options.diarize == "off" or diarizer is None or not diarizer.available():
         return StageResult(status="skipped", reason="unavailable")

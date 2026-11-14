@@ -129,14 +129,16 @@ async def test_music_rule_skips_speakers_and_rewrites_languages_without_an_llm_c
 
     assert fake.requests == []
     assert result.music_detected is True
-    assert result.run["diarize"] is False
+    # Diarization runs before the plan, so the planner never skips it (verdict 25 D3).
+    assert result.run["diarize"] is True
+    assert "diarize" not in result.reasons
     assert result.run["align"] is False
     assert result.run["voiceprint"] is False
     assert result.run["identity"] is False
     assert result.run["verify"] is False
     assert result.run["translate"] is False
     assert result.run["content"] is True
-    assert result.reasons["diarize"] == MUSIC_REASON
+    assert result.reasons["align"] == MUSIC_REASON
     assert result.reasons["content"] == "music: describe the track, not speech"
     assert result.languages == [
         {
@@ -149,14 +151,55 @@ async def test_music_rule_skips_speakers_and_rewrites_languages_without_an_llm_c
     ]
 
 
-def test_music_threshold_is_seventy_percent_of_speech_time() -> None:
+def test_music_text_fallback_is_seventy_percent_of_speech_time() -> None:
     music = _transcript(["🎵🎵🎵"] * 7 + ["hello there"] * 3)
     lyrics = _transcript(["la la la"] * 7 + ["🎵🎵🎵"] * 3)
 
     from caracal.analysis.planner import _music_detected
 
-    assert _music_detected(music) is True
-    assert _music_detected(lyrics) is False
+    assert _music_detected(music, None) is True
+    assert _music_detected(lyrics, None) is False
+
+
+async def test_diarization_speech_share_decides_music_without_an_llm_call(
+    make_settings: MakeSettings,
+) -> None:
+    settings = make_settings()
+    music_fake = FakeOllama([])
+    music_http, music_client = _client(settings, music_fake)
+    try:
+        music = await plan(
+            _inputs(
+                transcript=_transcript(["Utak lyder", "Norske musik"] * 3),
+                speech_share=0.02,
+            ),
+            llm=music_client,
+        )
+    finally:
+        await music_http.aclose()
+
+    speech_fake = FakeOllama([_profile_response()])
+    speech_http, speech_client = _client(settings, speech_fake)
+    try:
+        speech = await plan(
+            _inputs(
+                transcript=_transcript(["🎵🎵🎵"] * 6),
+                speech_share=0.87,
+            ),
+            llm=speech_client,
+        )
+    finally:
+        await speech_http.aclose()
+
+    assert music_fake.requests == []
+    assert music.music_detected is True
+    assert music.run["content"] is True
+    assert music.languages is not None and music.languages[0]["code"] == "und"
+    assert len(speech_fake.requests) == 1
+    assert speech.music_detected is False
+    assert speech.run["diarize"] is True
+    assert speech.run["content"] is True
+    assert speech.languages is None
 
 
 async def test_lyrics_with_words_are_not_music_and_the_profile_is_used(

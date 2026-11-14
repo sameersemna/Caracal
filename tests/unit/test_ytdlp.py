@@ -167,7 +167,10 @@ def _files(tmp_path: Path) -> JobFiles:
 # --- options builder (docs/06 S4) -----------------------------------------------------
 
 
-def test_metadata_options_are_exactly_the_hardened_set(make_settings: Any, tmp_path: Path) -> None:
+def test_metadata_options_are_exactly_the_hardened_set(
+    make_settings: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("caracal.ingest.ytdlp.shutil.which", lambda name: "/opt/node/bin/node")
     settings: Settings = make_settings(
         CARACAL_MAX_UPLOAD_MB=10,
         CARACAL_MAX_DURATION_S=60,
@@ -193,6 +196,7 @@ def test_metadata_options_are_exactly_the_hardened_set(make_settings: Any, tmp_p
     assert options["postprocessors"] == []
     assert options["skip_download"] is True
     assert options["cookiefile"] == str(tmp_path / "cookies.txt")
+    assert options["js_runtimes"] == {"node": {"path": "/opt/node/bin/node"}}
     assert len(options["progress_hooks"]) == 1
     assert callable(options["match_filter"])
 
@@ -689,3 +693,16 @@ def test_curl_cffi_is_installed_for_ytdlp_impersonation() -> None:
     import curl_cffi
 
     assert curl_cffi.__version__ == "0.17.0"
+
+
+def test_js_runtimes_is_absent_when_node_is_not_on_path(
+    make_settings: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("caracal.ingest.ytdlp.shutil.which", lambda name: None)
+    options = build_options(
+        make_settings(),
+        dest_dir=tmp_path,
+        cancel=threading.Event(),
+        purpose="audio",
+    )
+    assert "js_runtimes" not in options
