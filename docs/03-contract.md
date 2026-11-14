@@ -78,7 +78,7 @@ asynchronous. Inputs validated with pydantic; errors raised as MCP tool errors c
 
 | Tool | Inputs | Output |
 |---|---|---|
-| `analyze_audio` | `url?`, `upload_id?`, `audio_base64?` (≤ 25 MB decoded), `filename?`, `options?` (JobCreate.options), `wait_seconds` (0–600, default 120) | If done within `wait_seconds`: `{"job_id","status":"done","report_summary": ReportSummary,"links"}`; else `{"job_id","status","progress","hint":"call get_job / get_report later"}` |
+| `analyze_audio` | `url?`, `upload_id?`, `audio_base64?` (≤ 25 MB decoded), `filename?`, `options?` (JobCreate.options), `wait_seconds` (0–600, default 120) | If done within `wait_seconds`: `{"job_id","status":"done","report_summary": ReportSummary,"summary": {title,duration_s,languages,transcript_preview} (kept from M1),"links"}`; else `{"job_id","status","progress","hint":"call get_job / get_report later"}` |
 | `get_job` | `job_id` | JobStatus |
 | `get_report` | `job_id`, `sections?` (subset of top-level Report keys), `format` = `json|markdown` | Report (filtered) |
 | `get_transcript` | `job_id`, `format` = `text|json|srt|vtt`, `lang` = `source` | string or JSON |
