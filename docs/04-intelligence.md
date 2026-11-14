@@ -155,7 +155,11 @@ Per speaker label, collect candidates from these **sources**, each producing `(n
 Fusion: `confidence = 1 − Π(1 − score_i)` over independent sources for the same normalised name, capped at 0.98;
 conflicting names → keep all as candidates, `name` = top candidate only if it leads the second by ≥ 0.2,
 otherwise `name: null` with a ReviewFlag "ambiguous identity". A name with only one `metadata` source is never
-promoted to `name` (stays a candidate). Implemented deterministically; the LLM only extracts mentions
+promoted to `name` (stays a candidate) — **except the sole-speaker case**: when one label has ≥ 90 % of talk time and a person name
+appears in `meta:title` / `meta:uploader` / `meta:channel` and is also recognised as a `person` entity by content analysis, the metadata
+score is 0.75 and the name may be promoted (measured case: TED "… | Daniel Levitin | TED", one speaker, 100 % talk time).
+The `description` field describes **role and context only** (e.g. "presents the talk; appears to be the channel owner"); it never
+infers protected attributes (gender, age, ethnicity, religion, health) from the voice or the text. Implemented deterministically; the LLM only extracts mentions
 (`identity_mentions.md`) and writes the `description`/`role` fields.
 
 ## 8. Cross-verification (`analysis/verify.py`)
