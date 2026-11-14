@@ -11,6 +11,14 @@ The stage is deliberately split in two halves:
   speakers are produced by :func:`caracal.analysis.identity.apply_web_sources`, which re-runs
   the documented fusion instead of duplicating it.
 
+A proposed full name or quote attribution that appears on fewer than two registrable domains
+gets **one** corroboration search — ``"<full name>" <channel/show/title>`` or
+``"<quote>" <attributed_to>`` — through the same router (budget and cache apply). The new hits
+join the target's hits with fresh global ``web:`` ids and every deterministic check runs again
+over the combined set, so a name found on one domain can still be promoted when the follow-up
+finds independent agreement. The verification rationale records ``corroborated: true`` when
+that follow-up is what satisfies the two-domain rule.
+
 Search goes through :class:`caracal.search.router.SearchRouter`, so the per-job budget, the
 24 h cache, provider fallback and per-provider rate limits all apply (docs/04 §8, docs/01 §5).
 Web text is untrusted data: every hit is wrapped in a DATA block before the LLM sees it
@@ -23,6 +31,7 @@ import re
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from typing import Final, Literal, Protocol
 from urllib.parse import urlsplit
 
@@ -176,6 +185,48 @@ class VerifyResult:
     hits: list[VerifyHit]
     queries_used: int
     cost_usd: float
+
+
+@dataclass
+class _SearchState:
+    """The stage's shared search accounting: global hit ids, query count and cost.
+
+    Every search — the planned queries, the deterministic claim retry and a corroboration
+    follow-up — goes through :meth:`run`, so ``web:<n>`` numbering follows global call order
+    and the budget/cost totals in :class:`VerifyResult` include the follow-up.
+    """
+
+    search: SearchService
+    job_id: str | uuid.UUID
+    budget_exhausted: Callable[[], Awaitable[bool]]
+    all_hits: list[VerifyHit] = dataclass_field(default_factory=list)
+    queries_used: int = 0
+    cost_usd: float = 0.0
+
+    async def run(self, query: str) -> tuple[list[VerifyHit], bool]:
+        """Search one query, record its hits and report whether the budget refused it."""
+        result: SearchResult = await self.search.search(query, job_id=self.job_id, limit=SEARCH_LIMIT)
+        self.queries_used += 1
+        self.cost_usd += result.cost_usd
+        added: list[VerifyHit] = []
+        for hit in result.hits:
+            item = VerifyHit(
+                id=f"web:{len(self.all_hits) + 1}",
+                provider=hit.provider,
+                query=query,
+                url=hit.url,
+                title=hit.title,
+                snippet=hit.snippet,
+                text=hit.text,
+            )
+            self.all_hits.append(item)
+            added.append(item)
+        refused = not result.hits and await self.budget_exhausted()
+        return added, refused
+
+    async def has_budget(self) -> bool:
+        """Whether a further query may run (the caller's Redis budget probe)."""
+        return not await self.budget_exhausted()
 
 
 class _LlmQueryTarget(BaseModel):
@@ -778,11 +829,82 @@ def _identity_sources(
     )
 
 
+def _proposed_name(target: VerifyTarget, answer: _LlmIdentityResult) -> str | None:
+    """The web-proposed name worth a corroboration search, or ``None``.
+
+    An identity answer must be supported and its ``full_name`` must contain the candidate
+    (the same token check the promotion rule applies); a quote attribution only needs a name.
+    """
+    if target.kind == "identity_confirm":
+        candidate = _clean(target.candidate or target.text)
+        full_name = _clean(answer.full_name) if answer.full_name else ""
+        if not answer.supported or not full_name or not _name_contains_candidate(full_name, candidate):
+            return None
+        return full_name
+    attributed = _clean(answer.attributed_to) if answer.attributed_to else ""
+    return attributed or None
+
+
+def _corroboration_context(metadata: Mapping[str, str]) -> str:
+    """The channel/show/title phrase a name corroboration query appends."""
+    for name in ("channel", "title", "uploader"):
+        value = _clean(metadata.get(name))
+        if value:
+            return value
+    return ""
+
+
+def _corroboration_query(target: VerifyTarget, name: str, metadata: Mapping[str, str]) -> str:
+    """The single follow-up query for a thin name match (card 32, verdict 31).
+
+    Identity: ``"<full name>" <channel/show/title>``. Quote attribution:
+    ``"<quote>" <attributed_to>``. Both keep the documented search shapes.
+    """
+    if target.kind == "quote_attribution":
+        return normalise_query(f'"{_quote_sentence(target.text)}" {name}')
+    context = _corroboration_context(metadata)
+    return normalise_query(f'"{name}" {context}' if context else f'"{name}"')
+
+
+async def _corroborate(
+    state: _SearchState,
+    target: VerifyTarget,
+    answer: _LlmIdentityResult,
+    hits: list[VerifyHit],
+    metadata: Mapping[str, str],
+) -> tuple[list[VerifyHit], bool]:
+    """Run at most one follow-up search when the proposed name has fewer than two domains.
+
+    The follow-up goes through the same router as every other query (budget and cache
+    apply); its hits get fresh global ``web:`` ids and join the target's hits, after which
+    the caller re-applies the deterministic checks. Returns the combined hits and whether
+    the two-domain rule now holds because of the follow-up.
+    """
+    name = _proposed_name(target, answer)
+    if name is None:
+        return hits, False
+    if len(_distinct_domains([hit for hit in hits if _name_in_hit(name, hit)])) >= 2:
+        return hits, False
+    query = _corroboration_query(target, name, metadata)
+    if not query or any(hit.query == query for hit in hits):
+        return hits, False
+    if not await state.has_budget():
+        return hits, False
+    added, _refused = await state.run(query)
+    known = {hit.id for hit in hits}
+    merged = list(hits)
+    merged.extend(hit for hit in added if hit.id not in known)
+    domains = _distinct_domains([hit for hit in merged if _name_in_hit(name, hit)])
+    return merged, len(domains) >= 2
+
+
 async def _identity_web(
     llm: LLMClient,
+    state: _SearchState,
     targets: Sequence[VerifyTarget],
     hits_by_target: Mapping[str, Sequence[VerifyHit]],
     exhausted: frozenset[str],
+    metadata: Mapping[str, str],
     report_language: str,
 ) -> tuple[list[WebSource], list[Verification]]:
     """One JSON-mode call for every identity/quote target that produced hits."""
@@ -824,7 +946,7 @@ async def _identity_web(
         if target.target in exhausted:
             verifications.append(_unverified(target, "search budget exhausted"))
             continue
-        hits = hits_by_target.get(target.target, [])
+        hits = list(hits_by_target.get(target.target, []))
         if not hits:
             verifications.append(_unverified(target, "no search results"))
             continue
@@ -832,7 +954,12 @@ async def _identity_web(
         if answer is None:
             verifications.append(_unverified(target, "no independent web evidence"))
             continue
+        hits, corroborated = await _corroborate(state, target, answer, hits, metadata)
         source, verification = _identity_sources(target, answer, hits)
+        if corroborated and verification.verdict != "unverified":
+            verification = verification.model_copy(
+                update={"rationale": f"{verification.rationale}; corroborated: true"}
+            )
         if source is not None:
             sources.append(source)
         verifications.append(verification)
@@ -840,13 +967,11 @@ async def _identity_web(
 
 
 async def _search_targets(
-    search: SearchService,
+    state: _SearchState,
     targets: Sequence[VerifyTarget],
     queries: Mapping[str, Sequence[str]],
     fallback_queries: Mapping[str, str],
-    job_id: str | uuid.UUID,
-    budget_exhausted: Callable[[], Awaitable[bool]],
-) -> tuple[dict[str, list[VerifyHit]], list[VerifyHit], int, float, frozenset[str]]:
+) -> tuple[dict[str, list[VerifyHit]], frozenset[str]]:
     """Run every query, number hits globally and stop cleanly on an exhausted budget.
 
     A claim whose generated queries all return nothing gets one deterministic retry with the
@@ -854,51 +979,31 @@ async def _search_targets(
     quote queries already carry their deterministic shape and are not retried.
     """
     by_target: dict[str, list[VerifyHit]] = {target.target: [] for target in targets}
-    all_hits: list[VerifyHit] = []
     exhausted_targets: set[str] = set()
-    queries_used = 0
-    cost_usd = 0.0
-    counter = 0
     exhausted = False
 
-    async def run(target: VerifyTarget, query: str) -> bool:
-        """Search one query and record its hits; returns whether the budget was refused."""
-        nonlocal queries_used, cost_usd, counter
-        result: SearchResult = await search.search(query, job_id=job_id, limit=SEARCH_LIMIT)
-        queries_used += 1
-        cost_usd += result.cost_usd
-        for hit in result.hits:
-            counter += 1
-            item = VerifyHit(
-                id=f"web:{counter}",
-                provider=hit.provider,
-                query=query,
-                url=hit.url,
-                title=hit.title,
-                snippet=hit.snippet,
-                text=hit.text,
-            )
-            all_hits.append(item)
-            by_target[target.target].append(item)
-        return not result.hits and await budget_exhausted()
-
     for target in targets:
-        if exhausted or await budget_exhausted():
+        if exhausted or not await state.has_budget():
             exhausted = True
             exhausted_targets.add(target.target)
             continue
         used = list(queries.get(target.target, ()))
         for query in used:
-            if await run(target, query):
+            added, refused = await state.run(query)
+            by_target[target.target].extend(added)
+            if refused:
                 exhausted = True
                 break
         if not exhausted and not by_target[target.target] and len(used) < MAX_QUERIES_PER_TARGET:
             fallback = fallback_queries.get(target.target)
-            if fallback and fallback not in used and await run(target, fallback):
-                exhausted = True
+            if fallback and fallback not in used:
+                added, refused = await state.run(fallback)
+                by_target[target.target].extend(added)
+                if refused:
+                    exhausted = True
         if exhausted and not by_target[target.target]:
             exhausted_targets.add(target.target)
-    return by_target, all_hits, queries_used, cost_usd, frozenset(exhausted_targets)
+    return by_target, frozenset(exhausted_targets)
 
 
 async def verify(
@@ -941,14 +1046,8 @@ async def verify(
         for target in targets
         if target.kind == "claim"
     }
-    by_target, all_hits, queries_used, cost_usd, exhausted = await _search_targets(
-        search,
-        targets,
-        queries,
-        fallback_queries,
-        job_id,
-        budget_exhausted,
-    )
+    state = _SearchState(search=search, job_id=job_id, budget_exhausted=budget_exhausted)
+    by_target, exhausted = await _search_targets(state, targets, queries, fallback_queries)
 
     verifications: list[Verification] = []
     for target in targets:
@@ -974,15 +1073,20 @@ async def verify(
     identity_targets = [target for target in targets if target.kind != "claim"]
     web_sources, identity_verifications = await _identity_web(
         llm,
+        state,
         identity_targets,
         by_target,
         exhausted,
+        metadata,
         settings.CARACAL_REPORT_LANGUAGE,
     )
     verifications.extend(identity_verifications)
     order = {target.target: position for position, target in enumerate(targets)}
     verifications.sort(key=lambda verification: order.get(verification.target, len(order)))
     refined = apply_web_sources(speakers, flags, web_sources)
+    all_hits = state.all_hits
+    queries_used = state.queries_used
+    cost_usd = state.cost_usd
 
     logger.info(
         "verify complete",

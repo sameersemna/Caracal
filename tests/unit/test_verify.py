@@ -123,13 +123,21 @@ class ScriptedRouter:
         outcomes: Sequence[list[SearchHit]],
         *,
         exhaust_after: int | None = None,
+        budget_after_calls: int | None = None,
         cost_per_call: float = 0.007,
     ) -> None:
         self.outcomes = list(outcomes)
         self.exhaust_after = exhaust_after
+        self.budget_after_calls = budget_after_calls
         self.cost_per_call = cost_per_call
         self.calls: list[str] = []
         self.exhausted = False
+
+    async def budget_exhausted(self) -> bool:
+        """The probe the stage reads: refused or spent after ``budget_after_calls`` calls."""
+        if self.exhausted:
+            return True
+        return self.budget_after_calls is not None and len(self.calls) >= self.budget_after_calls
 
     async def search(self, query: str, *, job_id: str | uuid.UUID, limit: int = 5) -> SearchResult:
         self.calls.append(query)
@@ -155,6 +163,48 @@ async def _fixture_hits(name: str) -> list[SearchHit]:
         return await BraveProvider("test-key", http).search("q", limit=5)
 
 
+async def _brave_hits_from(body: dict[str, Any]) -> list[SearchHit]:
+    """Parse an embedded Brave response body through the real provider parser."""
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=body))
+    async with httpx.AsyncClient(transport=transport) as http:
+        return await BraveProvider("test-key", http).search("q", limit=5)
+
+
+#: The judge's probe for verdict 31 (2026-11-14): ``"Lindsay McMahon" All Ears English``
+#: returned McMahon on four distinct registrable domains through Brave. Recorded here as data
+#: because the fixture directory is outside this card's file scope.
+LINDSAY_CORROBORATION_BODY: dict[str, Any] = {
+    "web": {
+        "results": [
+            {
+                "url": "https://podcasts.apple.com/us/podcast/all-ears-english-podcast/id751574016",
+                "title": "All Ears English Podcast - Podcast - Apple Podcasts",
+                "description": (
+                    "<strong>Lindsay McMahon</strong> and Michelle Kaplan host the All Ears English Podcast."
+                ),
+            },
+            {
+                "url": "https://www.broadwaypodcastnetwork.com/podcast/all-ears-english",
+                "title": "All Ears English | Broadway Podcast Network",
+                "description": (
+                    "Hosted by Lindsay McMahon, the All Ears English Podcast teaches conversational English."
+                ),
+            },
+            {
+                "url": "https://www.learnoutloud.com/Podcast-Directory/Education/All-Ears-English-Podcast/61054",
+                "title": "All Ears English Podcast",
+                "description": "Lindsay McMahon and Michelle Kaplan help learners speak English.",
+            },
+            {
+                "url": "https://www.linkedin.com/in/lindsaymcmahon/",
+                "title": "Lindsay McMahon - All Ears English Education | LinkedIn",
+                "description": "View Lindsay McMahon's profile on LinkedIn.",
+            },
+        ]
+    }
+}
+
+
 async def _run(
     settings: Settings,
     *,
@@ -165,15 +215,20 @@ async def _run(
     outcomes: Sequence[list[SearchHit]] = (),
     script: Sequence[httpx.Response | BaseException] = (),
     exhaust_after: int | None = None,
+    budget_after_calls: int | None = None,
     metadata: dict[str, str] | None = None,
 ) -> tuple[VerifyResult, FakeOllama, ScriptedRouter]:
     fake = FakeOllama(script)
     http = httpx.AsyncClient(transport=fake.transport())
     llm = LLMClient(settings, http, sleep=_no_sleep)
-    router = ScriptedRouter(outcomes, exhaust_after=exhaust_after)
+    router = ScriptedRouter(
+        outcomes,
+        exhaust_after=exhaust_after,
+        budget_after_calls=budget_after_calls,
+    )
 
     async def budget_exhausted() -> bool:
-        return router.exhausted
+        return await router.budget_exhausted()
 
     try:
         result = await verify(
@@ -328,6 +383,172 @@ async def test_lindsay_confirmation_expands_the_name_and_promotes(
     assert verification.target == "speaker:S1"
     assert verification.verdict == "supported"
     assert {source.evidence_id for source in verification.sources} == {"web:1", "web:4"}
+
+
+async def test_thin_name_match_triggers_one_corroboration_and_promotes(
+    make_settings: MakeSettings,
+) -> None:
+    settings = make_settings(BRAVE_API_KEY="brave-key")
+    recorded = await _fixture_hits("brave_lindsay")
+    # The judge's live trace: only the apple.com hit names McMahon, so one generic query
+    # leaves the expansion on a single domain and the two-domain rule (correctly) rejects it.
+    initial = [recorded[0]]
+    corroboration = await _brave_hits_from(LINDSAY_CORROBORATION_BODY)
+    assert len(corroboration) == 4
+    script = [
+        json_response(_queries("speaker:S1", "Lindsay")),
+        json_response(
+            {
+                "results": [
+                    {
+                        "label": "S1",
+                        "candidate": "Lindsay",
+                        "full_name": "Lindsay McMahon",
+                        "supported": True,
+                        "web_ids": ["web:1"],
+                    }
+                ]
+            }
+        ),
+    ]
+
+    result, _fake, router = await _run(
+        settings,
+        speakers=[_speaker("S1", "Lindsay", 0.55)],
+        outcomes=[initial, corroboration],
+        script=script,
+    )
+
+    assert router.calls == [
+        "Lindsay All Ears English Podcast",
+        '"Lindsay McMahon" All Ears English',
+    ]
+    assert [hit.id for hit in result.hits] == ["web:1", "web:2", "web:3", "web:4", "web:5"]
+    assert result.hits[0].url.startswith("https://podcasts.apple.com/")
+    assert result.hits[1].query == '"Lindsay McMahon" All Ears English'
+    assert result.queries_used == 2
+    assert result.cost_usd == pytest.approx(0.014)
+
+    speaker = result.speakers[0]
+    assert speaker.name == "Lindsay McMahon"
+    assert speaker.confidence == pytest.approx(0.6175)
+    candidate = speaker.candidates[0]
+    assert candidate.name == "Lindsay McMahon"
+    assert "web" in candidate.sources
+    assert {"web:2", "web:3", "web:4", "web:5"} <= set(candidate.evidence)
+
+    verification = result.verifications[0]
+    assert verification.target == "speaker:S1"
+    assert verification.verdict == "supported"
+    assert verification.rationale.endswith("corroborated: true")
+    assert {source.evidence_id for source in verification.sources} >= {"web:2", "web:5"}
+
+
+async def test_budget_exhausted_before_corroboration_keeps_the_confirmed_name(
+    make_settings: MakeSettings,
+) -> None:
+    settings = make_settings(BRAVE_API_KEY="brave-key")
+    recorded = await _fixture_hits("brave_lindsay")
+    script = [
+        json_response(_queries("speaker:S1", "Lindsay")),
+        json_response(
+            {
+                "results": [
+                    {
+                        "label": "S1",
+                        "candidate": "Lindsay",
+                        "full_name": "Lindsay McMahon",
+                        "supported": True,
+                        "web_ids": ["web:1"],
+                    }
+                ]
+            }
+        ),
+    ]
+
+    result, _fake, router = await _run(
+        settings,
+        speakers=[_speaker("S1", "Lindsay", 0.55)],
+        outcomes=[[recorded[0]]],
+        script=script,
+        budget_after_calls=1,
+    )
+
+    assert router.calls == ["Lindsay All Ears English Podcast"]
+    assert result.queries_used == 1
+    assert [hit.id for hit in result.hits] == ["web:1"]
+    # The apple.com hit still confirms the given name, but the expansion is not corroborated.
+    assert result.speakers[0].name == "Lindsay"
+    assert result.speakers[0].candidates[0].name == "Lindsay"
+    verification = result.verifications[0]
+    assert verification.verdict == "supported"
+    assert verification.rationale == "web confirms Lindsay in this recording"
+
+
+async def test_thin_quote_attribution_gets_one_corroboration_search(
+    make_settings: MakeSettings,
+) -> None:
+    settings = make_settings(BRAVE_API_KEY="brave-key")
+    quote = "ask not what your country can do for you ask what you can do for your country"
+    initial = make_hit(
+        "brave",
+        rank=1,
+        url="https://history.example.org/jfk",
+        title="Inaugural address",
+        snippet="John F. Kennedy said ask not what your country can do for you",
+    )
+    corroboration = [
+        make_hit(
+            "brave",
+            rank=1,
+            url="https://www.jfklibrary.org/learn/about-jfk/speech",
+            title="John F. Kennedy inaugural address",
+            snippet=quote,
+        ),
+        make_hit(
+            "brave",
+            rank=2,
+            url="https://www.loc.gov/item/jfk-inaugural",
+            title="Inaugural Address",
+            snippet="Lines attributed to John F. Kennedy",
+        ),
+    ]
+    script = [
+        json_response(_queries("speaker:S1", quote)),
+        json_response(
+            {
+                "results": [
+                    {
+                        "label": "S1",
+                        "candidate": None,
+                        "attributed_to": "John F. Kennedy",
+                        "web_ids": ["web:1"],
+                    }
+                ]
+            }
+        ),
+    ]
+
+    result, _fake, router = await _run(
+        settings,
+        speakers=[_speaker("S1", None, talk_time_s=55.0)],
+        key_quotes=[KeyQuote(seg_id="seg:0", speaker="S1", text=quote, start=0.0, why_notable="x")],
+        outcomes=[[initial], corroboration],
+        script=script,
+    )
+
+    assert router.calls == [f'"{quote}"', f'"{quote}" John F. Kennedy']
+    assert [hit.id for hit in result.hits] == ["web:1", "web:2", "web:3"]
+    candidate = result.speakers[0].candidates[0]
+    assert candidate.name == "John F. Kennedy"
+    assert candidate.confidence == pytest.approx(0.5)
+    assert candidate.sources == ["web"]
+    assert {"web:1", "web:2", "web:3"} <= set(candidate.evidence)
+
+    verification = result.verifications[0]
+    assert verification.verdict == "mixed"
+    assert verification.confidence == pytest.approx(0.5)
+    assert verification.rationale.endswith("corroborated: true")
 
 
 async def test_jfk_quote_attribution_is_a_half_confidence_candidate_only(
