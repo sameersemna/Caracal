@@ -13,6 +13,7 @@ No other module reads `os.environ` (enforced by `scripts/check_rules.py`). Secre
 | `CARACAL_RETENTION_DAYS` | int | `30` | media files deleted after N days; reports kept |
 | `CARACAL_KEEP_MEDIA` | bool | `false` | keep original download after normalize |
 | `DATABASE_URL` | SecretStr | — **required** | any of `postgresql://`, `postgres://`, `postgresql+psycopg://`, `postgresql+asyncpg://`; normalised to `postgresql+asyncpg://` (the owner's `.env` uses `+psycopg`) |
+| `CARACAL_DB_SCHEMA` | str | `public` | Postgres schema for all tables (identifier `^[a-z_][a-z0-9_]{0,62}$`). Live tests use a throwaway schema |
 | `REDIS_URL` | SecretStr | — **required** | `redis://:***@latitude:6379/0` — DB 0 is **shared** with other apps |
 | `REDIS_PREFIX` | str | `caracal:` | prepended to **every** Redis key/channel (docs/05 §2). Must be non-empty and end with `:` (validator appends `:` if missing) |
 | `WHISPER_URL` | str | `http://localhost:8768` | whisper.cpp server |

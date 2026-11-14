@@ -11,7 +11,7 @@ Verified 2026-11-14: PostgreSQL **18.6** on latitude, database `caracal`, user `
 | `job_stages` | `job_id uuid fk cascade`, `name text`, `status text`, `reason text null`, `attempts int`, `started_at`, `ended_at`, pk `(job_id, name)` |
 | `uploads` | `id uuid pk`, `filename text`, `size_bytes bigint`, `sha256 text`, `path text`, `created_at`, `consumed_by uuid null` |
 | `reports` | `job_id uuid pk fk cascade`, `schema_version text`, `report jsonb`, `created_at` |
-| `segments` | `job_id uuid fk cascade`, `seg_id int`, `start real`, `end real`, `speaker text null`, `lang text null`, `text text`, `tsv tsvector generated always as (to_tsvector('simple', text)) stored`, pk `(job_id, seg_id)`, GIN index on `tsv` |
+| `segments` | `job_id uuid fk cascade`, `seg_id int`, `start_s real`, `end_s real`, `speaker text null`, `lang text null`, `text text`, `tsv tsvector generated always as (to_tsvector('simple', text)) stored`, pk `(job_id, seg_id)`, GIN index on `tsv` |
 | `known_speakers` | `id uuid pk`, `name text`, `name_norm text unique`, `notes text null`, `created_at`, `updated_at` |
 | `voiceprints` | `id uuid pk`, `known_speaker_id uuid fk cascade`, `job_id uuid null`, `speaker_label text`, `embedding vector(EMB_DIM)`, `created_at` — HNSW index `vector_cosine_ops` |
 
@@ -20,6 +20,11 @@ Verified 2026-11-14: PostgreSQL **18.6** on latitude, database `caracal`, user `
 
 Dedup: a new job whose source `sha256` (uploads) or `webpage_url` (platform) matches a `done` job from the last
 7 days with identical options returns the existing job id with `"deduplicated": true` unless `options.depth=="deep"`.
+
+Conventions: all ids are `uuid` generated in Python (`uuid.uuid4()`); timestamps `timestamptz` set by the DB
+(`server_default=now()`, updated with `now()` in UPDATE statements); `jsonb` for structured columns; names are
+snake_case; no column is named with a SQL reserved word (hence `start_s`/`end_s`). Everything lives in the schema
+`CARACAL_DB_SCHEMA` (default `public`), including alembic's `alembic_version` table.
 
 ## 2. Redis — every key starts with `REDIS_PREFIX`
 

@@ -49,7 +49,7 @@ src/caracal/
   mcp/server.py          build_mcp(settings) -> FastMCP ; tool functions (docs/03 §3)
   db/engine.py           make_engine(settings), session helpers
   db/tables.py           SQLAlchemy Core Table objects (docs/05 §1)
-  db/repo.py             JobRepo, SpeakerRepo, ReportRepo, SearchRepo (all async)
+  db/repo.py             Protocols + Postgres impls: JobRepo, UploadRepo, ReportRepo, SegmentRepo (T0.2), SpeakerRepo (T2.3)
   migrations/            alembic env + versions
   queue.py               key(*parts), enqueue_job(), JobQueue (Redis Streams consumer), whisper_lock(), publish_event()
   worker.py              Worker.run(): consume loop, heartbeats, XAUTOCLAIM recovery, retention task; run_job(job_id)
