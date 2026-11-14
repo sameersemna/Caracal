@@ -10,10 +10,13 @@ from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import ValidationError
+from redis.asyncio import Redis
 
+from caracal.asr.whisper import WhisperClient
 from caracal.config import Settings
 from caracal.db.tables import JOB_TERMINAL_STATUSES
 from caracal.errors import CaracalError, ErrorCode
+from caracal.ingest.ssrf import Resolver
 from caracal.pipeline.stages import (
     CRITICAL_STAGES,
     JobOptions,
@@ -24,6 +27,7 @@ from caracal.pipeline.stages import (
     StageResult,
     default_registry,
 )
+from caracal.queue import Keys
 from caracal.storage import JobFiles
 
 _RETRY_DELAYS: tuple[float, ...] = (2.0, 8.0)
@@ -49,6 +53,12 @@ class RunnerDeps:
     cancel_check: CancelCheck
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
     still_owner: OwnerCheck = _always_owner
+    # Process-wide stage clients, built once by the worker (docs/01 §4). They stay optional
+    # so the M0 stub registry can run without any network-capable objects.
+    whisper: WhisperClient | None = None
+    resolver: Resolver | None = None
+    redis: Redis | None = None
+    keys: Keys | None = None
 
 
 def _now() -> str:
@@ -159,6 +169,9 @@ async def run_pipeline(
             ),
         )
 
+    async def cancelled() -> bool:
+        return await deps.cancel_check(job_id)
+
     ctx = StageContext(
         job_id=job_id,
         options=options,
@@ -167,6 +180,11 @@ async def run_pipeline(
         repos=deps.repos,
         load=load,
         progress=progress,
+        whisper=deps.whisper,
+        resolver=deps.resolver,
+        redis=deps.redis,
+        keys=deps.keys,
+        cancelled=cancelled,
     )
 
     try:

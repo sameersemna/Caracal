@@ -8,6 +8,7 @@ reproduce the original punctuation and contraction spacing.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -156,11 +157,13 @@ class Word:
         return payload
 
 
-_SENTENCE_PUNCTUATION = frozenset(".,?!;:")
+# A token made only of closing punctuation, quotes or brackets (e.g. ``."``, ``...``,
+# ``"``, ``»``) closes the previous word, so it never gets a leading space.
+_CLOSING_TOKEN_RE = re.compile(r"[.,?!;:…\"'”’»)\]]+")  # noqa: RUF001 - unicode quotes are intentional
 
 
-def _is_sentence_punctuation(text: str) -> bool:
-    return bool(text) and all(character in _SENTENCE_PUNCTUATION for character in text)
+def _is_closing_token(text: str) -> bool:
+    return bool(text) and _CLOSING_TOKEN_RE.fullmatch(text) is not None
 
 
 def join_words(words: Sequence[Word]) -> str:
@@ -168,13 +171,14 @@ def join_words(words: Sequence[Word]) -> str:
 
     One space is inserted before a word only when :attr:`Word.space_before` is ``True``,
     so contractions (``"'t"``) and attached punctuation (``","``) survive the rebuild.
-    A token made only of sentence punctuation (whisper's detached ``"..."``) is attached to
-    the preceding word instead of being rendered as ``"and ..."``. The result is stripped;
-    the first kept word never receives a leading space.
+    A token made only of closing punctuation, quotes or brackets (whisper's detached
+    ``"..."``, ``"."`` or ``."``) is attached to the preceding word instead of being
+    rendered as ``"and ..."``. The result is stripped; the first kept word never receives
+    a leading space.
     """
     parts: list[str] = []
     for word in words:
-        if parts and word.space_before and not _is_sentence_punctuation(word.text):
+        if parts and word.space_before and not _is_closing_token(word.text):
             parts.append(" ")
         parts.append(word.text)
     return "".join(parts).strip()

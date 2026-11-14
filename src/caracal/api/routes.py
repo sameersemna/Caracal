@@ -4,19 +4,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, cast
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from fastapi.routing import APIRoute
 from python_multipart.multipart import parse_options_header
-from starlette.datastructures import Headers
-from starlette.routing import Match
-from starlette.types import Scope
 
 from caracal.api.auth import bearer_token, require_auth
 from caracal.api.schemas import JobCreate, UploadCreated
@@ -40,6 +38,10 @@ public_router = APIRouter()
 router = APIRouter(prefix="/v1", dependencies=[Depends(require_auth)])
 
 _TERMINAL = frozenset(JOB_TERMINAL_STATUSES)
+_SUBTITLE_EXTENSIONS = frozenset({"srt", "vtt"})
+# docs/06 S10: ISO 639-1/3 (+ optional region) or the literal "source".
+_LANGUAGE_TAG_RE = re.compile(r"^[a-z]{2,3}(-[A-Za-z]{2,4})?$|^source$")
+_ACTIVE_STATUSES = frozenset({"queued", "running"})
 
 
 def _deps(request: Request) -> AppDeps:
@@ -156,24 +158,6 @@ def _remove_job_dir(settings: Settings, job_id: uuid.UUID) -> None:
     shutil.rmtree(target, ignore_errors=True)
 
 
-class MultipartUploadRoute(APIRoute):
-    """An ``APIRoute`` that only claims ``multipart/form-data`` requests.
-
-    docs/03 §2 defines ``POST /v1/uploads`` as a multipart endpoint, so a request with any
-    other content type is not this route's business: it falls through the router and
-    :func:`caracal.app.create_app` renders it as 415 rather than a 404.
-    """
-
-    def matches(self, scope: Scope) -> tuple[Match, Scope]:
-        match, child_scope = super().matches(scope)
-        if match is not Match.FULL:
-            return match, child_scope
-        content_type = Headers(scope=scope).get("content-type", "")
-        if not content_type.lower().startswith("multipart/form-data"):
-            return Match.NONE, {}
-        return match, child_scope
-
-
 async def create_upload(request: Request) -> JSONResponse:
     """Stream one multipart ``file`` part to disk (docs/03 §2, docs/06 S6).
 
@@ -192,7 +176,8 @@ async def create_upload(request: Request) -> JSONResponse:
     if not boundary:
         raise CaracalError(ErrorCode.INVALID_INPUT, "multipart boundary is required")
 
-    files = UploadFiles(settings.CARACAL_DATA_DIR, uuid.uuid4())
+    upload_id = uuid.uuid4()
+    files = UploadFiles(settings.CARACAL_DATA_DIR, upload_id)
     info = await receive_upload(
         request.stream(),
         boundary=boundary,
@@ -201,6 +186,7 @@ async def create_upload(request: Request) -> JSONResponse:
     )
     try:
         record = await deps.repos.uploads.create(
+            upload_id=upload_id,
             filename=info.filename,
             size_bytes=info.size_bytes,
             sha256=info.sha256,
@@ -224,12 +210,7 @@ async def create_upload(request: Request) -> JSONResponse:
     return JSONResponse(status_code=201, content=body.model_dump(mode="json"))
 
 
-router.add_api_route(
-    "/uploads",
-    create_upload,
-    methods=["POST"],
-    route_class_override=MultipartUploadRoute,
-)
+router.add_api_route("/uploads", create_upload, methods=["POST"])
 
 
 @router.post("/jobs")
@@ -377,6 +358,104 @@ async def get_job(job_id: uuid.UUID, request: Request) -> dict[str, object]:
     if job is None:
         raise _not_found(job_id)
     return await build_job_status(_settings(request), deps, job)
+
+
+def _missing_artifact(job: JobRecord) -> CaracalError:
+    """404 for a failed job, 409 while the artifact does not exist yet (docs/03 §2)."""
+    if job.status == "failed":
+        return CaracalError(
+            ErrorCode.NOT_FOUND,
+            "artifact not found",
+            {"job_id": str(job.id), "status": job.status},
+        )
+    return CaracalError(
+        ErrorCode.JOB_NOT_READY,
+        "job is not ready",
+        {"job_id": str(job.id), "status": job.status},
+    )
+
+
+def _artifact_json(path: Path) -> dict[str, object]:
+    raw = path.read_text(encoding="utf-8")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise CaracalError(ErrorCode.INTERNAL, "stored transcript is not valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise CaracalError(ErrorCode.INTERNAL, "stored transcript is not a JSON object")
+    return cast("dict[str, object]", payload)
+
+
+def _transcript_languages(files: JobFiles) -> list[object]:
+    checkpoint = files.read_json(files.stage(Stage.LANGID))
+    if not isinstance(checkpoint, dict):
+        return []
+    output = checkpoint.get("output")
+    if not isinstance(output, dict):
+        return []
+    languages = output.get("languages")
+    return cast("list[object]", languages) if isinstance(languages, list) else []
+
+
+@router.get("/jobs/{job_id}/transcript")
+async def get_transcript(
+    job_id: uuid.UUID,
+    request: Request,
+    format: Literal["json", "txt"] = Query(default="json"),
+) -> Response:
+    """Return the merged transcript as JSON or plain text (docs/03 §2)."""
+    deps = _deps(request)
+    job = await deps.repos.jobs.get(job_id)
+    if job is None:
+        raise _not_found(job_id)
+    files = JobFiles(_settings(request).CARACAL_DATA_DIR, job_id)
+
+    if format == "txt":
+        if not files.transcript_txt.is_file():
+            raise _missing_artifact(job)
+        return Response(
+            content=files.transcript_txt.read_text(encoding="utf-8"),
+            media_type="text/plain",
+        )
+    if not files.transcript_json.is_file():
+        raise _missing_artifact(job)
+    payload = _artifact_json(files.transcript_json)
+    payload["job_id"] = str(job_id)
+    payload["languages"] = _transcript_languages(files)
+    return JSONResponse(content=payload)
+
+
+@router.get("/jobs/{job_id}/subtitles/{filename:path}")
+async def get_subtitle(job_id: uuid.UUID, filename: str, request: Request) -> Response:
+    """Serve one rendered subtitle file with its registered content type (docs/03 §2)."""
+    deps = _deps(request)
+    job = await deps.repos.jobs.get(job_id)
+    if job is None:
+        raise _not_found(job_id)
+    if "." not in filename:
+        raise CaracalError(ErrorCode.INVALID_INPUT, "invalid subtitle path", {"filename": filename})
+    lang, ext = filename.rsplit(".", 1)
+    if ext not in _SUBTITLE_EXTENSIONS or _LANGUAGE_TAG_RE.fullmatch(lang) is None:
+        raise CaracalError(ErrorCode.INVALID_INPUT, "invalid subtitle path", {"filename": filename})
+
+    files = JobFiles(_settings(request).CARACAL_DATA_DIR, job_id)
+    path = files.subtitle(lang, ext)
+    if not path.is_file():
+        if job.status == "failed" or (job.status not in _ACTIVE_STATUSES and lang != "source"):
+            # An unknown language never becomes available; a failed job has no artifacts.
+            raise CaracalError(
+                ErrorCode.NOT_FOUND,
+                "subtitle not found",
+                {"job_id": str(job_id), "lang": lang, "ext": ext},
+            )
+        raise _missing_artifact(job)
+
+    media_type = "application/x-subrip" if ext == "srt" else "text/vtt; charset=utf-8"
+    return Response(
+        content=path.read_text(encoding="utf-8"),
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{job_id}.{lang}.{ext}"'},
+    )
 
 
 def _sse(event: str, data: object) -> str:

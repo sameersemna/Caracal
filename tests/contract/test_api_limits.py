@@ -204,9 +204,9 @@ async def test_per_route_limits_let_an_upload_route_declare_a_larger_cap(
 ) -> None:
     h = make_harness()
     upload_cap = 256 * 1024
-    app = create_app(h.settings, h.deps, body_limits={("POST", "/v1/uploads"): upload_cap})
+    app = create_app(h.settings, h.deps, body_limits={("POST", "/v1/_test_upload"): upload_cap})
 
-    @app.post("/v1/uploads")
+    @app.post("/v1/_test_upload")
     async def upload(request: Request) -> dict[str, int]:
         return {"size_bytes": len(await request.body())}
 
@@ -214,7 +214,7 @@ async def test_per_route_limits_let_an_upload_route_declare_a_larger_cap(
     chunks = [payload[offset : offset + 8192] for offset in range(0, len(payload), 8192)]
 
     response, _pulled_chunks, pulled_bytes = await _drive(
-        app, "POST", "/v1/uploads", headers={**AUTH, "transfer-encoding": "chunked"}, chunks=chunks
+        app, "POST", "/v1/_test_upload", headers={**AUTH, "transfer-encoding": "chunked"}, chunks=chunks
     )
 
     assert response.status == 200

@@ -269,13 +269,14 @@ class FakeUploadRepo:
     async def create(
         self,
         *,
+        upload_id: uuid.UUID | None = None,
         filename: str,
         size_bytes: int,
         sha256: str,
         path: str,
     ) -> UploadRecord:
         record = UploadRecord(
-            id=uuid.uuid4(),
+            id=upload_id if upload_id is not None else uuid.uuid4(),
             filename=filename,
             size_bytes=size_bytes,
             sha256=sha256,

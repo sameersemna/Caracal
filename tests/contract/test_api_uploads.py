@@ -174,3 +174,25 @@ async def test_disk_failure_is_500_without_a_path(make_harness: Callable[..., Ha
     payload = response.json()
     assert payload["error"]["code"] == "internal"
     assert str(_uploads_dir(h)) not in payload["error"]["message"]
+
+
+async def test_upload_directory_is_named_after_the_row_id(
+    make_harness: Callable[..., Harness],
+) -> None:
+    """Verdict 08 carry-forward: the route generates the id before writing the file."""
+    h = make_harness()
+    async with h.client() as client:
+        response = await client.post(
+            "/v1/uploads",
+            headers=AUTH,
+            files={"file": ("talk.mp3", b"payload", "audio/mpeg")},
+        )
+    assert response.status_code == 201
+    upload_id = uuid.UUID(response.json()["upload_id"])
+
+    record = await h.repos.uploads.get(upload_id)
+    assert record is not None
+    path = Path(record.path)
+    assert path.parent.name == str(upload_id)
+    assert path.parent.parent == _uploads_dir(h)
+    assert path.name == "talk.mp3"
