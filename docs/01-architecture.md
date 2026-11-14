@@ -55,6 +55,7 @@ src/caracal/
   queue.py               key(*parts), enqueue_job(), JobQueue (Redis Streams consumer), whisper_lock(), publish_event()
   worker.py              Worker.run(): consume loop, heartbeats, XAUTOCLAIM recovery, retention task; run_job(job_id)
   storage.py             JobFiles(job_id): paths for every artifact (docs/05 §3)
+  ops.py                 doctor checks, retention, metrics registry (T4.1)
   ingest/ssrf.py         resolve_and_check(url) -> pinned IP or raise
   ingest/upload.py       save_upload(stream, filename) -> UploadInfo
   ingest/direct.py       download_direct(url, dest) (http(s) media URLs)
