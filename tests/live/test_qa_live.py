@@ -139,7 +139,8 @@ async def test_ted_question_is_cited_and_search_finds_cortisol() -> None:
             job_id,
             "What temperature was it outside when he was locked out?",
         )
-        assert "40" in temperature["answer"]
+        answer_text = temperature["answer"].casefold()
+        assert "40" in answer_text or "forty" in answer_text
         assert temperature["confidence"] > 0
         assert temperature["citations"]
         assert any("40" in citation["text"] for citation in temperature["citations"])
