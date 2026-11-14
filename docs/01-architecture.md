@@ -85,6 +85,7 @@ src/caracal/
   report/model.py        Report and all sub-models (docs/03 §5) — pydantic
   report/evidence.py     EvidenceIndex, validate_citations(report) -> report (drops uncited claims)
   report/render_md.py    render_markdown(report) -> str
+  report/assemble.py     assemble_report(checkpoints, job, settings) -> Report (pure; T2.7)
   subtitles/segmenter.py cues_from_transcript(transcript, max_chars=42, max_lines=2, max_dur=7.0, min_dur=1.0)
   subtitles/formats.py   to_srt(cues), to_vtt(cues)
   pipeline/stages.py     Stage enum + per-stage functions (signature §4)
