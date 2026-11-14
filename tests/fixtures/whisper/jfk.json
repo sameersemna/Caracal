@@ -1,0 +1,266 @@
+{
+    "task": "transcribe",
+    "language": "english",
+    "duration": 11.0,
+    "text": " And so my fellow Americans,\n ask not what your country can do for you,\n ask what you can do for your country.\n",
+    "segments": [
+        {
+            "id": 0,
+            "text": " And so my fellow Americans,",
+            "start": 0.0,
+            "end": 3.0,
+            "tokens": [
+                400,
+                370,
+                452,
+                7177,
+                6280,
+                11
+            ],
+            "words": [
+                {
+                    "word": " And",
+                    "start": 0.22,
+                    "end": 0.22,
+                    "t_dtw": -1,
+                    "probability": 0.8234951496124268
+                },
+                {
+                    "word": " so",
+                    "start": 0.33,
+                    "end": 0.45,
+                    "t_dtw": -1,
+                    "probability": 0.9901846051216125
+                },
+                {
+                    "word": " my",
+                    "start": 0.45,
+                    "end": 0.53,
+                    "t_dtw": -1,
+                    "probability": 0.5291858911514282
+                },
+                {
+                    "word": " fellow",
+                    "start": 0.68,
+                    "end": 1.17,
+                    "t_dtw": -1,
+                    "probability": 0.9960909485816956
+                },
+                {
+                    "word": " Americans",
+                    "start": 1.17,
+                    "end": 1.98,
+                    "t_dtw": -1,
+                    "probability": 0.949456512928009
+                },
+                {
+                    "word": ",",
+                    "start": 1.98,
+                    "end": 2.89,
+                    "t_dtw": -1,
+                    "probability": 0.5649310350418091
+                }
+            ],
+            "temperature": 0.0,
+            "avg_logprob": -0.18341386318206787,
+            "no_speech_prob": 0.023468276485800743
+        },
+        {
+            "id": 1,
+            "text": " ask not what your country can do for you,",
+            "start": 3.0,
+            "end": 8.0,
+            "tokens": [
+                1029,
+                406,
+                437,
+                428,
+                1941,
+                393,
+                360,
+                337,
+                291,
+                11
+            ],
+            "words": [
+                {
+                    "word": " ask",
+                    "start": 3.34,
+                    "end": 3.99,
+                    "t_dtw": -1,
+                    "probability": 0.7464909553527832
+                },
+                {
+                    "word": " not",
+                    "start": 4.0200000000000005,
+                    "end": 4.97,
+                    "t_dtw": -1,
+                    "probability": 0.9457377791404724
+                },
+                {
+                    "word": " what",
+                    "start": 5.01,
+                    "end": 5.11,
+                    "t_dtw": -1,
+                    "probability": 0.8626369833946228
+                },
+                {
+                    "word": " your",
+                    "start": 5.11,
+                    "end": 5.5200000000000005,
+                    "t_dtw": -1,
+                    "probability": 0.9909337759017944
+                },
+                {
+                    "word": " country",
+                    "start": 5.5200000000000005,
+                    "end": 6.0,
+                    "t_dtw": -1,
+                    "probability": 0.9928426742553711
+                },
+                {
+                    "word": " can",
+                    "start": 6.29,
+                    "end": 6.54,
+                    "t_dtw": -1,
+                    "probability": 0.9671335816383362
+                },
+                {
+                    "word": " do",
+                    "start": 6.54,
+                    "end": 6.65,
+                    "t_dtw": -1,
+                    "probability": 0.9977766275405884
+                },
+                {
+                    "word": " for",
+                    "start": 7.01,
+                    "end": 7.28,
+                    "t_dtw": -1,
+                    "probability": 0.99400794506073
+                },
+                {
+                    "word": " you",
+                    "start": 7.28,
+                    "end": 8.0,
+                    "t_dtw": -1,
+                    "probability": 0.9953967332839966
+                },
+                {
+                    "word": ",",
+                    "start": 8.0,
+                    "end": 8.0,
+                    "t_dtw": -1,
+                    "probability": 0.6624179482460022
+                }
+            ],
+            "temperature": 0.0,
+            "avg_logprob": -0.08821279555559158,
+            "no_speech_prob": 0.023468276485800743
+        },
+        {
+            "id": 2,
+            "text": " ask what you can do for your country.",
+            "start": 8.0,
+            "end": 11.0,
+            "tokens": [
+                1029,
+                437,
+                291,
+                393,
+                360,
+                337,
+                428,
+                1941,
+                13
+            ],
+            "words": [
+                {
+                    "word": " ask",
+                    "start": 8.31,
+                    "end": 8.31,
+                    "t_dtw": -1,
+                    "probability": 0.9855485558509827
+                },
+                {
+                    "word": " what",
+                    "start": 8.34,
+                    "end": 8.72,
+                    "t_dtw": -1,
+                    "probability": 0.9985038638114929
+                },
+                {
+                    "word": " you",
+                    "start": 8.72,
+                    "end": 9.03,
+                    "t_dtw": -1,
+                    "probability": 0.9828453660011292
+                },
+                {
+                    "word": " can",
+                    "start": 9.03,
+                    "end": 9.24,
+                    "t_dtw": -1,
+                    "probability": 0.9989839196205139
+                },
+                {
+                    "word": " do",
+                    "start": 9.370000000000001,
+                    "end": 9.540000000000001,
+                    "t_dtw": -1,
+                    "probability": 0.999058187007904
+                },
+                {
+                    "word": " for",
+                    "start": 9.540000000000001,
+                    "end": 9.85,
+                    "t_dtw": -1,
+                    "probability": 0.9980506896972656
+                },
+                {
+                    "word": " your",
+                    "start": 9.85,
+                    "end": 10.1,
+                    "t_dtw": -1,
+                    "probability": 0.9967741370201111
+                },
+                {
+                    "word": " country",
+                    "start": 10.1,
+                    "end": 11.0,
+                    "t_dtw": -1,
+                    "probability": 0.9990506172180176
+                },
+                {
+                    "word": ".",
+                    "start": 11.0,
+                    "end": 11.0,
+                    "t_dtw": -1,
+                    "probability": 0.8604522347450256
+                }
+            ],
+            "temperature": 0.0,
+            "avg_logprob": -0.019174575805664062,
+            "no_speech_prob": 0.023468276485800743
+        }
+    ],
+    "detected_language": "english",
+    "detected_language_probability": 0.9352319240570068,
+    "language_probabilities": {
+        "en": 0.9352319240570068,
+        "de": 0.006257741712033749,
+        "es": 0.009353255853056908,
+        "ru": 0.004449582193046808,
+        "ko": 0.0015131811378523707,
+        "fr": 0.008918438106775284,
+        "pt": 0.010106319561600685,
+        "tr": 0.0010892862919718027,
+        "nl": 0.0012281397357583046,
+        "ar": 0.0016656870720908046,
+        "sv": 0.0013084168313071132,
+        "it": 0.002220491413027048,
+        "la": 0.005356017965823412,
+        "nn": 0.0015169609105214477,
+        "haw": 0.0014186229091137648
+    }
+}
