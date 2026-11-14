@@ -46,7 +46,7 @@ to one side without the other fails the gate.
 | `GET /v1/jobs/{id}/subtitles/{lang}.{ext}` | ext ∈ `srt, vtt` | file (`lang` = `source` or ISO 639-1) |
 | `POST /v1/jobs/{id}/translate` | `{"target_langs": ["de"]}` | `202` — runs translate+subtitles only |
 | `POST /v1/jobs/{id}/ask` | `{"question": "..."}` | `Answer` (§5.9) |
-| `DELETE /v1/jobs/{id}` | — | `204`; cancels if running, deletes artifacts |
+| `DELETE /v1/jobs/{id}` | — | job `queued`/`running` → set cancel flag, `202 {"job_id","status":"cancelling"}` (the runner stops at the next stage boundary; call DELETE again later to remove it). Terminal job → delete DB rows (cascade) **and** `CARACAL_DATA_DIR/jobs/<id>/`, `204` |
 | `GET /v1/speakers` | `?q=` | `[KnownSpeaker]` |
 | `POST /v1/speakers/enroll` | `{"job_id","speaker_label","name","notes"?}` | `201 KnownSpeaker` |
 | `DELETE /v1/speakers/{id}` | — | `204` |
