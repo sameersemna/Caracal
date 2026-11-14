@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import signal
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from alembic import command
 from alembic.config import Config as AlembicConfig
@@ -29,7 +33,7 @@ from caracal.mcp.server import build_mcp
 from caracal.ops import DoctorCheck, doctor_exit_code, emit_checks, run_doctor, run_retention
 from caracal.queue import make_redis
 from caracal.services import JobService
-from caracal.worker import RepoBundle, Worker
+from caracal.worker import RepoBundle, Worker, WorkerIntervals, default_intervals
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 
@@ -59,6 +63,22 @@ def _build_parser() -> argparse.ArgumentParser:
     doctor = subparsers.choices["doctor"]
     doctor.add_argument("--json", action="store_true", dest="json_output", help="one JSON object per line")
     doctor.add_argument("--deep", action="store_true", help="run one real search query per provider")
+    worker = subparsers.choices["worker"]
+    worker.add_argument("--worker-id", default=None, help="stable consumer name (default: host-pid-random)")
+    worker.add_argument(
+        "--reclaim-after-s",
+        type=float,
+        default=None,
+        dest="reclaim_after_s",
+        help="seconds a pending entry may sit idle before another worker may reclaim it",
+    )
+    worker.add_argument(
+        "--reclaim-every-s",
+        type=float,
+        default=None,
+        dest="reclaim_every_s",
+        help="seconds between recovery sweeps",
+    )
     retention = subparsers.choices["retention"]
     retention.add_argument("--dry-run", action="store_true", help="report what would be deleted")
     return parser
@@ -80,6 +100,35 @@ def _invalid_config_fields(exc: ValidationError) -> list[str]:
     )
 
 
+_HTTP_LOGGERS = ("httpx", "httpcore")
+
+
+@contextmanager
+def _quiet_http_logs() -> Iterator[None]:
+    """Suppress ``httpx``/``httpcore`` INFO request lines for one command (verdict 39)."""
+    previous = {name: logging.getLogger(name).level for name in _HTTP_LOGGERS}
+    for name in _HTTP_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
+    try:
+        yield
+    finally:
+        for name, level in previous.items():
+            logging.getLogger(name).setLevel(level)
+
+
+def _worker_intervals(args: argparse.Namespace) -> WorkerIntervals | None:
+    """Apply the optional recovery-timing flags to the production cadence."""
+    base = default_intervals()
+    overrides: dict[str, Any] = {}
+    reclaim_after_s = cast("float | None", args.reclaim_after_s)
+    reclaim_every_s = cast("float | None", args.reclaim_every_s)
+    if reclaim_after_s is not None:
+        overrides["reclaim_min_idle_ms"] = max(0, int(reclaim_after_s * 1000))
+    if reclaim_every_s is not None:
+        overrides["reclaim_s"] = max(0.01, float(reclaim_every_s))
+    return replace(base, **overrides) if overrides else None
+
+
 def _doctor(*, json_output: bool, deep: bool) -> int:
     """Check every measured dependency (docs/00, docs/02); exit 1 on a required failure."""
     configure_logging("INFO")
@@ -93,7 +142,8 @@ def _doctor(*, json_output: bool, deep: bool) -> int:
         )
         return 1
     configure_logging(settings.CARACAL_LOG_LEVEL, secrets=_secret_values(settings))
-    checks = asyncio.run(run_doctor(settings, deep=deep))
+    with _quiet_http_logs():
+        checks = asyncio.run(run_doctor(settings, deep=deep))
     emit_checks(checks, json_output=json_output)
     return doctor_exit_code(checks)
 
@@ -164,7 +214,12 @@ def _migrate() -> int:
     return 0
 
 
-async def _run_worker(settings: Settings) -> int:
+async def _run_worker(
+    settings: Settings,
+    *,
+    intervals: WorkerIntervals | None = None,
+    worker_id: str | None = None,
+) -> int:
     """Build the datastores and run the worker until SIGINT/SIGTERM."""
     logger = get_logger("caracal.worker")
     stop = asyncio.Event()
@@ -184,7 +239,12 @@ async def _run_worker(settings: Settings) -> int:
         segments=PostgresSegmentRepo(engine),
         speakers=PostgresSpeakerRepo(engine),
     )
-    worker = Worker(settings, redis_client, repos)
+    extra: dict[str, Any] = {}
+    if intervals is not None:
+        extra["intervals"] = intervals
+    if worker_id is not None:
+        extra["worker_id"] = worker_id
+    worker = Worker(settings, redis_client, repos, **extra)
     try:
         await worker.run(stop)
     finally:
@@ -194,7 +254,7 @@ async def _run_worker(settings: Settings) -> int:
     return 0
 
 
-def _worker() -> int:
+def _worker(*, intervals: WorkerIntervals | None = None, worker_id: str | None = None) -> int:
     configure_logging("INFO")
     logger = get_logger("caracal.worker")
     try:
@@ -204,7 +264,12 @@ def _worker() -> int:
         return 1
     configure_logging(settings.CARACAL_LOG_LEVEL, secrets=_secret_values(settings))
     try:
-        return asyncio.run(_run_worker(settings))
+        extra: dict[str, Any] = {}
+        if intervals is not None:
+            extra["intervals"] = intervals
+        if worker_id is not None:
+            extra["worker_id"] = worker_id
+        return asyncio.run(_run_worker(settings, **extra))
     except KeyboardInterrupt:
         return 0
     except CaracalError as exc:
@@ -321,7 +386,10 @@ def main(argv: list[str] | None = None) -> int:
     if command == "migrate":
         return _migrate()
     if command == "worker":
-        return _worker()
+        return _worker(
+            intervals=_worker_intervals(args),
+            worker_id=cast("str | None", args.worker_id),
+        )
     if command == "serve":
         return _serve_command()
     if command == "mcp-stdio":

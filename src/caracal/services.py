@@ -16,6 +16,7 @@ import base64
 import binascii
 import hashlib
 import json
+import math
 import shutil
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -48,15 +49,18 @@ from caracal.api.schemas import (
     StageStatus,
     TranslateQueued,
     UploadCreated,
+    VoiceprintExport,
+    VoiceprintItem,
 )
 from caracal.config import Settings
 from caracal.db.repo import JobRecord, KnownSpeakerRecord, StageRecord
-from caracal.db.tables import JOB_STATUSES, JOB_TERMINAL_STATUSES
+from caracal.db.tables import EMB_DIM, JOB_STATUSES, JOB_TERMINAL_STATUSES
 from caracal.errors import CaracalError, ErrorCode
 from caracal.ingest.router import classify_source_static
 from caracal.ingest.upload import UploadInfo, save_upload
 from caracal.llm.client import LLMClient
 from caracal.log import get_logger
+from caracal.ops import MetricsRegistry
 from caracal.pipeline.stages import JobOptions, Repos, Stage
 from caracal.queue import JobQueue, Keys, rate_limit, set_cancel
 from caracal.report.model import Answer, Report, ReportSummary
@@ -593,6 +597,47 @@ class JobService:
         """The report rendered as escaped Markdown (docs/03 §2 ``format=md``)."""
         return render_markdown(await self.report(job_id))
 
+    async def voiceprints(self, job_id: uuid.UUID) -> VoiceprintExport:
+        """Raw diarization embeddings for calibration (card T4.3, REST only).
+
+        The embeddings come straight from the diarize checkpoint; nothing is enrolled or
+        matched. Only an explicit, bearer-protected REST call can read them because they
+        are biometric data (docs/06 §2).
+        """
+        job = await self.repos.jobs.get(job_id)
+        if job is None:
+            raise _not_found(job_id)
+        files = JobFiles(self.data_dir, job_id)
+        checkpoint = files.read_json(files.stage(Stage.DIARIZE))
+        if not isinstance(checkpoint, dict):
+            raise self._missing_artifact(job)
+        output = checkpoint.get("output")
+        raw = output.get("embeddings") if isinstance(output, dict) else None
+        if raw is None:
+            return VoiceprintExport(items=[])
+        if not isinstance(raw, dict) or not all(isinstance(label, str) and label for label in raw):
+            raise CaracalError(ErrorCode.INTERNAL, "diarize checkpoint has invalid embeddings")
+        embeddings = cast("dict[str, object]", raw)
+        items: list[VoiceprintItem] = []
+        for label in sorted(embeddings):
+            values = embeddings[label]
+            if not isinstance(values, list) or len(values) != EMB_DIM:
+                raise CaracalError(
+                    ErrorCode.INTERNAL,
+                    "diarize checkpoint has invalid embeddings",
+                    {"label": label},
+                )
+            embedding: list[float] = []
+            for value in values:
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise CaracalError(ErrorCode.INTERNAL, "diarize checkpoint has invalid embeddings")
+                number = float(value)
+                if not math.isfinite(number):
+                    raise CaracalError(ErrorCode.INTERNAL, "diarize checkpoint has invalid embeddings")
+                embedding.append(number)
+            items.append(VoiceprintItem(label=label, embedding=embedding))
+        return VoiceprintExport(items=items)
+
     async def report_summary(self, job_id: uuid.UUID) -> ReportSummary | None:
         """The compact report view for MCP ``analyze_audio``, or ``None`` without a report."""
         try:
@@ -677,7 +722,11 @@ class JobService:
                 report=context,
                 transcript=transcript,
                 settings=self.settings,
-                llm=LLMClient(self.settings, http),
+                llm=LLMClient(
+                    self.settings,
+                    http,
+                    metrics=MetricsRegistry(self.redis, self.keys),
+                ),
             )
 
     async def search_transcripts(self, query: str, limit: int = 20) -> SearchResults:

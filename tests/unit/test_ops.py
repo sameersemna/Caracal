@@ -455,3 +455,82 @@ async def test_metrics_empty_registry_still_reports_global_totals() -> None:
         "caracal_search_cost_usd_total 0",
         "caracal_whisper_audio_seconds_total 0",
     ]
+
+
+def test_revision_probe_maps_missing_and_stale_revisions_to_the_migrate_hint() -> None:
+    from caracal.ops import _NOT_MIGRATED, _revision_probe
+
+    assert _revision_probe(None, "abc") == ("fail", _NOT_MIGRATED)
+    assert _revision_probe("old", "new") == ("fail", _NOT_MIGRATED)
+    assert _revision_probe("abc", "abc") == (
+        "ok",
+        "postgres ok; pgvector visible; alembic at abc",
+    )
+
+
+async def test_probe_postgres_reports_an_unmigrated_database_as_one_actionable_line(
+    make_settings: MakeSettings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sqlalchemy as sa
+
+    from caracal.ops import _NOT_MIGRATED, _probe_postgres
+
+    class FakeEngine:
+        async def dispose(self) -> None:
+            return None
+
+    class FailingScope:
+        async def __aenter__(self) -> object:
+            raise sa.exc.ProgrammingError(
+                "SELECT version_num FROM alembic_version",
+                {},
+                Exception('relation "alembic_version" does not exist'),
+            )
+
+        async def __aexit__(self, *_args: object) -> bool:
+            return False
+
+    monkeypatch.setattr("caracal.ops.make_engine", lambda _settings: FakeEngine())
+    monkeypatch.setattr("caracal.ops.session_scope", lambda _engine: FailingScope())
+
+    assert await _probe_postgres(make_settings()) == ("fail", _NOT_MIGRATED)
+
+
+async def test_probe_postgres_does_not_hide_an_unrelated_database_error(
+    make_settings: MakeSettings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sqlalchemy as sa
+
+    from caracal.ops import _probe_postgres
+
+    class FakeEngine:
+        async def dispose(self) -> None:
+            return None
+
+    class FailingScope:
+        async def __aenter__(self) -> object:
+            raise sa.exc.ProgrammingError("SELECT 1", {}, Exception("permission denied"))
+
+        async def __aexit__(self, *_args: object) -> bool:
+            return False
+
+    monkeypatch.setattr("caracal.ops.make_engine", lambda _settings: FakeEngine())
+    monkeypatch.setattr("caracal.ops.session_scope", lambda _engine: FailingScope())
+
+    with pytest.raises(sa.exc.ProgrammingError):
+        await _probe_postgres(make_settings())
+
+
+async def test_metrics_records_stage_failures() -> None:
+    redis = RecordingRedis()
+    try:
+        registry = MetricsRegistry(redis, Keys("caracal:"))
+        await registry.incr_stage_failure("transcribe")
+        await registry.incr_stage_failure("transcribe")
+        await registry.incr_stage_failure("diarize")
+        lines = (await registry.render()).splitlines()
+    finally:
+        await redis.aclose()
+
+    assert 'caracal_stage_failures_total{stage="transcribe"} 2' in lines
+    assert 'caracal_stage_failures_total{stage="diarize"} 1' in lines

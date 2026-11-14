@@ -55,6 +55,7 @@ _DISK_WARN_BYTES = 20 * 1024 * 1024 * 1024
 _UPLOAD_MAX_AGE_HOURS = 24
 _RETENTION_PAGE = 100
 _FIELD_SEP = "\x1f"
+_NOT_MIGRATED = "database not migrated \u2014 run 'caracal migrate'"
 
 _REQUIRED_CHECKS = frozenset({"config", "postgres", "redis", "whisper", "ollama", "ffmpeg"})
 
@@ -184,27 +185,42 @@ def _alembic_head() -> str:
 async def _probe_postgres(settings: Settings) -> Probe:
     engine = make_engine(settings)
     try:
-        async with session_scope(engine) as connection:
-            await connection.execute(sa.text("SELECT 1"))
-            vector = (await connection.execute(sa.text("SELECT to_regtype('vector')"))).scalar_one_or_none()
-            if vector is None:
-                return "fail", "pgvector type 'vector' is not visible"
-            head = await asyncio.to_thread(_alembic_head)
-            # TableClause quotes the configured schema instead of interpolating an identifier
-            # into SQL; the schema name is validated in config.py.
-            version_table = sa.table(
-                "alembic_version",
-                sa.column("version_num"),
-                schema=settings.CARACAL_DB_SCHEMA,
-            )
-            revision = (await connection.execute(sa.select(version_table.c.version_num))).scalar_one_or_none()
-            if revision is None:
-                return "fail", "alembic_version is empty"
-            if str(revision) != head:
-                return "fail", f"alembic at {revision}, head is {head}"
-            return "ok", f"postgres ok; pgvector visible; alembic at {head}"
+        try:
+            async with session_scope(engine) as connection:
+                await connection.execute(sa.text("SELECT 1"))
+                vector = (
+                    await connection.execute(sa.text("SELECT to_regtype('vector')"))
+                ).scalar_one_or_none()
+                if vector is None:
+                    return "fail", "pgvector type 'vector' is not visible"
+                head = await asyncio.to_thread(_alembic_head)
+                # TableClause quotes the configured schema instead of interpolating an identifier
+                # into SQL; the schema name is validated in config.py.
+                version_table = sa.table(
+                    "alembic_version",
+                    sa.column("version_num"),
+                    schema=settings.CARACAL_DB_SCHEMA,
+                )
+                revision = (
+                    await connection.execute(sa.select(version_table.c.version_num))
+                ).scalar_one_or_none()
+                return _revision_probe(str(revision) if revision is not None else None, head)
+        except sa.exc.DBAPIError as exc:
+            # The production schema was never migrated: PostgreSQL reports the missing
+            # alembic_version table as a DBAPI error. One actionable line is more useful
+            # than the raw multi-line SQLAlchemy traceback (verdict 39).
+            if "alembic_version" in str(exc).lower():
+                return "fail", _NOT_MIGRATED
+            raise
     finally:
         await engine.dispose()
+
+
+def _revision_probe(revision: str | None, head: str) -> Probe:
+    """Turn the stored alembic revision into a doctor line (verdict 39)."""
+    if revision is None or revision != head:
+        return "fail", _NOT_MIGRATED
+    return "ok", f"postgres ok; pgvector visible; alembic at {head}"
 
 
 async def _probe_redis(settings: Settings) -> Probe:
@@ -646,6 +662,10 @@ class MetricsRegistry:
         await self._incr("stage_seconds_count", stage)
         await self._add("stage_seconds_sum", stage, seconds)
 
+    async def incr_stage_failure(self, stage: str) -> None:
+        """Count one failed stage run (``caracal_stage_failures_total{stage}``)."""
+        await self._incr("stage_failures_total", stage)
+
     async def incr_llm_call(self, endpoint: str, mode: str, fallback: bool) -> None:
         await self._incr("llm_calls_total", _labels_field(endpoint, mode, "true" if fallback else "false"))
 
@@ -673,6 +693,9 @@ class MetricsRegistry:
             lines.append(
                 f'caracal_stage_seconds_sum{{stage="{_label(stage)}"}} {_number(totals.get(stage, "0"))}'
             )
+
+        for stage, value in sorted((await self._read("stage_failures_total")).items()):
+            lines.append(f'caracal_stage_failures_total{{stage="{_label(stage)}"}} {_number(value)}')
 
         for field, value in sorted((await self._read("llm_calls_total")).items()):
             parts = _split_field(field, 3)

@@ -39,6 +39,7 @@ from caracal.llm.client import LLMClient
 from caracal.pipeline.runner import RunnerDeps, run_pipeline
 from caracal.pipeline.stages import (
     JobOptions,
+    MetricsSink,
     Stage,
     StageContext,
     StageResult,
@@ -126,6 +127,7 @@ def _context(
     job_id: uuid.UUID | None = None,
     llm: LLMClient | None = None,
     search: SearchRouter | None = None,
+    metrics: MetricsSink | None = None,
 ) -> StageContext:
     async def load(stage: Stage) -> dict[str, object] | None:
         value = files.read_json(files.stage(stage))
@@ -148,6 +150,7 @@ def _context(
         redis=redis,
         keys=keys,
         search=search,
+        metrics=metrics,
         cancelled=cancelled if cancelled is not None else _never,
     )
 
@@ -2420,3 +2423,49 @@ async def test_stage_assemble_appends_the_review_checkpoint_flags(
     assert stored is not None
     messages = [flag["message"] for flag in stored["quality"]["review_flags"]]
     assert "the transcript never names this speaker" in messages
+
+
+class _RecordingMetrics:
+    """A structural ``MetricsSink`` that records what the stages add."""
+
+    def __init__(self) -> None:
+        self.whisper_seconds: list[float] = []
+        self.stage_failures: list[str] = []
+
+    async def add_whisper_seconds(self, seconds: float) -> None:
+        self.whisper_seconds.append(seconds)
+
+    async def incr_stage_failure(self, stage: str) -> None:
+        self.stage_failures.append(stage)
+
+
+async def test_transcribe_adds_each_chunk_duration_to_the_whisper_metric(
+    make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    await _chunk_checkpoint(files, 1)
+    services = _services(settings)
+    metrics = _RecordingMetrics()
+    try:
+        result = await stage_transcribe(
+            _context(
+                settings,
+                repos,
+                files,
+                whisper=services.client,
+                redis=services.redis,
+                keys=services.keys,
+                metrics=metrics,
+                job_id=job.id,
+            )
+        )
+    finally:
+        await services.http.aclose()
+
+    assert result.status == "done"
+    # The chunk is one second long even though the whisper fixture itself reports ~11 s.
+    assert metrics.whisper_seconds == [1.0]

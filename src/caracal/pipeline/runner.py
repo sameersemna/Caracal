@@ -28,6 +28,7 @@ from caracal.log import get_logger
 from caracal.pipeline.stages import (
     CRITICAL_STAGES,
     JobOptions,
+    MetricsSink,
     Repos,
     Stage,
     StageContext,
@@ -74,6 +75,7 @@ class RunnerDeps:
     redis: Redis | None = None
     keys: Keys | None = None
     search: SearchRouter | None = None
+    metrics: MetricsSink | None = None
 
 
 def _now() -> str:
@@ -119,6 +121,19 @@ async def _run_stage(
             return None, exc, None, attempt + 1
         except Exception as exc:
             return None, None, exc, attempt + 1
+
+
+async def _record_stage_failure(deps: RunnerDeps, stage: Stage) -> None:
+    """Increment ``caracal_stage_failures_total``; telemetry never changes the outcome."""
+    if deps.metrics is None:
+        return
+    try:
+        await deps.metrics.incr_stage_failure(stage.value)
+    except Exception as exc:
+        logger.warning(
+            "stage.metrics_failed",
+            extra={"stage": stage.value, "error": type(exc).__name__},
+        )
 
 
 async def run_pipeline(
@@ -216,6 +231,7 @@ async def run_pipeline(
         redis=deps.redis,
         keys=deps.keys,
         search=deps.search,
+        metrics=deps.metrics,
         cancelled=cancelled,
         translate_targets=list(translate_targets) if translate_targets is not None else None,
     )
@@ -312,6 +328,7 @@ async def run_pipeline(
                     continue
 
                 code, message = _failure(stage_error, other)
+                await _record_stage_failure(deps, stage)
                 logger.warning(
                     "stage.failed %s: %s",
                     code,

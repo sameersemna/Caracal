@@ -18,7 +18,15 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from python_multipart.multipart import parse_options_header
 
 from caracal.api.auth import bearer_token, require_auth
-from caracal.api.schemas import AskIn, EnrollSpeakerIn, JobCreate, SearchResults, SpeakerList, TranslateIn
+from caracal.api.schemas import (
+    AskIn,
+    EnrollSpeakerIn,
+    JobCreate,
+    SearchResults,
+    SpeakerList,
+    TranslateIn,
+    VoiceprintExport,
+)
 from caracal.db.tables import JOB_TERMINAL_STATUSES
 from caracal.errors import CaracalError, ErrorCode
 from caracal.ingest.upload import MultipartFileStream
@@ -290,6 +298,15 @@ async def delete_job(job_id: uuid.UUID, request: Request) -> Response:
     if result is None:
         return Response(status_code=204)
     return JSONResponse(status_code=202, content=result.model_dump(mode="json"))
+
+
+@router.get("/jobs/{job_id}/voiceprints")
+async def get_voiceprints(job_id: uuid.UUID, request: Request) -> VoiceprintExport:
+    """Raw diarization embeddings for threshold calibration (card T4.3).
+
+    REST only: the embeddings are biometric data, so no MCP tool exposes them (docs/06 §2).
+    """
+    return await _service(request).voiceprints(job_id)
 
 
 @router.get("/speakers")

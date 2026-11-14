@@ -28,6 +28,7 @@ from caracal.db.repo import SearchHit, SegmentRepo
 from caracal.errors import CaracalError, ErrorCode
 from caracal.llm.client import LLMClient
 from caracal.llm.prompts import format_timestamp, load_prompt, wrap_data
+from caracal.report.assemble import strip_prose_citations
 from caracal.report.evidence import normalise_ids
 from caracal.report.model import Answer, Citation, Report
 
@@ -345,7 +346,10 @@ def _finalise(raw: _LlmAnswer, allowed: Mapping[int, QaSegment]) -> Answer:
         seen.add(seg_id)
         segment = allowed[seg_id]
         citations.append(Citation(seg_id=f"seg:{seg_id}", start=segment.start, text=segment.text))
-    answer_text = raw.answer.strip()
+    # The model sometimes repeats its evidence ids inside the prose (verdict 38). The ids
+    # stay in ``citations``; only the prose is stripped, exactly like report prose.
+    answer_text, _inline_ids = strip_prose_citations(raw.answer.strip())
+    answer_text = answer_text.strip()
     if not citations or not answer_text:
         return Answer(answer=_NOT_FOUND, confidence=0.0, citations=[], evidence=[])
     confidence = float(raw.confidence)

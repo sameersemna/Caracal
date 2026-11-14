@@ -470,3 +470,49 @@ def test_wrap_data_cannot_be_closed_by_the_data() -> None:
     assert lines[-1] == "<<<END:transcript>>>"
     assert "<<<" not in lines[1]
     assert ">>>" not in lines[1]
+
+
+class _RecordingLlmMetrics:
+    """A structural ``LlmMetrics`` that records every call."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, bool]] = []
+
+    async def incr_llm_call(self, endpoint: str, mode: str, fallback: bool) -> None:
+        self.calls.append((endpoint, mode, fallback))
+
+
+async def test_call_tool_records_one_metric_per_successful_call() -> None:
+    metrics = _RecordingLlmMetrics()
+    fake = FakeOllama([message_response(tool_call_message(_VALID_MESSAGE))])
+    async with httpx.AsyncClient(transport=fake.transport()) as http:
+        await _call(LLMClient(_settings(), http, metrics=metrics))
+
+    assert metrics.calls == [("cloud", "tool", False)]
+
+
+async def test_call_tool_metric_reflects_the_fallback_endpoint_and_mode() -> None:
+    metrics = _RecordingLlmMetrics()
+    waits: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        waits.append(seconds)
+
+    fake = FakeOllama([error_response(500), error_response(500), _recorded_response()])
+    settings = _settings(LLM_FALLBACK_MODEL="gemma4:local-test")
+    async with httpx.AsyncClient(transport=fake.transport()) as http:
+        await _call(LLMClient(settings, http, sleep=sleep, metrics=metrics))
+
+    assert metrics.calls == [("local", "tool", True)]
+
+
+async def test_chat_records_its_own_mode_and_never_fails_on_a_metrics_error() -> None:
+    class BrokenMetrics:
+        async def incr_llm_call(self, endpoint: str, mode: str, fallback: bool) -> None:
+            raise RuntimeError("redis is down")
+
+    fake = FakeOllama([message_response(text_message("hello"))])
+    async with httpx.AsyncClient(transport=fake.transport()) as http:
+        text = await LLMClient(_settings(), http, metrics=BrokenMetrics()).chat(prompt="hi", system="sys")
+
+    assert text == "hello"

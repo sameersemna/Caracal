@@ -141,8 +141,8 @@ curl -s -X DELETE -H "$A" $B/v1/speakers/<speaker_id>
 ```
 
 `GET /metrics` (bearer-protected) exposes Prometheus counters shared by the API and worker:
-`caracal_jobs_total`, `caracal_stage_seconds_sum/_count`, `caracal_llm_calls_total`,
-`caracal_search_queries_total`, `caracal_search_cost_usd_total`,
+`caracal_jobs_total`, `caracal_stage_seconds_sum/_count`, `caracal_stage_failures_total`,
+`caracal_llm_calls_total`, `caracal_search_queries_total`, `caracal_search_cost_usd_total`,
 `caracal_whisper_audio_seconds_total`.
 
 ## MCP
@@ -212,6 +212,11 @@ Voiceprints are **biometric data**. Enrollment happens only through an explicit 
 database stores only embeddings, not raw voice samples; media files are deleted by the retention
 policy and transcripts/reports stay until the job is deleted. Obtain consent before enrolling
 someone. Transcripts are never logged at INFO.
+
+For threshold calibration, `GET /v1/jobs/{id}/voiceprints` (bearer-protected) returns the diarize
+stage's raw 256-dimension embeddings as `{"items": [{"label": "S1", "embedding": [...]}]}`. This is
+the one place raw embeddings leave the process, so it exists **only** as a REST endpoint — there is
+deliberately no MCP tool for biometric embeddings.
 
 ## Known limitations
 

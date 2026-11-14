@@ -20,6 +20,7 @@ Every capability must exist on both sides:
 | cancel / delete | `DELETE /v1/jobs/{id}` | `cancel_job` |
 | full-text search | `GET /v1/search` | `search_transcripts` |
 | speakers | `GET/POST/DELETE /v1/speakers…` | `list_speakers`, `enroll_speaker`, `delete_speaker` |
+| voiceprint export (calibration) | `GET /v1/jobs/{id}/voiceprints` | — **REST only by design** (biometric data; not offered to LLM agents) |
 
 A contract test (`tests/contract/test_parity.py`, from T1.6 on) asserts this table: every row's REST route and
 MCP tool both exist, and for the same fake job they return equal data (MCP JSON == REST JSON). Adding a capability
