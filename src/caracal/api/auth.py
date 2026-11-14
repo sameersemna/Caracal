@@ -27,16 +27,34 @@ def _settings(request: Request) -> Settings:
     return settings
 
 
+def bearer_from_header(header: str | None) -> str | None:
+    """Extract the token from ``Authorization: Bearer <token>`` or return ``None``.
+
+    Shared by the route dependency and the pre-body ASGI middleware so both apply exactly the
+    same syntax rules (single space, exact scheme, non-empty token).
+    """
+    if header is None:
+        return None
+    scheme, separator, token = header.partition(" ")
+    if not separator or scheme != _SCHEME or not token:
+        return None
+    return token
+
+
+def token_matches(candidate: str, expected: str) -> bool:
+    """Constant-time bearer comparison (docs/06 S1)."""
+    return hmac.compare_digest(candidate.encode("utf-8"), expected.encode("utf-8"))
+
+
 def require_auth(request: Request) -> None:
     """FastAPI dependency: validate the bearer token and expose it on ``request.state``."""
     header = request.headers.get("authorization")
     if header is None:
         raise _unauthorized("missing authorization header")
-    scheme, separator, token = header.partition(" ")
-    if not separator or scheme != _SCHEME or not token:
+    token = bearer_from_header(header)
+    if token is None:
         raise _unauthorized()
-    expected = _settings(request).CARACAL_API_TOKEN.get_secret_value()
-    if not hmac.compare_digest(token.encode("utf-8"), expected.encode("utf-8")):
+    if not token_matches(token, _settings(request).CARACAL_API_TOKEN.get_secret_value()):
         raise _unauthorized()
     request.state.api_token = token
 

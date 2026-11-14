@@ -155,9 +155,6 @@ async def create_job(payload: JobCreate, request: Request) -> JSONResponse:
     """Validate, deduplicate, persist and enqueue one job (docs/03 §2)."""
     deps = _deps(request)
     settings = _settings(request)
-    body = await request.body()
-    if len(body) > 64 * 1024:
-        raise CaracalError(ErrorCode.TOO_LARGE, "request body is too large")
 
     source = payload.source
     upload_id = source.upload_id
@@ -187,16 +184,10 @@ async def create_job(payload: JobCreate, request: Request) -> JSONResponse:
         limit=settings.CARACAL_RATE_LIMIT_PER_MIN,
     )
     if not allowed:
-        return JSONResponse(
-            status_code=429,
-            content={
-                "error": {
-                    "code": "rate_limited",
-                    "message": "rate limit exceeded",
-                    "details": {"retry_after_s": retry_after},
-                }
-            },
-            headers={"Retry-After": str(retry_after)},
+        raise CaracalError(
+            ErrorCode.RATE_LIMITED,
+            "rate limit exceeded",
+            {"retry_after_s": retry_after},
         )
 
     if options["depth"] != "deep":

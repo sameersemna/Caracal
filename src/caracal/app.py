@@ -7,8 +7,9 @@ The app is deliberately thin: it validates, enqueues and reads; the worker runs 
 from __future__ import annotations
 
 import asyncio
+import json
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -22,11 +23,12 @@ from fastapi.responses import JSONResponse
 from redis import asyncio as redis_asyncio
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine
+from starlette.datastructures import Headers
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from starlette.middleware.base import RequestResponseEndpoint
-from starlette.responses import Response
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from caracal import __version__
+from caracal.api.auth import bearer_from_header, token_matches
 from caracal.api.routes import public_router, router
 from caracal.config import Settings
 from caracal.db.engine import make_engine, session_scope
@@ -49,9 +51,11 @@ if TYPE_CHECKING:
 
 logger = get_logger("caracal.app")
 
-MAX_JOBS_BODY_BYTES = 64 * 1024
+DEFAULT_V1_BODY_LIMIT_BYTES = 64 * 1024
 DEFAULT_HEALTH_TIMEOUT_S = 2.0
 DEFAULT_HEALTH_CACHE_TTL_S = 10.0
+
+BodyLimits = Mapping[tuple[str, str], int]
 
 
 @dataclass
@@ -93,11 +97,162 @@ def _caracal_response(error: CaracalError) -> JSONResponse:
     headers: dict[str, str] = {}
     if error.code is ErrorCode.UNAUTHORIZED:
         headers["WWW-Authenticate"] = "Bearer"
+    elif error.code is ErrorCode.RATE_LIMITED:
+        retry_after = error.details.get("retry_after_s")
+        if isinstance(retry_after, int):
+            headers["Retry-After"] = str(retry_after)
     return JSONResponse(
         status_code=HTTP_STATUS[error.code],
         content=error.to_dict(),
         headers=headers or None,
     )
+
+
+def _is_v1_path(path: str) -> bool:
+    """True for the authenticated API surface only (``/healthz`` and ``/mcp`` stay untouched)."""
+    return path == "/v1" or path.startswith("/v1/")
+
+
+def _content_length(scope: Scope) -> int | None:
+    declared = Headers(scope=scope).get("content-length")
+    if declared is None:
+        return None
+    try:
+        return int(declared)
+    except ValueError:
+        return None
+
+
+async def _send_error(
+    send: Send,
+    error: CaracalError,
+    extra_headers: tuple[tuple[bytes, bytes], ...] = (),
+    status_code: int | None = None,
+) -> None:
+    """Send one error envelope without going through the routed application."""
+    body = json.dumps(error.to_dict(), separators=(",", ":")).encode("utf-8")
+    headers = [
+        (b"content-type", b"application/json"),
+        (b"content-length", str(len(body)).encode("ascii")),
+        *extra_headers,
+    ]
+    status = HTTP_STATUS[error.code] if status_code is None else status_code
+    await send({"type": "http.response.start", "status": status, "headers": headers})
+    await send({"type": "http.response.body", "body": body, "more_body": False})
+
+
+class OriginGuardMiddleware:
+    """Reject foreign ``Origin`` headers on the MCP endpoint (docs/06 S2).
+
+    Pure ASGI so the stack has no ``BaseHTTPMiddleware`` task groups: those would wrap an
+    exception raised from ``receive`` in an ``ExceptionGroup`` and defeat the early 413.
+    """
+
+    def __init__(self, app: ASGIApp, *, public_base_url: str) -> None:
+        self.app = app
+        self.public_base_url = public_base_url
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http" and scope["path"].startswith("/mcp"):
+            origin = Headers(scope=scope).get("origin")
+            if origin is not None and not _origin_allowed(origin, self.public_base_url):
+                await _send_error(
+                    send,
+                    CaracalError(ErrorCode.UNAUTHORIZED, "origin not allowed"),
+                    status_code=403,
+                )
+                return
+        await self.app(scope, receive, send)
+
+
+class _BodyTooLarge(StarletteHTTPException):
+    """Raised from ``receive`` when a body crosses the route limit.
+
+    It subclasses ``HTTPException`` because FastAPI re-raises those while parsing a request
+    body (it wraps every other exception into a 400, which would hide the 413). A dedicated
+    handler in :func:`create_app` renders it as the ``too_large`` envelope.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(status_code=413, detail="request body is too large")
+
+
+class AuthBodyLimitMiddleware:
+    """Authenticate ``/v1`` requests before the body is read, then cap the body stream.
+
+    Docs: docs/03 §1 (auth on everything but ``/healthz``), docs/06 S1 (bearer), docs/03 §4
+    (``too_large``). This is a *pure* ASGI middleware on purpose: ``BaseHTTPMiddleware`` would
+    let the routed app pull the body first, so an unauthenticated client could make us buffer
+    30 MiB before answering 401.
+
+    ``body_limits`` maps ``(METHOD, path)`` to a byte cap so later cards can register routes
+    with their own limit (e.g. ``POST /v1/uploads``); every other ``/v1`` route uses
+    ``default_body_limit``.
+    """
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        token: str,
+        body_limits: BodyLimits | None = None,
+        default_body_limit: int = DEFAULT_V1_BODY_LIMIT_BYTES,
+    ) -> None:
+        self.app = app
+        self.token = token
+        self.body_limits = dict(body_limits or {})
+        self.default_body_limit = default_body_limit
+
+    def _limit(self, method: str, path: str) -> int:
+        return self.body_limits.get((method.upper(), path), self.default_body_limit)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or not _is_v1_path(scope["path"]):
+            await self.app(scope, receive, send)
+            return
+
+        header = Headers(scope=scope).get("authorization")
+        candidate = bearer_from_header(header)
+        if candidate is None or not token_matches(candidate, self.token):
+            message = "missing authorization header" if header is None else "invalid or missing bearer token"
+            await _send_error(
+                send,
+                CaracalError(ErrorCode.UNAUTHORIZED, message),
+                extra_headers=((b"www-authenticate", b"Bearer"),),
+            )
+            return
+
+        limit = self._limit(scope["method"], scope["path"])
+        declared = _content_length(scope)
+        if declared is not None and declared > limit:
+            await _send_error(send, CaracalError(ErrorCode.TOO_LARGE, "request body is too large"))
+            return
+
+        received = 0
+        response_started = False
+
+        async def counting_receive() -> Message:
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                body_length = len(message.get("body", b""))
+                received += body_length
+                if received > limit:
+                    raise _BodyTooLarge
+            return message
+
+        async def tracking_send(message: Message) -> None:
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, counting_receive, tracking_send)
+        except _BodyTooLarge:
+            if response_started:
+                raise
+            await _send_error(send, CaracalError(ErrorCode.TOO_LARGE, "request body is too large"))
 
 
 def _origin_allowed(origin: str, public_base_url: str) -> bool:
@@ -143,8 +298,17 @@ def _build_real_deps(settings: Settings) -> tuple[AppDeps, AsyncEngine]:
     return deps, engine
 
 
-def create_app(settings: Settings, deps: AppDeps | None = None) -> FastAPI:
-    """Build the FastAPI application; ``deps`` is injected by every test."""
+def create_app(
+    settings: Settings,
+    deps: AppDeps | None = None,
+    *,
+    body_limits: BodyLimits | None = None,
+) -> FastAPI:
+    """Build the FastAPI application; ``deps`` is injected by every test.
+
+    ``body_limits`` overrides the 64 KiB cap for specific ``(METHOD, path)`` pairs; it is
+    threaded into :class:`AuthBodyLimitMiddleware` so upload routes can declare their own.
+    """
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
@@ -165,27 +329,6 @@ def create_app(settings: Settings, deps: AppDeps | None = None) -> FastAPI:
     if deps is not None:
         app.state.deps = deps
 
-    @app.middleware("http")
-    async def origin_guard(request: Request, call_next: RequestResponseEndpoint) -> Response:
-        if request.url.path.startswith("/mcp"):
-            origin = request.headers.get("origin")
-            if origin is not None and not _origin_allowed(origin, settings.CARACAL_PUBLIC_BASE_URL):
-                return _envelope(403, ErrorCode.UNAUTHORIZED, "origin not allowed")
-        return await call_next(request)
-
-    @app.middleware("http")
-    async def jobs_body_guard(request: Request, call_next: RequestResponseEndpoint) -> Response:
-        if request.method == "POST" and request.url.path == "/v1/jobs":
-            declared = request.headers.get("content-length")
-            if declared is not None:
-                try:
-                    length = int(declared)
-                except ValueError:
-                    length = 0
-                if length > MAX_JOBS_BODY_BYTES:
-                    return _envelope(413, ErrorCode.TOO_LARGE, "request body is too large")
-        return await call_next(request)
-
     @app.exception_handler(CaracalError)
     async def caracal_error_handler(_request: Request, exc: CaracalError) -> JSONResponse:
         return _caracal_response(exc)
@@ -202,6 +345,10 @@ def create_app(settings: Settings, deps: AppDeps | None = None) -> FastAPI:
         ]
         return _envelope(422, ErrorCode.INVALID_INPUT, "request validation failed", {"errors": details})
 
+    @app.exception_handler(_BodyTooLarge)
+    async def body_too_large_handler(_request: Request, _exc: _BodyTooLarge) -> JSONResponse:
+        return _envelope(413, ErrorCode.TOO_LARGE, "request body is too large")
+
     @app.exception_handler(StarletteHTTPException)
     async def http_error_handler(_request: Request, exc: StarletteHTTPException) -> JSONResponse:
         code = ErrorCode.NOT_FOUND if exc.status_code == 404 else ErrorCode.INVALID_INPUT
@@ -217,6 +364,14 @@ def create_app(settings: Settings, deps: AppDeps | None = None) -> FastAPI:
 
     app.include_router(public_router)
     app.include_router(router)
+    app.add_middleware(OriginGuardMiddleware, public_base_url=settings.CARACAL_PUBLIC_BASE_URL)
+    # Added last so it is the outermost user middleware (inside Starlette's error handling):
+    # no /v1 body byte is read before the bearer token has been checked.
+    app.add_middleware(
+        AuthBodyLimitMiddleware,
+        token=settings.CARACAL_API_TOKEN.get_secret_value(),
+        body_limits=body_limits,
+    )
     return app
 
 
@@ -274,4 +429,10 @@ async def health_payload(settings: Settings, deps: AppDeps) -> dict[str, object]
     return payload
 
 
-__all__ = ["MAX_JOBS_BODY_BYTES", "AppDeps", "create_app", "health_payload"]
+__all__ = [
+    "DEFAULT_V1_BODY_LIMIT_BYTES",
+    "AppDeps",
+    "AuthBodyLimitMiddleware",
+    "create_app",
+    "health_payload",
+]

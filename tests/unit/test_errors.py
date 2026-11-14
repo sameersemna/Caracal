@@ -16,6 +16,7 @@ EXPECTED_STATUS = {
     "unsupported_media": 415,
     "dependency_down": 503,
     "job_not_ready": 409,
+    "rate_limited": 429,
     "internal": 500,
 }
 

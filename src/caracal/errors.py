@@ -17,6 +17,7 @@ class ErrorCode(StrEnum):
     UNSUPPORTED_MEDIA = "unsupported_media"
     DEPENDENCY_DOWN = "dependency_down"
     JOB_NOT_READY = "job_not_ready"
+    RATE_LIMITED = "rate_limited"
     INTERNAL = "internal"
 
 
@@ -30,6 +31,7 @@ HTTP_STATUS: dict[ErrorCode, int] = {
     ErrorCode.UNSUPPORTED_MEDIA: 415,
     ErrorCode.DEPENDENCY_DOWN: 503,
     ErrorCode.JOB_NOT_READY: 409,
+    ErrorCode.RATE_LIMITED: 429,
     ErrorCode.INTERNAL: 500,
 }
 

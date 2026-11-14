@@ -47,6 +47,17 @@ async def test_wrong_token_is_401(make_harness: Callable[..., Harness]) -> None:
     assert response.json()["error"]["code"] == "unauthorized"
 
 
+async def test_unauthenticated_unknown_v1_path_is_401_before_routing(
+    make_harness: Callable[..., Harness],
+) -> None:
+    h = make_harness()
+    async with h.client() as client:
+        response = await client.get("/v1/does-not-exist")
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+    assert response.json()["error"]["code"] == "unauthorized"
+
+
 async def test_correct_token_reaches_the_route(make_harness: Callable[..., Harness]) -> None:
     h = make_harness()
     async with h.client() as client:
