@@ -25,6 +25,7 @@ from caracal.api.schemas import (
     JobStatus,
     KnownSpeaker,
     SpeakerDeleted,
+    SpeakerList,
 )
 from caracal.config import Settings
 from caracal.errors import CaracalError
@@ -69,10 +70,6 @@ class TranscriptResult(RootModel[dict[str, Any]]):
     ``GET /v1/jobs/{id}/transcript``. Text/SRT/VTT formats use ``format``, ``lang`` and
     ``content`` keys.
     """
-
-
-class SpeakerList(RootModel[list[KnownSpeaker]]):
-    """``list_speakers`` output: the same array ``GET /v1/speakers`` returns."""
 
 
 def _tool_error(exc: CaracalError) -> ToolError:
@@ -277,7 +274,7 @@ def build_mcp(
     )
     async def list_speakers(query: str | None = None) -> SpeakerList:
         try:
-            return SpeakerList(root=await service.list_speakers(query))
+            return await service.list_speakers(query)
         except CaracalError as exc:
             raise _tool_error(exc) from exc
 

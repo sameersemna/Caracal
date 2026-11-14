@@ -138,6 +138,37 @@ async def test_list_jobs_returns_items_and_filters(make_harness: Callable[..., H
     assert [item["job_id"] for item in failed.structured_content["items"]] == [str(failed_id)]
 
 
+async def test_every_registered_tool_declares_an_object_output_schema(
+    make_harness: Callable[..., Harness],
+) -> None:
+    """MCP rejects a non-object ``structuredContent`` over real transports (verdict 20).
+
+    Tool descriptions and inputs are not enough: every tool must publish an object-rooted
+    ``outputSchema`` so a real client can validate the result. The expected-name set keeps
+    the loop from going vacuous if a tool is ever unregistered.
+    """
+    h = make_harness()
+
+    async with Client(build_mcp(_service(h), h.settings)) as client:
+        listed = await client.list_tools()
+
+    names = {tool.name for tool in listed.tools}
+    assert names == {
+        "analyze_audio",
+        "get_job",
+        "list_jobs",
+        "get_transcript",
+        "list_speakers",
+        "enroll_speaker",
+        "delete_speaker",
+        "cancel_job",
+    }
+    for tool in listed.tools:
+        schema = tool.output_schema
+        assert isinstance(schema, dict), tool.name
+        assert schema.get("type") == "object", (tool.name, schema)
+
+
 async def test_get_transcript_all_formats(make_harness: Callable[..., Harness]) -> None:
     h = make_harness()
     job_id = await _job(h, status="done")
@@ -433,17 +464,17 @@ async def test_speaker_tools_round_trip_and_match_rest(make_harness: Callable[..
             rest = await rest_client.get("/v1/speakers", headers=AUTH)
         listed = await client.call_tool("list_speakers", {})
         assert rest.status_code == 200
-        assert listed.structured_content == rest.json() == [created]
+        assert listed.structured_content == rest.json() == {"items": [created]}
 
         deleted = await client.call_tool("delete_speaker", {"speaker_id": created["id"]})
         assert deleted.is_error is False
         assert deleted.structured_content == {"deleted": True, "voiceprints_removed": 1}
 
         empty = await client.call_tool("list_speakers", {})
-        assert empty.structured_content == []
+        assert empty.structured_content == {"items": []}
 
     async with h.client() as rest_client:
-        assert (await rest_client.get("/v1/speakers", headers=AUTH)).json() == []
+        assert (await rest_client.get("/v1/speakers", headers=AUTH)).json() == {"items": []}
 
 
 async def test_speaker_tool_errors_carry_the_error_code(

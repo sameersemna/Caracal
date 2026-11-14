@@ -71,7 +71,7 @@ async def test_list_is_empty_until_something_is_enrolled(
     async with h.client() as client:
         empty = await client.get("/v1/speakers", headers=AUTH)
         assert empty.status_code == 200
-        assert empty.json() == []
+        assert empty.json() == {"items": []}
 
         job_id = await _job(h)
         _write_diarize(h, job_id, {"S1": _unit(0.97), "S2": _unit(0.2)})
@@ -87,12 +87,12 @@ async def test_list_is_empty_until_something_is_enrolled(
 
         listed = await client.get("/v1/speakers", headers=AUTH)
         assert listed.status_code == 200
-        assert listed.json() == [created]
+        assert listed.json() == {"items": [created]}
 
         filtered = await client.get("/v1/speakers", headers=AUTH, params={"q": "levitin"})
-        assert filtered.json() == [created]
+        assert filtered.json() == {"items": [created]}
         missing = await client.get("/v1/speakers", headers=AUTH, params={"q": "nobody"})
-        assert missing.json() == []
+        assert missing.json() == {"items": []}
 
 
 async def test_notes_are_omitted_from_the_wire_model_when_absent(
@@ -140,7 +140,7 @@ async def test_enrolling_the_same_normalised_name_appends_a_sample(
     assert second.json()["id"] == first.json()["id"]
     assert second.json()["samples"] == 2
     assert second.json()["notes"] == "Neuroscientist"
-    assert listed.json() == [second.json()]
+    assert listed.json() == {"items": [second.json()]}
 
 
 async def test_enroll_requires_a_finished_job(
@@ -160,7 +160,7 @@ async def test_enroll_requires_a_finished_job(
             assert response.status_code == 409, status
             assert response.json()["error"]["code"] == "job_not_ready"
 
-        assert (await client.get("/v1/speakers", headers=AUTH)).json() == []
+        assert (await client.get("/v1/speakers", headers=AUTH)).json() == {"items": []}
 
 
 async def test_enroll_unknown_job_or_label_is_404(
@@ -234,7 +234,7 @@ async def test_delete_removes_the_speaker_and_its_voiceprints(
         assert deleted.content == b""
 
         listed = await client.get("/v1/speakers", headers=AUTH)
-        assert listed.json() == []
+        assert listed.json() == {"items": []}
 
         again = await client.delete(f"/v1/speakers/{speaker_id}", headers=AUTH)
         assert again.status_code == 404

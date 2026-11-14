@@ -37,6 +37,7 @@ from caracal.api.schemas import (
     JobSummary,
     KnownSpeaker,
     SpeakerDeleted,
+    SpeakerList,
     StageStatus,
     UploadCreated,
 )
@@ -501,9 +502,9 @@ class JobService:
 
     # -- speakers ---------------------------------------------------------
 
-    async def list_speakers(self, query: str | None = None) -> list[KnownSpeaker]:
+    async def list_speakers(self, query: str | None = None) -> SpeakerList:
         """``GET /v1/speakers`` and MCP ``list_speakers`` (docs/03 §2-§3)."""
-        return await self.speaker_service.list(query)
+        return SpeakerList(items=await self.speaker_service.list(query))
 
     async def enroll_speaker(
         self,

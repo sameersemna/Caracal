@@ -260,10 +260,10 @@ async def test_speakers_return_equal_data(make_harness: Callable[..., Harness]) 
         rest = await client.get("/v1/speakers", headers=AUTH)
 
     assert rest.status_code == 200
-    assert rest.json() == [enrolled.structured_content]
+    assert rest.json() == {"items": [enrolled.structured_content]}
     assert mcp.structured_content == rest.json()
 
     deleted = await _mcp_call(h, "delete_speaker", {"speaker_id": enrolled.structured_content["id"]})
     assert deleted.structured_content == {"deleted": True, "voiceprints_removed": 1}
     async with h.client() as client:
-        assert (await client.get("/v1/speakers", headers=AUTH)).json() == []
+        assert (await client.get("/v1/speakers", headers=AUTH)).json() == {"items": []}

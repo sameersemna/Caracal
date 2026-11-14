@@ -192,6 +192,16 @@ class KnownSpeaker(BaseModel):
         return {key: value for key, value in handler(self).items() if value is not None}
 
 
+class SpeakerList(BaseModel):
+    """The ``GET /v1/speakers`` response and MCP ``list_speakers`` output (docs/03 §2-§3).
+
+    A wrapper object, not a bare array: MCP ``structuredContent`` must be a JSON object, so
+    the REST and MCP shapes are identical and a real MCP client can accept both.
+    """
+
+    items: list[KnownSpeaker]
+
+
 class EnrollSpeakerIn(BaseModel):
     """The ``POST /v1/speakers/enroll`` body (docs/03 §2).
 

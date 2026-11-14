@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from python_multipart.multipart import parse_options_header
 
 from caracal.api.auth import bearer_token, require_auth
-from caracal.api.schemas import EnrollSpeakerIn, JobCreate
+from caracal.api.schemas import EnrollSpeakerIn, JobCreate, SpeakerList
 from caracal.db.tables import JOB_TERMINAL_STATUSES
 from caracal.errors import CaracalError, ErrorCode
 from caracal.ingest.upload import MultipartFileStream
@@ -267,10 +267,9 @@ async def delete_job(job_id: uuid.UUID, request: Request) -> Response:
 async def list_speakers(
     request: Request,
     q: str | None = Query(default=None),
-) -> list[dict[str, object]]:
+) -> SpeakerList:
     """Known speakers and their sample counts, optionally filtered by name (docs/03 §2)."""
-    speakers = await _service(request).list_speakers(q)
-    return [speaker.model_dump(mode="json") for speaker in speakers]
+    return await _service(request).list_speakers(q)
 
 
 @router.post("/speakers/enroll")
