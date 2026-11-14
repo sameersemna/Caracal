@@ -46,7 +46,7 @@ GATE: PASS
 - Mutation checks (temporary local edits, reverted): forcing every metadata link made both linking tests fail; setting the performance factor to 1.0 failed both performance tests; restoring the single-name score to 0.85 failed the single-name test; dropping the 0.6 threshold failed the weak-voiceprint and single-name tests; removing `in_character` from the relation literal failed the in-character test.
 
 ## Deviations
-- Adapted four existing tests where the required fixes change their expected values (fusion 0.94 now needs a full name; weak voiceprint 0.33 no longer promotes; metadata-only candidate now links via channel/uploader + host; prompt variable added). No test was weakened.
+- Adapted five existing tests where the required fixes change their expected values (fusion 0.94 now needs a full name; weak voiceprint 0.33 no longer promotes; metadata-only candidate now links via channel/uploader + host; prompt variable added). No test was weakened.
 - No new Caliendo / All Ears English live tests were added: the repository has no transcript fixtures or URLs for those interviews, and the card says the judge re-runs them.
 
 ## NOT proven
