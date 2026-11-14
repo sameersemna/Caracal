@@ -26,6 +26,7 @@ from caracal.api.schemas import (
     KnownSpeaker,
     SpeakerDeleted,
     SpeakerList,
+    TranslateQueued,
 )
 from caracal.config import Settings
 from caracal.errors import CaracalError
@@ -308,6 +309,24 @@ def build_mcp(
         except CaracalError as exc:
             raise _tool_error(exc) from exc
         return TranscriptResult(root={"format": format, "lang": lang, "content": content.decode("utf-8")})
+
+    @server.tool(
+        description=(
+            "Queue on-demand subtitle translation for a finished job. Give the job_id and "
+            "one or more target language codes (ISO 639, e.g. ['de', 'ar']); the job must "
+            "be done. Translation runs in the background and returns status=queued with "
+            "links; existing translations are kept and a re-requested language is "
+            "overwritten. Poll get_job, then read the subtitles with get_transcript "
+            "(format=srt or vtt, lang=...). Use it to add subtitle languages without "
+            "re-running the whole analysis."
+        )
+    )
+    async def translate_job(job_id: str, target_langs: list[str]) -> TranslateQueued:
+        parsed = _job_uuid(job_id)
+        try:
+            return await service.translate_job(parsed, target_langs)
+        except CaracalError as exc:
+            raise _tool_error(exc) from exc
 
     @server.tool(
         description=(

@@ -51,6 +51,7 @@ from caracal.report.model import (
     Summary,
     Topic,
     TranscriptRef,
+    Translation,
     Verification,
 )
 
@@ -657,6 +658,7 @@ def _quality(
     chapters: Sequence[Chapter],
     duration_s: float,
     stage_statuses: Mapping[str, str],
+    translations: Sequence[Translation] = (),
 ) -> QualityInfo:
     """ASR signals, every stage status and the deterministic review flags."""
     segments = transcript.segments if transcript is not None else ()
@@ -681,6 +683,15 @@ def _quality(
             stages=stage_statuses,
         )
     )
+    failed_languages = [translation.lang for translation in translations if translation.status == "failed"]
+    if failed_languages:
+        flags.append(
+            ReviewFlag(
+                severity="warn",
+                field="translations",
+                message="translation failed for: " + ", ".join(failed_languages),
+            )
+        )
     return QualityInfo(
         asr_avg_logprob=asr_avg_logprob,
         low_confidence_segments=low_confidence,
@@ -689,6 +700,56 @@ def _quality(
         stages=dict(stage_statuses),
         review_flags=flags,
     )
+
+
+def _subtitle_languages(checkpoints: Mapping[str, Mapping[str, Any] | None]) -> set[str]:
+    """Languages the subtitles checkpoint wrote both an SRT and a WebVTT file for."""
+    subtitles = _output(checkpoints, "subtitles")
+    raw_files = _mapping(subtitles.get("files")) if subtitles is not None else None
+    if raw_files is None:
+        return set()
+    names = {name for name in raw_files if isinstance(name, str)}
+    srt = {name[: -len(".srt")] for name in names if name.endswith(".srt")}
+    vtt = {name[: -len(".vtt")] for name in names if name.endswith(".vtt")}
+    return srt & vtt
+
+
+def _translations(
+    checkpoints: Mapping[str, Mapping[str, Any] | None],
+    settings: Settings,
+    job_id: uuid.UUID,
+) -> list[Translation]:
+    """Translate entries that actually have subtitle files, as report items with REST links.
+
+    A translate entry without rendered subtitles is not a usable translation (its links would
+    be dead), so the subtitles checkpoint is the second source of truth (verdict 35 fix 2).
+    """
+    output = _output(checkpoints, "translate")
+    raw_langs = _mapping(output.get("langs")) if output is not None else None
+    if raw_langs is None:
+        return []
+    rendered = _subtitle_languages(checkpoints)
+    base = settings.CARACAL_PUBLIC_BASE_URL.rstrip("/")
+    prefix = f"{base}/v1/jobs/{job_id}"
+    translations: list[Translation] = []
+    for lang in sorted(set(raw_langs) & rendered):
+        entry = _mapping(raw_langs[lang])
+        if entry is None:
+            continue
+        units = _integer(entry.get("units"), 0)
+        failed = _integer(entry.get("failed_units"), 0)
+        status = "failed" if units > 0 and failed >= units else "done"
+        translations.append(
+            Translation(
+                lang=lang,
+                status=status,
+                links={
+                    "srt": f"{prefix}/subtitles/{lang}.srt",
+                    "vtt": f"{prefix}/subtitles/{lang}.vtt",
+                },
+            )
+        )
+    return translations
 
 
 def _transcript_ref(
@@ -856,6 +917,7 @@ def assemble_report(
     speakers = _speakers(checkpoints, transcript)
     chapters = _chapters(content.get("chapters") if content is not None else None)
     statuses = _stage_statuses(checkpoints, stage_statuses)
+    translations = _translations(checkpoints, settings, job.id)
 
     report = Report(
         schema_version=SCHEMA_VERSION,
@@ -874,7 +936,7 @@ def assemble_report(
         key_quotes=_key_quotes(content.get("key_quotes") if content is not None else None),
         claims=_claims(content.get("claims") if content is not None else None),
         verification=_verifications(checkpoints),
-        translations=[],
+        translations=translations,
         transcript_ref=_transcript_ref(settings, job.id, transcript),
         quality=_quality(
             checkpoints,
@@ -885,6 +947,7 @@ def assemble_report(
             chapters=chapters,
             duration_s=duration_s,
             stage_statuses=statuses,
+            translations=translations,
         ),
     )
 

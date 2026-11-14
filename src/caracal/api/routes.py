@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from python_multipart.multipart import parse_options_header
 
 from caracal.api.auth import bearer_token, require_auth
-from caracal.api.schemas import EnrollSpeakerIn, JobCreate, SpeakerList
+from caracal.api.schemas import EnrollSpeakerIn, JobCreate, SpeakerList, TranslateIn
 from caracal.db.tables import JOB_TERMINAL_STATUSES
 from caracal.errors import CaracalError, ErrorCode
 from caracal.ingest.upload import MultipartFileStream
@@ -197,6 +197,13 @@ async def get_subtitle(job_id: uuid.UUID, filename: str, request: Request) -> Re
         media_type=media_type,
         headers={"Content-Disposition": f'attachment; filename="{job_id}.{lang}.{ext}"'},
     )
+
+
+@router.post("/jobs/{job_id}/translate")
+async def translate_job(job_id: uuid.UUID, payload: TranslateIn, request: Request) -> JSONResponse:
+    """Translate a finished job into more languages (docs/03 §2, docs/04 §10)."""
+    result = await _service(request).translate_job(job_id, payload.target_langs)
+    return JSONResponse(status_code=202, content=result.model_dump(mode="json"))
 
 
 async def job_event_stream(

@@ -12,7 +12,7 @@ import json
 import uuid
 from collections.abc import AsyncIterator, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -152,6 +152,10 @@ class Keys:
     def lock_retention(self) -> str:
         return self.key("lock", "retention")
 
+    def lock_translate(self, job_id: uuid.UUID | str) -> str:
+        """The per-job translate lock: two requests for one job never translate concurrently."""
+        return self.key("lock", "translate", str(job_id))
+
     def events(self, job_id: uuid.UUID) -> str:
         return self.key("events", str(job_id))
 
@@ -170,16 +174,44 @@ class Keys:
 
 @dataclass(frozen=True)
 class Delivery:
-    """One stream entry handed to a consumer."""
+    """One stream entry handed to a consumer.
+
+    ``payload`` is the JSON object the producer attached to the entry (empty when it attached
+    none). Languages for a ``translate`` delivery travel here, so two requests for the same
+    job can never overwrite each other (verdict 35 fix 1).
+    """
 
     entry_id: str
     job_id: uuid.UUID
     kind: str
     times_delivered: int
+    payload: dict[str, Any] = field(default_factory=dict)
 
 
 def _fields(raw: Mapping[object, object]) -> dict[str, str]:
     return {_text(key): _text(value) for key, value in raw.items()}
+
+
+def _entry_payload(fields: Mapping[str, str], entry_id: object) -> dict[str, Any]:
+    """Decode the entry's ``payload`` field; absent means an empty payload."""
+    raw = fields.get("payload")
+    if raw is None:
+        return {}
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise CaracalError(
+            ErrorCode.INTERNAL,
+            "malformed queue entry",
+            {"entry_id": _text(entry_id)},
+        ) from exc
+    if not isinstance(value, dict):
+        raise CaracalError(
+            ErrorCode.INTERNAL,
+            "malformed queue entry",
+            {"entry_id": _text(entry_id)},
+        )
+    return cast("dict[str, Any]", value)
 
 
 def _delivery(entry_id: object, raw: Mapping[object, object], times_delivered: int) -> Delivery:
@@ -198,6 +230,7 @@ def _delivery(entry_id: object, raw: Mapping[object, object], times_delivered: i
         job_id=job_id,
         kind=kind,
         times_delivered=times_delivered,
+        payload=_entry_payload(fields, entry_id),
     )
 
 
@@ -224,16 +257,31 @@ class JobQueue:
         except RedisError as exc:
             raise _redis_error("xgroup_create", exc) from exc
 
-    async def enqueue(self, job_id: uuid.UUID, kind: str) -> str:
-        """Append a job to the stream, trimming it approximately to 10 000 entries."""
+    async def enqueue(
+        self,
+        job_id: uuid.UUID,
+        kind: str,
+        payload: Mapping[str, Any] | None = None,
+    ) -> str:
+        """Append a job to the stream, trimming it approximately to 10 000 entries.
+
+        ``payload`` is a JSON object carried inside the entry itself (``Delivery.payload``),
+        so per-request data such as a translate delivery's languages is never shared between
+        concurrent requests for the same job.
+        """
+        fields: dict[str, str] = {
+            "job_id": str(job_id),
+            "kind": kind,
+            "enqueued_at": datetime.now(UTC).isoformat(timespec="milliseconds"),
+        }
+        if payload is not None:
+            fields["payload"] = json.dumps(dict(payload), ensure_ascii=False, separators=(",", ":"))
         try:
             entry_id = await self.redis.xadd(
                 self.keys.jobs_stream(),
-                {
-                    "job_id": str(job_id),
-                    "kind": kind,
-                    "enqueued_at": datetime.now(UTC).isoformat(timespec="milliseconds"),
-                },
+                # redis-py types the field dict as a union of scalar keys/values; every value
+                # here is a string, which that union accepts.
+                cast("Any", fields),
                 maxlen=_STREAM_MAXLEN,
                 approximate=True,
             )

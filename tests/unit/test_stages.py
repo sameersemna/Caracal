@@ -64,6 +64,7 @@ from caracal.queue import Keys, whisper_lock
 from caracal.search import SearchRouter
 from caracal.speakers.diarize import DiarizationResult, Diarizer, Turn
 from caracal.storage import JobFiles, UploadFiles
+from caracal.subtitles import cues_from_transcript
 
 MakeSettings = Callable[..., Settings]
 PREFIX = "t3st:"
@@ -734,6 +735,133 @@ async def test_subtitles_writes_srt_and_vtt(make_settings: MakeSettings, tmp_pat
     assert "hello world" in srt
     assert vtt.startswith("WEBVTT\n\n")
     assert "goodbye world" in vtt
+
+
+def _translating_llm(settings: Settings, prefix: str = "DE") -> tuple[httpx.AsyncClient, LLMClient]:
+    """An LLM that translates every input cue verbatim, prefixed with ``prefix``."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        user = next(message for message in body["messages"] if message["role"] == "user")
+        payload = json.loads(user["content"])
+        return json_response(
+            {"cues": [{"i": cue["i"], "text": f"{prefix} {cue['text']}"} for cue in payload["cues"]]}
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return http, LLMClient(settings, http)
+
+
+async def test_stage_translate_checkpoints_units_and_cue_timings(
+    make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path, CARACAL_DEFAULT_TARGET_LANGS=["de"])
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    transcript = _transcript(["A few years ago", "I started running."])
+    files.write_json(files.transcript_json, transcript.to_dict())
+    http, llm = _translating_llm(settings)
+    try:
+        result = await stage_translate(_context(settings, repos, files, llm=llm, job_id=job.id))
+    finally:
+        await http.aclose()
+
+    assert result.status == "done"
+    langs = result.output["langs"]
+    assert isinstance(langs, dict)
+    entry = langs["de"]
+    source_cues = cues_from_transcript(transcript)
+    assert entry["units"] == 1
+    assert entry["failed_units"] == 0
+    assert entry["overlong_cues"] == 0
+    assert isinstance(entry["duration_s"], float)
+    assert entry["duration_s"] >= 0.0
+    assert [cue["start"] for cue in entry["cues"]] == [cue.start for cue in source_cues]
+    assert [cue["end"] for cue in entry["cues"]] == [cue.end for cue in source_cues]
+    assert "DE A few years ago I started running." == " ".join(
+        " ".join(cue["lines"]) for cue in entry["cues"]
+    )
+
+
+async def test_stage_subtitles_renders_every_translated_language(
+    make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path, CARACAL_DEFAULT_TARGET_LANGS=["de"])
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    transcript = _transcript(["A few years ago", "I started running."])
+    files.write_json(files.transcript_json, transcript.to_dict())
+    http, llm = _translating_llm(settings)
+    try:
+        translated = await stage_translate(_context(settings, repos, files, llm=llm, job_id=job.id))
+    finally:
+        await http.aclose()
+    _write_output(files, Stage.TRANSLATE, translated.output)
+
+    result = await stage_subtitles(_context(settings, repos, files, job_id=job.id))
+
+    assert result.status == "done"
+    assert result.output["files"] == {
+        "source.srt": "subtitles/source.srt",
+        "source.vtt": "subtitles/source.vtt",
+        "de.srt": "subtitles/de.srt",
+        "de.vtt": "subtitles/de.vtt",
+    }
+    source = cues_from_transcript(transcript)
+    translated_srt = files.subtitle("de", "srt").read_text(encoding="utf-8")
+    assert translated_srt.startswith("1\n00:00:00,000 --> ")
+    assert translated_srt.count("\n\n") == len(source) - 1
+    assert "DE A few years" in translated_srt
+    assert "ago I started running." in translated_srt
+    translated_vtt = files.subtitle("de", "vtt").read_text(encoding="utf-8")
+    assert translated_vtt.startswith("WEBVTT\n\n")
+    assert "DE A few years" in translated_vtt
+
+
+async def test_on_demand_translate_ignores_the_plan_skip(make_settings: MakeSettings, tmp_path: Path) -> None:
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    files.write_json(
+        files.transcript_json,
+        _transcript(["A few years ago", "I started running."]).to_dict(),
+    )
+    _write_output(
+        files,
+        Stage.PLAN,
+        {
+            "run": {"translate": False},
+            "reasons": {"translate": "no target language differs from the source"},
+            "content_profile": {
+                "likely_genre": "talk",
+                "expected_speakers": None,
+                "needs_identity": True,
+                "checkworthy_domain": False,
+            },
+            "budgets": {"search_queries": 0, "llm_calls": 0, "claims": 0},
+            "music_detected": False,
+            "languages": None,
+        },
+    )
+    http, llm = _translating_llm(settings)
+    try:
+        ctx = replace(
+            _context(settings, repos, files, llm=llm, job_id=job.id),
+            translate_targets=["ar"],
+        )
+        result = await stage_translate(ctx)
+    finally:
+        await http.aclose()
+
+    assert result.status == "done"
+    assert result.reason is None
+    assert set(result.output["langs"]) == {"ar"}
 
 
 # --- whole M1 pipeline -----------------------------------------------------------------
@@ -1910,3 +2038,113 @@ async def test_verify_stage_skips_when_there_is_nothing_to_verify(
     assert result.status == "skipped"
     assert result.reason == "nothing to verify"
     assert fake.requests == []
+
+
+async def test_on_demand_translate_keeps_other_languages_and_overwrites_requested(
+    make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path, CARACAL_DEFAULT_TARGET_LANGS=["de"])
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    files.write_json(
+        files.transcript_json,
+        _transcript(["A few years ago", "I started running."]).to_dict(),
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        system = body["messages"][0]["content"]
+        prefix = "AR" if "Arabic" in system else "DE"
+        user = next(message for message in body["messages"] if message["role"] == "user")
+        payload = json.loads(user["content"])
+        return json_response(
+            {"cues": [{"i": cue["i"], "text": f"{prefix} {cue['text']}"} for cue in payload["cues"]]}
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    llm = LLMClient(settings, http)
+    try:
+        first = await stage_translate(_context(settings, repos, files, llm=llm, job_id=job.id))
+        _write_output(files, Stage.TRANSLATE, first.output)
+        ctx = replace(
+            _context(settings, repos, files, llm=llm, job_id=job.id),
+            translate_targets=["ar"],
+        )
+        second = await stage_translate(ctx)
+    finally:
+        await http.aclose()
+
+    assert first.status == "done"
+    assert second.status == "done"
+    first_langs = first.output["langs"]
+    second_langs = second.output["langs"]
+    assert isinstance(first_langs, dict)
+    assert isinstance(second_langs, dict)
+    assert set(second_langs) == {"de", "ar"}
+    assert second_langs["de"] == first_langs["de"]
+    assert "AR" in " ".join(second_langs["ar"]["cues"][0]["lines"])
+
+
+async def test_translate_stage_preserves_a_previous_checkpoint_when_it_skips(
+    make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    files.write_json(
+        files.transcript_json,
+        _transcript(["A few years ago", "I started running."]).to_dict(),
+    )
+    previous = {
+        "langs": {
+            "de": {
+                "units": 1,
+                "failed_units": 0,
+                "overlong_cues": 0,
+                "duration_s": 1.0,
+                "cues": [{"start": 0.0, "end": 1.0, "speaker": None, "lines": ["Vor ein paar Jahren"]}],
+            }
+        }
+    }
+    _write_output(files, Stage.TRANSLATE, previous)
+
+    ctx = replace(
+        _context(settings, repos, files, llm=None, job_id=job.id),
+        translate_targets=["ar"],
+    )
+    result = await stage_translate(ctx)
+
+    assert result.status == "skipped"
+    assert result.output == previous
+
+
+async def test_translate_stage_counts_failed_units_and_keeps_source_text(
+    make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path, CARACAL_DEFAULT_TARGET_LANGS=["de"])
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    transcript = _transcript(["A few years ago", "I started running."])
+    files.write_json(files.transcript_json, transcript.to_dict())
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return json_response({"cues": []})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    llm = LLMClient(settings, http)
+    try:
+        result = await stage_translate(_context(settings, repos, files, llm=llm, job_id=job.id))
+    finally:
+        await http.aclose()
+
+    assert result.status == "done"
+    entry = result.output["langs"]["de"]
+    assert entry["units"] == 1
+    assert entry["failed_units"] == 1
+    assert "A few years ago I started running." in " ".join(" ".join(cue["lines"]) for cue in entry["cues"])

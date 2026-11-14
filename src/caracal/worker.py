@@ -23,7 +23,7 @@ from caracal.errors import CaracalError, ErrorCode
 from caracal.ingest.ssrf import Resolver, SystemResolver
 from caracal.llm.client import LLMClient
 from caracal.log import get_logger
-from caracal.pipeline.runner import RunnerDeps, run_pipeline
+from caracal.pipeline.runner import RunnerDeps, run_pipeline, run_translate
 from caracal.pipeline.stages import Repos, Stage, StageFn, m2_registry
 from caracal.queue import (
     Delivery,
@@ -31,6 +31,7 @@ from caracal.queue import (
     Keys,
     is_cancelled,
     publish_event,
+    redis_lock,
     whisper_lock,
 )
 from caracal.search import BraveProvider, ExaProvider, SearchProvider, SearchRouter
@@ -247,7 +248,23 @@ class Worker:
         touch = asyncio.create_task(self._touch_entry(delivery.entry_id))
         status: str | None = None
         try:
-            status = await run_pipeline(delivery.job_id, self._deps(delivery.entry_id), self.registry)
+            if delivery.kind == "translate":
+                # Serialise translate runs per job: back-to-back requests must not read the
+                # same checkpoint and lose each other's languages. Wait for the lock, never
+                # drop the delivery (verdict 35 fix 1).
+                async with redis_lock(self.redis, self.keys.lock_translate(delivery.job_id)):
+                    status = await run_translate(
+                        delivery.job_id,
+                        self._deps(delivery.entry_id),
+                        self.registry,
+                        payload=delivery.payload,
+                    )
+            else:
+                status = await run_pipeline(
+                    delivery.job_id,
+                    self._deps(delivery.entry_id),
+                    self.registry,
+                )
         except asyncio.CancelledError:
             raise
         except CaracalError as exc:

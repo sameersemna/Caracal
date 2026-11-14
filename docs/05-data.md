@@ -40,7 +40,7 @@ Keys (shown with the default prefix `caracal:`):
 
 | Key | Type | Use |
 |---|---|---|
-| `caracal:jobs` | stream | job queue: `XADD` `{job_id, kind: "pipeline"|"translate", enqueued_at}`; consumer group `workers` |
+| `caracal:jobs` | stream | job queue: `XADD` `{job_id, kind: "pipeline"|"translate", enqueued_at, payload?}` (`payload` = JSON, e.g. `{"target_langs": ["de"]}` for translate); consumer group `workers` |
 | `caracal:worker:<worker_id>` | string, TTL 30 s | worker heartbeat (refreshed every 10 s) |
 | `caracal:lock:whisper` | string | whisper single-slot lock (`SET NX PX 960000`, owner token, renewed; release only if owner matches — Lua) |
 | `caracal:lock:retention` | string | daily retention job singleton |

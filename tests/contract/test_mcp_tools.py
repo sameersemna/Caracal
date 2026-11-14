@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import math
 import uuid
 from collections.abc import Callable
@@ -160,6 +161,7 @@ async def test_every_registered_tool_declares_an_object_output_schema(
         "list_jobs",
         "get_transcript",
         "get_report",
+        "translate_job",
         "list_speakers",
         "enroll_speaker",
         "delete_speaker",
@@ -599,6 +601,43 @@ async def test_speaker_tool_errors_carry_the_error_code(
     assert "invalid_input: job_id must be a UUID" in _text(bad_job)
     assert bad_speaker.is_error is True
     assert "invalid_input: speaker_id must be a UUID" in _text(bad_speaker)
+
+
+async def test_translate_job_queues_the_requested_languages(
+    make_harness: Callable[..., Harness],
+) -> None:
+    h = make_harness()
+    done_id = await _job(h, status="done")
+    running_id = await _job(h, status="running")
+
+    async with Client(build_mcp(_service(h), h.settings)) as client:
+        result = await client.call_tool(
+            "translate_job",
+            {"job_id": str(done_id), "target_langs": ["de", "ar"]},
+        )
+        not_ready = await client.call_tool(
+            "translate_job",
+            {"job_id": str(running_id), "target_langs": ["de"]},
+        )
+        bad_code = await client.call_tool(
+            "translate_job",
+            {"job_id": str(done_id), "target_langs": ["english"]},
+        )
+
+    assert result.is_error is False
+    payload = result.structured_content
+    assert payload is not None
+    assert payload["job_id"] == str(done_id)
+    assert payload["status"] == "queued"
+    entries = await h.redis.xrange(h.keys.jobs_stream())
+    assert len(entries) == 1
+    assert entries[0][1][b"kind"] == b"translate"
+    assert json.loads(entries[0][1][b"payload"]) == {"target_langs": ["de", "ar"]}
+
+    assert not_ready.is_error is True
+    assert "job_not_ready" in _text(not_ready)
+    assert bad_code.is_error is True
+    assert "invalid_input" in _text(bad_code)
 
 
 async def test_speaker_tool_descriptions_state_the_biometric_consent_rule(

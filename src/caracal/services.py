@@ -25,6 +25,7 @@ from typing import Any, Literal, cast
 from pydantic import ValidationError
 from redis.asyncio import Redis
 
+from caracal.analysis.translate import is_valid_target_lang
 from caracal.api.schemas import (
     AnalyzeSummary,
     CancelResult,
@@ -40,6 +41,7 @@ from caracal.api.schemas import (
     SpeakerDeleted,
     SpeakerList,
     StageStatus,
+    TranslateQueued,
     UploadCreated,
 )
 from caracal.config import Settings
@@ -504,6 +506,54 @@ class JobService:
         return path.read_bytes(), media_type
 
     # -- report -----------------------------------------------------------
+
+    async def translate_job(self, job_id: uuid.UUID, target_langs: list[str]) -> TranslateQueued:
+        """Queue an on-demand translation for a finished job (docs/03 §2-§3).
+
+        The job keeps its ``done`` status: only translate, subtitles and assemble re-run,
+        and existing translations are kept. The requested languages travel inside the queue
+        entry, so back-to-back requests for one job each keep their own languages.
+        """
+        job = await self.repos.jobs.get(job_id)
+        if job is None:
+            raise _not_found(job_id)
+        if job.status != "done":
+            raise CaracalError(
+                ErrorCode.JOB_NOT_READY,
+                "job is not done",
+                {"job_id": str(job_id), "status": job.status},
+            )
+        languages: list[str] = []
+        for code in target_langs:
+            if not is_valid_target_lang(code):
+                raise CaracalError(
+                    ErrorCode.INVALID_INPUT,
+                    "invalid target language code",
+                    {"code": code},
+                )
+            if code not in languages:
+                languages.append(code)
+        if not languages:
+            raise CaracalError(
+                ErrorCode.INVALID_INPUT,
+                "target_langs must not be empty",
+                {"job_id": str(job_id)},
+            )
+
+        try:
+            await self.queue.enqueue(job_id, "translate", payload={"target_langs": languages})
+        except Exception as exc:
+            raise CaracalError(
+                ErrorCode.DEPENDENCY_DOWN,
+                "queue unavailable",
+                {"job_id": str(job_id)},
+                retryable=True,
+            ) from exc
+        logger.info(
+            "translate queued",
+            extra={"job_id": str(job_id), "langs": ",".join(languages)},
+        )
+        return TranslateQueued(job_id=job_id, status="queued", links=self.links(job_id))
 
     async def report(self, job_id: uuid.UUID) -> Report:
         """The finished report from the shared store (docs/03 §2-§3).

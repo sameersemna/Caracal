@@ -60,10 +60,10 @@ AVAILABLE: tuple[Row, ...] = (
         ),
         ("list_speakers", "enroll_speaker", "delete_speaker"),
     ),
+    Row("translate", (("POST", "/v1/jobs/{job_id}/translate"),), ("translate_job",)),
 )
 
 PENDING: tuple[Row, ...] = (
-    Row("translate", (("POST", "/v1/jobs/{job_id}/translate"),), ("translate_job",), "T3.3"),
     Row("ask", (("POST", "/v1/jobs/{job_id}/ask"),), ("ask_about_audio",), "T3.5"),
     Row("full-text search", (("GET", "/v1/search"),), ("search_transcripts",), "T3.5"),
 )
@@ -237,6 +237,23 @@ async def test_report_json_returns_equal_data(make_harness: Callable[..., Harnes
 
     assert rest.status_code == 200
     assert mcp.structured_content == rest.json()
+
+
+async def test_translate_queues_equal_data(make_harness: Callable[..., Harness]) -> None:
+    h = make_harness()
+    job_id = await _done_job(h)
+
+    mcp = await _mcp_call(h, "translate_job", {"job_id": str(job_id), "target_langs": ["de"]})
+    async with h.client() as client:
+        rest = await client.post(
+            f"/v1/jobs/{job_id}/translate",
+            headers=AUTH,
+            json={"target_langs": ["de"]},
+        )
+
+    assert rest.status_code == 202
+    assert mcp.structured_content == rest.json()
+    assert rest.json()["status"] == "queued"
 
 
 def _diarize_checkpoint(h: Harness, job_id: uuid.UUID) -> None:
