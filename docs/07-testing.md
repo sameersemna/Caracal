@@ -13,6 +13,13 @@ The gate makes **no network calls** outside localhost fakes. Live tests are excl
 
 ## 2. `scripts/check_rules.py` (fails with file:line for each hit in `src/`)
 
+Code rules (environment access, subprocess, eval/exec, pickle, forbidden imports) are checked on the **AST**
+(`ast.parse` + a `NodeVisitor`), not with line regexes, so multi-line calls and `from x import y` aliases are caught.
+Line regexes are only used for comment/text markers (TODO etc.) and string-literal rules. In particular these must be
+reported: `from os import environ|getenv|putenv` (any alias), `os.environ`, `os.getenv`, `os.putenv`;
+`asyncio.create_subprocess_shell`, `os.system`, `os.popen`, any `subprocess.*` call with `shell=True` or whose first
+argument is a string literal / f-string (even on the next line), including `from subprocess import run` aliases.
+
 - `os.environ` / `os.getenv` outside `src/caracal/config.py`
 - `print(` anywhere in `src/` (stdout is the MCP stdio channel — use `log.py`)
 - `shell=True`, `os.system`, `subprocess.call(`/`run(` with a string first arg, `eval(`, `exec(`, `pickle.load`
