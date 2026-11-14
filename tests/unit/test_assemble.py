@@ -8,7 +8,7 @@ evidence ids the assembler must resolve are the real segment ids of the fixture.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -714,3 +714,184 @@ async def test_deterministic_review_flags(
     errors = [flag for flag in flags if flag.severity == "error"]
     assert [flag.field for flag in errors] == [f"stages.{Stage.VERIFY.value}"]
     assert errors[0].message == "stage verify failed"
+
+
+# --- T3.2: verify checkpoint -----------------------------------------------------------
+
+
+async def test_verify_speakers_win_and_web_hits_become_evidence(
+    make_settings: Callable[..., Settings], tmp_path: Path
+) -> None:
+    settings = make_settings(CARACAL_PUBLIC_BASE_URL="http://caracal.test")
+    repos = make_fake_repos()
+    job = await _job(repos)
+    checkpoints = _full_checkpoints()
+    checkpoints[Stage.VERIFY.value] = _checkpoint(
+        "done",
+        {
+            "verifications": [
+                {
+                    "target": "claim:c1",
+                    "verdict": "supported",
+                    "confidence": 0.7,
+                    "rationale": "two independent sources agree",
+                    "sources": [
+                        {
+                            "url": "https://www.example.org/fact",
+                            "title": "Fact check",
+                            "snippet": "The fact is correct.",
+                            "evidence_id": "web:1",
+                        }
+                    ],
+                }
+            ],
+            "speakers": [
+                {
+                    "label": "S1",
+                    "talk_time_s": 59.5,
+                    "share": 1.0,
+                    "first_seen_s": 0.18,
+                    "name": "Lindsay McMahon",
+                    "confidence": 0.62,
+                    "role": "host",
+                    "candidates": [
+                        {
+                            "name": "Lindsay McMahon",
+                            "confidence": 0.62,
+                            "sources": ["self_intro", "web"],
+                            "evidence": ["seg:0", "web:1"],
+                        }
+                    ],
+                    "description": "hosts the show",
+                    "evidence": ["seg:0", "web:1"],
+                }
+            ],
+            "flags": [
+                {
+                    "severity": "info",
+                    "field": "speakers.S1.name",
+                    "message": "quote attributed to John F. Kennedy on the web",
+                }
+            ],
+            "hits": [
+                {
+                    "id": "web:1",
+                    "url": "https://www.example.org/fact",
+                    "title": "Fact check",
+                    "snippet": "The fact is correct.",
+                    "text": None,
+                    "provider": "brave",
+                    "query": "the fact",
+                }
+            ],
+            "queries_used": 1,
+            "cost_usd": 0.0,
+        },
+    )
+
+    report = assemble_report(
+        checkpoints,
+        job=job,
+        settings=settings,
+        transcript=_transcript(speaker="S1"),
+    )
+
+    assert report.speakers[0].name == "Lindsay McMahon"
+    assert report.speakers[0].confidence == pytest.approx(0.62)
+    assert report.verification[0].verdict == "supported"
+    assert report.verification[0].sources[0].evidence_id == "web:1"
+    assert report.evidence_index["web:1"].kind == "web"
+    assert report.evidence_index["web:1"].ref == "https://www.example.org/fact"
+    assert report.evidence_index["web:1"].excerpt == "Fact check — The fact is correct."
+    assert "web:0" not in report.evidence_index
+    flag_messages = [flag.message for flag in report.quality.review_flags]
+    assert flag_messages.count("quote attributed to John F. Kennedy on the web") == 1
+
+
+async def test_unknown_web_source_is_dropped_and_the_verdict_forced_unverified(
+    make_settings: Callable[..., Settings], tmp_path: Path
+) -> None:
+    settings = make_settings(CARACAL_PUBLIC_BASE_URL="http://caracal.test")
+    repos = make_fake_repos()
+    job = await _job(repos)
+    checkpoints = _full_checkpoints()
+    checkpoints[Stage.VERIFY.value] = _checkpoint(
+        "done",
+        {
+            "verifications": [
+                {
+                    "target": "claim:c1",
+                    "verdict": "supported",
+                    "confidence": 0.9,
+                    "rationale": "invented source",
+                    "sources": [
+                        {
+                            "url": "https://www.example.org/missing",
+                            "title": "Missing",
+                            "snippet": "not indexed",
+                            "evidence_id": "web:99",
+                        }
+                    ],
+                }
+            ],
+            "speakers": [],
+            "flags": [],
+            "hits": [
+                {
+                    "id": "web:1",
+                    "url": "https://www.example.org/fact",
+                    "title": "Fact check",
+                    "snippet": "The fact is correct.",
+                    "text": None,
+                    "provider": "brave",
+                    "query": "the fact",
+                }
+            ],
+            "queries_used": 1,
+            "cost_usd": 0.0,
+        },
+    )
+
+    report = assemble_report(
+        checkpoints,
+        job=job,
+        settings=settings,
+        transcript=_transcript(speaker="S1"),
+    )
+
+    assert report.verification[0].verdict == "unverified"
+    assert report.verification[0].sources == []
+    assert report.quality.dropped_uncited == 1
+    assert "web:99" not in report.evidence_index
+
+
+async def test_skipped_verify_keeps_the_identity_flags(
+    make_settings: Callable[..., Settings], tmp_path: Path
+) -> None:
+    settings = make_settings(CARACAL_PUBLIC_BASE_URL="http://caracal.test")
+    repos = make_fake_repos()
+    job = await _job(repos)
+    checkpoints = _full_checkpoints()
+    identity = checkpoints[Stage.IDENTITY.value]
+    assert identity is not None
+    output = dict(identity["output"])
+    output["flags"] = [
+        {
+            "severity": "warn",
+            "field": "speakers",
+            "message": "performance content: speaker identities uncertain",
+        }
+    ]
+    checkpoints[Stage.IDENTITY.value] = _checkpoint("done", output)
+    checkpoints[Stage.VERIFY.value] = _checkpoint("skipped", None)
+
+    report = assemble_report(
+        checkpoints,
+        job=job,
+        settings=settings,
+        transcript=_transcript(speaker="S1"),
+    )
+
+    assert [flag.message for flag in report.quality.review_flags] == [
+        "performance content: speaker identities uncertain"
+    ]

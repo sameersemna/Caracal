@@ -17,15 +17,18 @@ import pytest
 from tests.fakes.ollama import FakeOllama, json_response
 
 from caracal.analysis.identity import (
+    PERFORMANCE_FLAG,
     IdentityResult,
     VoiceprintMatch,
+    WebSource,
+    apply_web_sources,
     resolve_identities,
 )
 from caracal.asr import Segment, Transcript
 from caracal.config import Settings
 from caracal.llm.client import LLMClient
 from caracal.llm.prompts import load_prompt
-from caracal.report.model import Entity, SpeakerIdentity
+from caracal.report.model import Entity, ReviewFlag, SpeakerCandidate, SpeakerIdentity
 
 MakeSettings = Callable[..., Settings]
 
@@ -942,3 +945,109 @@ async def test_plan_and_content_genre_reach_the_identity_prompt(
     assert "[plan:likely_genre] comedy" in block.group(1)
     assert "[content:genre] stand-up" in block.group(1)
     assert "[content:tone] satirical, playful" in block.group(1)
+
+
+# --- T3.2: web sources feed the same fusion ---------------------------------------------
+
+
+def _named_speaker(label: str, name: str, confidence: float) -> SpeakerIdentity:
+    return SpeakerIdentity(
+        label=label,
+        talk_time_s=60.0,
+        share=1.0,
+        first_seen_s=0.0,
+        name=name if confidence >= 0.6 else None,
+        confidence=confidence if confidence >= 0.6 else 0.0,
+        candidates=[
+            SpeakerCandidate(
+                name=name,
+                confidence=confidence,
+                sources=["self_intro"],
+                evidence=["seg:0"],
+            )
+        ],
+        evidence=["seg:0"],
+    )
+
+
+def test_apply_web_sources_confirms_and_expands_a_given_name() -> None:
+    speaker = _named_speaker("S1", "Lindsay", 0.55)
+    source = WebSource(
+        label="S1",
+        name="Lindsay McMahon",
+        score=0.15,
+        evidence=["web:1", "web:4"],
+        replace="Lindsay",
+    )
+
+    result = apply_web_sources([speaker], [], [source])
+
+    identity = result.speakers[0]
+    assert identity.name == "Lindsay McMahon"
+    assert identity.confidence == pytest.approx(0.6175)
+    candidate = identity.candidates[0]
+    assert candidate.name == "Lindsay McMahon"
+    assert candidate.sources == ["self_intro", "web"]
+    assert candidate.evidence == ["seg:0", "web:1", "web:4"]
+    assert identity.evidence == ["seg:0", "web:1", "web:4"]
+    assert result.flags == []
+
+
+def test_apply_web_sources_attribution_is_a_candidate_only_and_flags_info() -> None:
+    speaker = SpeakerIdentity(
+        label="S1",
+        talk_time_s=55.0,
+        share=1.0,
+        first_seen_s=0.0,
+        name=None,
+        confidence=0.0,
+        candidates=[],
+        evidence=["seg:0"],
+    )
+    source = WebSource(
+        label="S1",
+        name="John F. Kennedy",
+        score=0.5,
+        evidence=["web:2", "web:3"],
+        flag="quote attributed to John F. Kennedy on the web",
+    )
+
+    result = apply_web_sources([speaker], [], [source])
+
+    identity = result.speakers[0]
+    assert identity.name is None
+    assert identity.confidence == 0.0
+    assert len(identity.candidates) == 1
+    assert identity.candidates[0].confidence == pytest.approx(0.5)
+    assert identity.candidates[0].sources == ["web"]
+    assert identity.candidates[0].evidence == ["web:2", "web:3"]
+    flag = result.flags[0]
+    assert flag.severity == "info"
+    assert flag.field == "speakers.S1.name"
+    assert flag.message == "quote attributed to John F. Kennedy on the web"
+
+
+def test_apply_web_sources_preserves_performance_and_recomputes_ambiguity_once() -> None:
+    speaker = SpeakerIdentity(
+        label="S1",
+        talk_time_s=60.0,
+        share=1.0,
+        first_seen_s=0.0,
+        name=None,
+        confidence=0.0,
+        candidates=[
+            SpeakerCandidate(name="Lindsay", confidence=0.5, sources=["self_intro"], evidence=["seg:0"]),
+            SpeakerCandidate(name="Michelle", confidence=0.5, sources=["self_intro"], evidence=["seg:1"]),
+        ],
+        evidence=["seg:0"],
+    )
+    flags = [
+        ReviewFlag(severity="warn", field="speakers", message=PERFORMANCE_FLAG),
+        ReviewFlag(severity="warn", field="speakers.S1.name", message="ambiguous identity"),
+    ]
+
+    result = apply_web_sources([speaker], flags, [])
+
+    messages = [flag.message for flag in result.flags]
+    assert messages.count("ambiguous identity") == 1
+    assert PERFORMANCE_FLAG in messages

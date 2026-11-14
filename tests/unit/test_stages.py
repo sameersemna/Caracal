@@ -24,6 +24,7 @@ from tests.fakes.ollama import FakeOllama, json_response
 from tests.fakes.redis import RecordingRedis
 from tests.fakes.repo import make_fake_repos
 from tests.fakes.resolver import FakeResolver
+from tests.fakes.search import FakeProvider, make_hit
 from tests.fakes.whisper import FakeWhisper
 from tests.repo_contract import Repos
 
@@ -60,6 +61,7 @@ from caracal.pipeline.stages import (
     stage_voiceprint,
 )
 from caracal.queue import Keys, whisper_lock
+from caracal.search import SearchRouter
 from caracal.speakers.diarize import DiarizationResult, Diarizer, Turn
 from caracal.storage import JobFiles, UploadFiles
 
@@ -121,6 +123,7 @@ def _context(
     cancelled: Callable[[], Awaitable[bool]] | None = None,
     job_id: uuid.UUID | None = None,
     llm: LLMClient | None = None,
+    search: SearchRouter | None = None,
 ) -> StageContext:
     async def load(stage: Stage) -> dict[str, object] | None:
         value = files.read_json(files.stage(stage))
@@ -142,6 +145,7 @@ def _context(
         resolver=FakeResolver(),
         redis=redis,
         keys=keys,
+        search=search,
         cancelled=cancelled if cancelled is not None else _never,
     )
 
@@ -1666,3 +1670,243 @@ async def test_identity_stage_skips_without_an_llm(make_settings: MakeSettings, 
 
     assert result.status == "skipped"
     assert result.reason == "llm unavailable"
+
+
+# --- T3.2: verify stage -----------------------------------------------------------------
+
+
+async def test_verify_stage_refines_speakers_and_checkpoints_the_web_hits(
+    make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    settings = make_settings(
+        CARACAL_DATA_DIR=tmp_path,
+        BRAVE_API_KEY="brave-key",
+        REDIS_PREFIX=PREFIX,
+    )
+    redis = RecordingRedis()
+    keys = Keys(PREFIX)
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    files.write_json(
+        files.transcript_json,
+        Transcript(
+            segments=(
+                Segment(
+                    id=0,
+                    start=0.0,
+                    end=4.0,
+                    text="I am Lindsay and this is All Ears English.",
+                    words=(),
+                    avg_logprob=-0.1,
+                    no_speech_prob=0.0,
+                    lang="en",
+                    speaker="S1",
+                ),
+            ),
+            language_code="en",
+            dropped={},
+        ).to_dict(),
+    )
+    _write_output(files, Stage.CONTENT, {"claims": [], "key_quotes": []})
+    _write_output(
+        files,
+        Stage.IDENTITY,
+        {
+            "speakers": [
+                {
+                    "label": "S1",
+                    "talk_time_s": 60.0,
+                    "share": 1.0,
+                    "first_seen_s": 0.0,
+                    "name": None,
+                    "confidence": 0.0,
+                    "candidates": [
+                        {
+                            "name": "Lindsay",
+                            "confidence": 0.55,
+                            "sources": ["self_intro"],
+                            "evidence": ["seg:0"],
+                        }
+                    ],
+                    "evidence": ["seg:0"],
+                }
+            ],
+            "flags": [],
+        },
+    )
+    hits = [
+        make_hit(
+            "brave",
+            rank=1,
+            url="https://www.allearsenglish.com/about/",
+            title="Lindsay McMahon, Founder of All Ears English",
+            snippet="Lindsay McMahon hosts the podcast.",
+        ),
+        make_hit(
+            "brave",
+            rank=2,
+            url="https://podcasts.apple.com/us/podcast/all-ears-english",
+            title="All Ears English Podcast",
+            snippet="Listen to Lindsay McMahon and Michelle Kaplan.",
+        ),
+    ]
+    provider = FakeProvider("brave", [hits])
+    router = SearchRouter(settings, redis, keys, [provider])
+    fake = FakeOllama(
+        [
+            json_response(
+                {"queries": [{"target": "speaker:S1", "queries": ["All Ears English co-host Lindsay"]}]}
+            ),
+            json_response(
+                {
+                    "results": [
+                        {
+                            "label": "S1",
+                            "candidate": "Lindsay",
+                            "full_name": "Lindsay McMahon",
+                            "supported": True,
+                            "web_ids": ["web:1", "web:2"],
+                        }
+                    ]
+                }
+            ),
+        ]
+    )
+    http = httpx.AsyncClient(transport=fake.transport())
+    client = LLMClient(settings, http)
+    try:
+        result = await stage_verify(
+            _context(
+                settings,
+                repos,
+                files,
+                job_id=job.id,
+                llm=client,
+                redis=redis,
+                keys=keys,
+                search=router,
+            )
+        )
+    finally:
+        await http.aclose()
+
+    assert result.status == "done"
+    assert result.output["queries_used"] == 1
+    assert result.output["cost_usd"] == pytest.approx(0.0)
+    hits_output = result.output["hits"]
+    assert isinstance(hits_output, list)
+    assert [hit["id"] for hit in hits_output] == ["web:1", "web:2"]
+    assert hits_output[0]["url"] == "https://www.allearsenglish.com/about/"
+    assert hits_output[0]["provider"] == "brave"
+    speakers = result.output["speakers"]
+    assert isinstance(speakers, list)
+    assert speakers[0]["name"] == "Lindsay McMahon"
+    assert speakers[0]["confidence"] == pytest.approx(0.6175)
+    verifications = result.output["verifications"]
+    assert isinstance(verifications, list)
+    assert verifications[0]["verdict"] == "supported"
+    assert verifications[0]["target"] == "speaker:S1"
+
+
+async def test_verify_stage_skips_without_a_search_provider(
+    make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+
+    result = await stage_verify(_context(settings, repos, files, job_id=job.id))
+
+    assert result.status == "skipped"
+    assert result.reason == "no search provider"
+
+
+async def test_verify_stage_skips_when_there_is_nothing_to_verify(
+    make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    """With search and an LLM available but no targets, the stage decides at run time."""
+    settings = make_settings(
+        CARACAL_DATA_DIR=tmp_path,
+        BRAVE_API_KEY="brave-key",
+        REDIS_PREFIX=PREFIX,
+    )
+    redis = RecordingRedis()
+    keys = Keys(PREFIX)
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    files.write_json(
+        files.transcript_json,
+        Transcript(
+            segments=(
+                Segment(
+                    id=0,
+                    start=0.0,
+                    end=4.0,
+                    text="A short line from the only speaker.",
+                    words=(),
+                    avg_logprob=-0.1,
+                    no_speech_prob=0.0,
+                    lang="en",
+                    speaker="S1",
+                ),
+            ),
+            language_code="en",
+            dropped={},
+        ).to_dict(),
+    )
+    _write_output(files, Stage.CONTENT, {"claims": [], "key_quotes": []})
+    _write_output(
+        files,
+        Stage.IDENTITY,
+        {
+            "speakers": [
+                {
+                    "label": "S1",
+                    "talk_time_s": 60.0,
+                    "share": 1.0,
+                    "first_seen_s": 0.0,
+                    "name": "Daniel Levitin",
+                    "confidence": 0.95,
+                    "candidates": [
+                        {
+                            "name": "Daniel Levitin",
+                            "confidence": 0.95,
+                            "sources": ["metadata", "web"],
+                            "evidence": ["meta:title"],
+                        }
+                    ],
+                    "evidence": ["seg:0"],
+                }
+            ],
+            "flags": [],
+        },
+    )
+    router = SearchRouter(settings, redis, keys, [FakeProvider("brave", [])])
+    fake = FakeOllama([])
+    http = httpx.AsyncClient(transport=fake.transport())
+    client = LLMClient(settings, http)
+    try:
+        result = await stage_verify(
+            _context(
+                settings,
+                repos,
+                files,
+                job_id=job.id,
+                llm=client,
+                redis=redis,
+                keys=keys,
+                search=router,
+            )
+        )
+    finally:
+        await http.aclose()
+
+    assert result.status == "skipped"
+    assert result.reason == "nothing to verify"
+    assert fake.requests == []

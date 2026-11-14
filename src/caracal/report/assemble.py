@@ -29,6 +29,7 @@ from pydantic import ValidationError
 from caracal import __version__
 from caracal.report.evidence import (
     EvidenceIndex,
+    EvidenceItem,
     build_evidence_index,
     normalise_ids,
     validate_citations,
@@ -50,6 +51,7 @@ from caracal.report.model import (
     Summary,
     Topic,
     TranscriptRef,
+    Verification,
 )
 
 if TYPE_CHECKING:
@@ -300,9 +302,17 @@ def _speakers(
     checkpoints: Mapping[str, Mapping[str, Any] | None],
     transcript: Transcript | None,
 ) -> list[SpeakerIdentity]:
-    """Identity's speakers, or unnamed speakers rebuilt from the align statistics."""
-    identity = _output(checkpoints, "identity")
-    raw = identity.get("speakers") if identity is not None else None
+    """Verify's refined speakers when present, else identity's, else the align statistics.
+
+    The verify stage re-runs the identity fusion with the web sources and checkpoints the
+    refined speakers itself; a stage never rewrites another stage's checkpoint (docs/04 §8
+    step 5). Falling back to identity keeps jobs whose verify stage was skipped unchanged.
+    """
+    verify = _output(checkpoints, "verify")
+    raw = verify.get("speakers") if verify is not None else None
+    if not isinstance(raw, list) or not raw:
+        identity = _output(checkpoints, "identity")
+        raw = identity.get("speakers") if identity is not None else None
     speakers: list[SpeakerIdentity] = []
     for item in raw if isinstance(raw, list) else []:
         payload = _mapping(item)
@@ -484,15 +494,42 @@ def _review_flags(
     content: Mapping[str, Any] | None,
     identity: Mapping[str, Any] | None,
 ) -> list[ReviewFlag]:
-    """Flags the plan/content/identity stages already produced."""
+    """Flags the plan/content stages and the speakers' final owner produced.
+
+    The verify checkpoint already carries the identity flags forward (plus the recomputed
+    ambiguity and the web attribution notes), so when it exists it replaces the identity
+    checkpoint's flags instead of duplicating them.
+    """
     plan = _output(checkpoints, "plan")
+    verify = _output(checkpoints, "verify")
+    # A skipped checkpoint persists an empty output; only a verify run that actually wrote
+    # its refined flags replaces the identity flags.
+    verify_flags = verify if verify is not None and "flags" in verify else None
     flags: list[ReviewFlag] = []
-    for source in (plan, content, identity):
+    for source in (plan, content, verify_flags if verify_flags is not None else identity):
         if source is None:
             continue
         flags.extend(_flag_list(source.get("review_flags")))
         flags.extend(_flag_list(source.get("flags")))
     return flags
+
+
+def _verifications(
+    checkpoints: Mapping[str, Mapping[str, Any] | None],
+) -> list[Verification]:
+    """The verify checkpoint's verdicts, validated for the report (docs/03 §5)."""
+    verify = _output(checkpoints, "verify")
+    raw = verify.get("verifications") if verify is not None else None
+    verifications: list[Verification] = []
+    for item in raw if isinstance(raw, list) else []:
+        payload = _mapping(item)
+        if payload is None:
+            continue
+        try:
+            verifications.append(Verification.model_validate(payload))
+        except ValidationError:
+            continue
+    return verifications
 
 
 def _stage_statuses(
@@ -719,6 +756,56 @@ def _hints(job: JobRecord) -> list[str]:
     return hints
 
 
+def _verify_web_hits(
+    checkpoints: Mapping[str, Mapping[str, Any] | None],
+) -> list[dict[str, str]]:
+    """The verify checkpoint's numbered hits, restricted to valid ``web:<n>`` ids.
+
+    The verify stage numbers hits globally from 1 in search-call order (card T3.2), so the
+    ids are taken from the checkpoint rather than re-derived from the list position.
+    """
+    verify = _output(checkpoints, "verify")
+    raw = verify.get("hits") if verify is not None else None
+    hits: list[dict[str, str]] = []
+    for item in raw if isinstance(raw, list) else []:
+        payload = _mapping(item)
+        if payload is None:
+            continue
+        hit_id = _text(payload.get("id"))
+        if hit_id is None or re.fullmatch(r"web:\d+", hit_id) is None:
+            continue
+        hits.append(
+            {
+                "id": hit_id,
+                "url": _text(payload.get("url")) or "",
+                "title": _text(payload.get("title")) or "",
+                "snippet": _text(payload.get("snippet")) or "",
+            }
+        )
+    return hits
+
+
+def _one_based_web_ids(index: EvidenceIndex) -> EvidenceIndex:
+    """Shift ``build_evidence_index``'s zero-based web ids to the documented ``web:1``.
+
+    The verify stage numbers hits globally from 1 in search-call order (card T3.2), while
+    ``build_evidence_index`` numbers the list it receives from 0. Re-keying keeps a
+    verification source's ``web:<n>`` pointing at the hit it was judged against.
+    """
+    items = index.to_dict()
+    shifted: dict[str, EvidenceItem] = {}
+    for key, item in items.items():
+        if not key.startswith("web:"):
+            shifted[key] = item
+            continue
+        try:
+            position = int(key.split(":", 1)[1])
+        except ValueError:
+            continue
+        shifted[f"web:{position + 1}"] = item
+    return EvidenceIndex(shifted)
+
+
 def _evidence_index(
     checkpoints: Mapping[str, Mapping[str, Any] | None],
     *,
@@ -733,15 +820,16 @@ def _evidence_index(
     tags = {str(key): str(value) for key, value in raw_tags.items()}
     voiceprint = _output(checkpoints, "voiceprint") or {}
     matches = _mapping(voiceprint.get("matches")) or {}
-    return build_evidence_index(
+    index = build_evidence_index(
         transcript=transcript,
         platform_meta=_platform_metadata(checkpoints, job),
         probe_tags=tags,
         hints=_hints(job),
         voiceprint_matches=cast("Mapping[str, Sequence[object]]", matches),
         caption_words=caption_words,
-        web_hits=(),
+        web_hits=_verify_web_hits(checkpoints),
     )
+    return _one_based_web_ids(index)
 
 
 def assemble_report(
@@ -785,7 +873,7 @@ def assemble_report(
         entities=_entities(content.get("entities") if content is not None else None),
         key_quotes=_key_quotes(content.get("key_quotes") if content is not None else None),
         claims=_claims(content.get("claims") if content is not None else None),
-        verification=[],
+        verification=_verifications(checkpoints),
         translations=[],
         transcript_ref=_transcript_ref(settings, job.id, transcript),
         quality=_quality(
