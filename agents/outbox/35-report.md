@@ -20,7 +20,7 @@ STATUS: DONE
 - stage_translate writes units/failed_units/overlong_cues/duration_s + cue timings; on-demand mode ignores the plan skip; existing languages survive a re-translation of another language; a skipped on-demand run preserves the previous checkpoint.
 - stage_subtitles renders source and every translated language with source timings.
 - REST/MCP translate on a done job returns 202/queued and enqueues kind `translate`; 409 when not done; 422 for bad codes; 404 for an unknown job; parity row is available and REST/MCP payloads match.
-- worker `translate` delivery runs only translate -> subtitles -> assemble, leaves the job `done` and consumes the request.
+- worker `translate` delivery runs only translate -> subtitles -> assemble, leaves the job `done` and consumes the request; a `translate` delivery for an active job is ignored without advancing its status.
 - assemble maps the translate checkpoint to `translations[]` links/status and raises the translations-failed flag.
 
 ## Measured
@@ -37,8 +37,8 @@ STATUS: DONE
 - ........................................................................ [ 83%]
 - ........................................................................ [ 90%]
 - ........................................................................ [ 96%]
-- .....................................                                    [100%]
-- 1117 passed in 10.15s
+- ......................................                                   [100%]
+- 1118 passed in 10.12s
 - GATE: PASS
 
 ## Deviations

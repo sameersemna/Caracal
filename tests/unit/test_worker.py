@@ -471,3 +471,41 @@ async def test_translate_delivery_reruns_only_translate_subtitles_and_assemble(
     assert job is not None
     assert job.status == "done"
     assert not (files.root / TRANSLATE_REQUEST_FILENAME).exists()
+
+
+async def test_translate_delivery_for_an_active_job_is_ignored(
+    make_settings: MakeSettings, tmp_path: Path, redis: RecordingRedis
+) -> None:
+    keys = Keys(PREFIX)
+    repos = make_fake_repos()
+    job_id = await _new_job(repos)
+    queue = JobQueue(redis, keys)
+    await queue.ensure_group()
+    await queue.enqueue(job_id, "translate")
+
+    calls: list[str] = []
+    registry = {
+        Stage.TRANSLATE: _done_stage(Stage.TRANSLATE, calls),
+        Stage.ASSEMBLE: _done_stage(Stage.ASSEMBLE, calls),
+    }
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path, REDIS_PREFIX=PREFIX, CARACAL_WORKER_CONCURRENCY=1)
+    worker = Worker(
+        settings,
+        redis,
+        repos,
+        registry=registry,
+        worker_id="worker-active",
+        intervals=_fast_intervals(),
+    )
+    stop = asyncio.Event()
+    run = asyncio.create_task(worker.run(stop))
+    try:
+        await _wait_for(lambda: _stream_is_empty(redis, keys))
+    finally:
+        stop.set()
+        await asyncio.wait_for(run, timeout=5)
+
+    assert calls == []
+    job = await repos.jobs.get(job_id)
+    assert job is not None
+    assert job.status == "queued"

@@ -417,6 +417,14 @@ async def run_translate(
     job = await deps.repos.jobs.get(job_id)
     if job is None:
         raise CaracalError(ErrorCode.NOT_FOUND, "job not found", {"job_id": str(job_id)})
+    if job.status != "done":
+        # Only a finished job may gain translations; a manually enqueued translate entry
+        # for an active job must never advance the job through only three stages.
+        logger.warning(
+            "translate delivery ignored: job is not done",
+            extra={"job_id": str(job_id), "status": job.status},
+        )
+        return job.status
     files = JobFiles(deps.settings.CARACAL_DATA_DIR, job_id)
     targets = _read_translate_request(files)
     if targets is None:
