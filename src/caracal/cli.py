@@ -4,9 +4,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import importlib
-import importlib.util
-import shutil
 import signal
 import sys
 from pathlib import Path
@@ -29,20 +26,22 @@ from caracal.db.repo import (
 from caracal.errors import CaracalError
 from caracal.log import configure_logging, get_logger
 from caracal.mcp.server import build_mcp
+from caracal.ops import DoctorCheck, doctor_exit_code, emit_checks, run_doctor, run_retention
 from caracal.queue import make_redis
 from caracal.services import JobService
 from caracal.worker import RepoBundle, Worker
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 
-_COMMANDS = ("serve", "worker", "mcp-stdio", "migrate", "doctor")
+_COMMANDS = ("serve", "worker", "mcp-stdio", "migrate", "doctor", "retention")
 
 _HELP = {
     "serve": "run the REST API and MCP HTTP server",
     "worker": "run the pipeline worker",
     "mcp-stdio": "run the MCP stdio server",
     "migrate": "apply database migrations",
-    "doctor": "validate configuration (no network calls)",
+    "doctor": "check dependencies and configuration",
+    "retention": "delete expired job media and stale uploads",
 }
 
 
@@ -57,6 +56,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     for name in _COMMANDS:
         subparsers.add_parser(name, help=_HELP[name], description=_HELP[name])
+    doctor = subparsers.choices["doctor"]
+    doctor.add_argument("--json", action="store_true", dest="json_output", help="one JSON object per line")
+    doctor.add_argument("--deep", action="store_true", help="run one real search query per provider")
+    retention = subparsers.choices["retention"]
+    retention.add_argument("--dry-run", action="store_true", help="report what would be deleted")
     return parser
 
 
@@ -76,52 +80,65 @@ def _invalid_config_fields(exc: ValidationError) -> list[str]:
     )
 
 
-def _importable(name: str) -> bool:
-    try:
-        return importlib.util.find_spec(name) is not None
-    except (ImportError, ValueError):
-        return False
-
-
-def _diarization_status() -> dict[str, object]:
-    """Report the optional speakers extra: pyannote importable and CUDA usable."""
-    pyannote = _importable("pyannote.audio")
-    torch_installed = _importable("torch")
-    cuda = False
-    if torch_installed:
-        try:
-            torch_module = importlib.import_module("torch")
-            cuda = bool(torch_module.cuda.is_available())
-        except Exception:
-            cuda = False
-    return {"pyannote": pyannote, "torch": torch_installed, "cuda": cuda}
-
-
-def _js_runtime_status() -> dict[str, object]:
-    """Report the JS runtime yt-dlp needs for YouTube's challenge (verdict 25 D5)."""
-    return {"node": shutil.which("node"), "yt_dlp_ejs": _importable("yt_dlp_ejs")}
-
-
-def _doctor() -> int:
+def _doctor(*, json_output: bool, deep: bool) -> int:
+    """Check every measured dependency (docs/00, docs/02); exit 1 on a required failure."""
     configure_logging("INFO")
-    logger = get_logger("caracal.doctor")
+    try:
+        settings = get_settings()
+    except ValidationError as exc:
+        fields = ", ".join(_invalid_config_fields(exc))
+        emit_checks(
+            [DoctorCheck("config", "fail", f"invalid: {fields}", required=True)],
+            json_output=json_output,
+        )
+        return 1
+    configure_logging(settings.CARACAL_LOG_LEVEL, secrets=_secret_values(settings))
+    checks = asyncio.run(run_doctor(settings, deep=deep))
+    emit_checks(checks, json_output=json_output)
+    return doctor_exit_code(checks)
+
+
+async def _retention_pass(settings: Settings, *, dry_run: bool) -> int:
+    engine = make_engine(settings)
+    repos = RepoBundle(
+        jobs=PostgresJobRepo(engine),
+        uploads=PostgresUploadRepo(engine),
+        reports=PostgresReportRepo(engine),
+        segments=PostgresSegmentRepo(engine),
+        speakers=PostgresSpeakerRepo(engine),
+    )
+    try:
+        report = await run_retention(settings, repos, dry_run=dry_run)
+    finally:
+        await engine.dispose()
+    verb = "would delete" if dry_run else "deleted"
+    line = (
+        f"retention: {verb} {report.media_files} job media files "
+        f"({report.media_bytes} bytes) across {report.jobs} expired jobs and "
+        f"{report.uploads} uploads ({report.upload_bytes} bytes)"
+    )
+    sys.stderr.write(line + "\n")
+    sys.stderr.flush()
+    return 0
+
+
+def _retention(*, dry_run: bool) -> int:
+    configure_logging("INFO")
+    logger = get_logger("caracal.retention")
     try:
         settings = get_settings()
     except ValidationError as exc:
         logger.error("config invalid", extra={"fields": _invalid_config_fields(exc)})
         return 1
     configure_logging(settings.CARACAL_LOG_LEVEL, secrets=_secret_values(settings))
-    logger.info(
-        "config valid",
-        extra={
-            "host": settings.CARACAL_HOST,
-            "port": settings.CARACAL_PORT,
-            "data_dir": str(settings.CARACAL_DATA_DIR),
-            "diarization": _diarization_status(),
-            "js_runtime": _js_runtime_status(),
-        },
-    )
-    return 0
+    try:
+        return asyncio.run(_retention_pass(settings, dry_run=dry_run))
+    except CaracalError as exc:
+        logger.error(
+            "retention failed",
+            extra={"code": exc.code.value, "error": exc.message},
+        )
+        return 1
 
 
 def _migrate() -> int:
@@ -298,7 +315,9 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_usage(sys.stderr)
         return 2
     if command == "doctor":
-        return _doctor()
+        return _doctor(json_output=bool(args.json_output), deep=bool(args.deep))
+    if command == "retention":
+        return _retention(dry_run=bool(args.dry_run))
     if command == "migrate":
         return _migrate()
     if command == "worker":

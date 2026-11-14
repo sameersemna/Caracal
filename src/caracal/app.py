@@ -19,7 +19,7 @@ import httpx
 import sqlalchemy as sa
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from mcp.server.transport_security import TransportSecuritySettings
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -47,6 +47,7 @@ from caracal.db.repo import (
 from caracal.errors import HTTP_STATUS, CaracalError, ErrorCode
 from caracal.log import get_logger
 from caracal.mcp.server import HTTP_INLINE_BASE64_BYTES, build_mcp
+from caracal.ops import MetricsRegistry
 from caracal.queue import JobQueue, Keys, make_redis
 from caracal.services import JobService
 
@@ -123,6 +124,11 @@ def _is_v1_path(path: str) -> bool:
 def _is_mcp_path(path: str) -> bool:
     """True for the mounted streamable-HTTP MCP endpoint (``/mcp`` and ``/mcp/*``)."""
     return path == "/mcp" or path.startswith("/mcp/")
+
+
+def _is_metrics_path(path: str) -> bool:
+    """True for the Prometheus endpoint, which is bearer-protected like ``/v1``."""
+    return path == "/metrics"
 
 
 def _content_length(scope: Scope) -> int | None:
@@ -229,7 +235,7 @@ class AuthBodyLimitMiddleware:
             await self.app(scope, receive, send)
             return
         path = scope["path"]
-        if not (_is_v1_path(path) or _is_mcp_path(path)):
+        if not (_is_v1_path(path) or _is_mcp_path(path) or _is_metrics_path(path)):
             await self.app(scope, receive, send)
             return
 
@@ -445,6 +451,12 @@ def create_app(
     async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
         logger.exception("unhandled request error", extra={"path": request.url.path})
         return _envelope(500, ErrorCode.INTERNAL, "internal error")
+
+    @app.get("/metrics", include_in_schema=False)
+    async def metrics_endpoint() -> Response:
+        """Prometheus text metrics, bearer-protected by :class:`AuthBodyLimitMiddleware`."""
+        text = await MetricsRegistry(deps.redis, deps.keys).render()
+        return Response(text, media_type="text/plain; version=0.0.4; charset=utf-8")
 
     app.include_router(public_router)
     app.include_router(router)

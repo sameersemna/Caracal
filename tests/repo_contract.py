@@ -362,6 +362,20 @@ async def case_upload_create_honours_the_given_id(repos: Repos) -> None:
     assert generated.id != upload_id
 
 
+async def case_upload_delete(repos: Repos) -> None:
+    upload = await repos.uploads.create(
+        filename="stale.wav",
+        size_bytes=3,
+        sha256="stale",
+        path="/data/uploads/stale.wav",
+    )
+    await repos.uploads.delete(upload.id)
+    assert await repos.uploads.get(upload.id) is None
+    # Idempotent: a retention pass racing another worker must not fail.
+    await repos.uploads.delete(upload.id)
+    assert await repos.uploads.list_unconsumed_older_than(0) == []
+
+
 async def case_report_upsert(repos: Repos) -> None:
     job = await repos.jobs.create(source_kind="direct", options={})
     assert await repos.reports.get(job.id) is None
@@ -593,6 +607,7 @@ CASES: tuple[Callable[[Repos], Awaitable[None]], ...] = (
     case_delete_cascades,
     case_upload_lifecycle,
     case_upload_create_honours_the_given_id,
+    case_upload_delete,
     case_report_upsert,
     case_segments_replace_and_search,
     case_segments_search_job_filter_and_speaker,
