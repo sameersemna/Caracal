@@ -102,7 +102,7 @@ def test_real_overlap_pair_keeps_each_word_once() -> None:
     assert [segment.id for segment in transcript.segments] == list(range(len(transcript.segments)))
     starts = [segment.start for segment in transcript.segments]
     assert starts == sorted(starts)
-    assert transcript.dropped == {"no_speech": 0, "repetition": 0, "empty": 0}
+    assert transcript.dropped == {"no_speech": 0, "repetition": 0, "empty": 0, "hallucinated_credit": 0}
     assert transcript.language_code == "en"
     assert {segment.lang for segment in transcript.segments} == {"en"}
     assert all(segment.lang_prob > 0.99 for segment in transcript.segments)
@@ -175,7 +175,101 @@ def test_empty_text_is_dropped() -> None:
     transcript = merge_chunks([_result((empty, punctuation_only))], [Chunk(index=0, start_s=0.0, end_s=2.0)])
 
     assert [segment.text for segment in transcript.segments] == ["?"]
-    assert transcript.dropped == {"no_speech": 0, "repetition": 0, "empty": 1}
+    assert transcript.dropped == {"no_speech": 0, "repetition": 0, "empty": 1, "hallucinated_credit": 0}
+
+
+def test_real_chinese_music_intro_credits_are_dropped() -> None:
+    """zh_news40 is 40 s of music intro where whisper invents "中文字幕志愿者 李宗盛" twice."""
+    transcript = merge_chunks([_real("zh_news40")], [Chunk(index=0, start_s=0.0, end_s=40.0)])
+
+    assert transcript.segments == ()
+    assert transcript.dropped["hallucinated_credit"] == 2
+    assert transcript.dropped["no_speech"] == 0
+
+
+def test_real_chinese_speech_keeps_every_segment_but_the_trailing_credit() -> None:
+    result = _real("zh_speech40")
+    transcript = merge_chunks([result], [Chunk(index=0, start_s=0.0, end_s=result.duration)])
+
+    assert [segment.text for segment in transcript.segments] == [
+        "欧洲阿里亚纳火箭从法属圭亚纳的欧洲航天局的发射场发射",
+        "携带物资开赴国际空间站",
+        "这是欧洲航天计划1979年开始以来的第200次飞行任务",
+        "火箭运载的飞行器负责运送重20吨的水、粮食、氧气、零件和实验室工具到国际空间站",
+    ]
+    assert transcript.dropped["hallucinated_credit"] == 1
+
+
+_CREDIT_PHRASES = (
+    "中文字幕志愿者 李宗盛",
+    "中文字幕:CJ",
+    "字幕由 Amara.org 社群提供",
+    "请不吝点赞 订阅 转发 打赏 支持我们",
+    "ご視聴ありがとうございました",
+    "Untertitel der Amara.org-Community",
+    "Untertitel im Auftrag des ZDF",
+    "Untertitelung im Auftrag des ZDF",
+    "Sous-titres réalisés par la communauté d'Amara.org",
+    "Subtitles by the Amara.org community",
+    "Thanks for watching!",
+    "Thank you for watching",
+)
+
+
+@pytest.mark.parametrize("phrase", _CREDIT_PHRASES)
+def test_credit_phrase_in_the_intro_window_is_dropped(phrase: str) -> None:
+    segment = _segment(0, 0.0, 4.0, phrase, words=(_word(phrase, 0.0, 4.0),))
+    transcript = merge_chunks([_result((segment,))], [Chunk(index=0, start_s=0.0, end_s=4.0)])
+
+    assert transcript.segments == ()
+    assert transcript.dropped["hallucinated_credit"] == 1
+
+
+@pytest.mark.parametrize("phrase", _CREDIT_PHRASES)
+def test_the_same_phrase_in_the_middle_of_a_talk_is_kept(phrase: str) -> None:
+    segment = _segment(0, 300.0, 304.0, phrase, words=(_word(phrase, 300.0, 304.0),))
+    transcript = merge_chunks([_result((segment,))], [Chunk(index=0, start_s=0.0, end_s=600.0)])
+
+    assert [segment.text for segment in transcript.segments] == [phrase]
+    assert transcript.dropped["hallucinated_credit"] == 0
+
+
+def test_credit_in_the_outro_window_is_dropped() -> None:
+    segment = _segment(0, 570.5, 578.0, "Thanks for watching", words=(_word("Thanks", 570.5, 578.0),))
+    transcript = merge_chunks([_result((segment,))], [Chunk(index=0, start_s=0.0, end_s=600.0)])
+
+    assert transcript.segments == ()
+    assert transcript.dropped["hallucinated_credit"] == 1
+
+
+def test_credit_inside_a_measured_silence_span_is_dropped_mid_file() -> None:
+    segment = _segment(0, 300.0, 304.0, "Subtitles by the Amara.org community")
+    transcript = merge_chunks(
+        [_result((segment,))],
+        [Chunk(index=0, start_s=0.0, end_s=600.0)],
+        duration_s=600.0,
+        silences=[(298.0, 306.0)],
+    )
+
+    assert transcript.segments == ()
+    assert transcript.dropped["hallucinated_credit"] == 1
+
+
+def test_chinese_subscribe_begging_needs_all_three_verbs() -> None:
+    only_subscribe = _segment(0, 0.0, 4.0, "请订阅这个频道", words=(_word("请订阅这个频道", 0.0, 4.0),))
+    transcript = merge_chunks([_result((only_subscribe,))], [Chunk(index=0, start_s=0.0, end_s=4.0)])
+
+    assert [segment.text for segment in transcript.segments] == ["请订阅这个频道"]
+    assert transcript.dropped["hallucinated_credit"] == 0
+
+
+def test_a_plain_thank_you_is_not_a_credit() -> None:
+    """A plain "Thank you!" at the head is the repetition fixture, not a credit phrase."""
+    segments = tuple(_segment(index, index * 2.0, index * 2.0 + 1.0, "Thank you!") for index in range(2))
+    transcript = merge_chunks([_result(segments)], [Chunk(index=0, start_s=0.0, end_s=4.0)])
+
+    assert [segment.text for segment in transcript.segments] == ["Thank you!", "Thank you!"]
+    assert transcript.dropped["hallucinated_credit"] == 0
 
 
 def test_wordless_segments_are_kept_by_their_own_midpoint() -> None:
@@ -212,7 +306,9 @@ def test_result_and_chunk_count_mismatch_is_internal() -> None:
 def test_empty_inputs_produce_an_empty_transcript() -> None:
     transcript = merge_chunks([], [])
     assert transcript == Transcript(
-        segments=(), language_code=None, dropped={"no_speech": 0, "repetition": 0, "empty": 0}
+        segments=(),
+        language_code=None,
+        dropped={"no_speech": 0, "repetition": 0, "empty": 0, "hallucinated_credit": 0},
     )
 
 
@@ -221,7 +317,7 @@ def test_models_serialise_to_json() -> None:
     payload = json.loads(json.dumps(transcript.to_dict()))
     assert payload["language_code"] == "en"
     assert payload["segments"][0]["words"][0]["text"] == "And"
-    assert payload["dropped"] == {"no_speech": 0, "repetition": 0, "empty": 0}
+    assert payload["dropped"] == {"no_speech": 0, "repetition": 0, "empty": 0, "hallucinated_credit": 0}
     assert payload["segments"][0]["lang_prob"] == pytest.approx(0.9352319240570068)
 
 

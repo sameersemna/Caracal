@@ -6,9 +6,11 @@ The Tagesschau fixture is real: whisper emits ``Tag`` + ``ess`` + ``chau`` and `
 
 from __future__ import annotations
 
+import pytest
 from tests.fakes.whisper import load_fixture
 
 from caracal.asr import Word, word_groups
+from caracal.asr.whisper import parse_whisper_response
 
 
 def _word(
@@ -130,3 +132,69 @@ def test_unassigned_tokens_do_not_outvote_a_speaker() -> None:
 
     assert word_groups(words)[0].speaker == "S1"
     assert word_groups([_word("solo", speaker=None)])[0].speaker is None
+
+
+def _parsed_words(name: str) -> list[Word]:
+    return [word for segment in parse_whisper_response(load_fixture(name)).segments for word in segment.words]
+
+
+def test_real_chinese_tokens_without_spaces_are_each_breakable() -> None:
+    """zh_speech40 has 0 space-led tokens: grouping must still break between characters."""
+    words = _parsed_words("zh_speech40")
+
+    assert not any(word.space_before for word in words)
+    groups = word_groups(words)
+
+    assert [group.text for group in groups[:8]] == list("欧洲阿里亚纳火箭")
+    assert "".join(group.text for group in groups) == "".join(word.text for word in words)
+    # every character is breakable: no group is a whole sentence
+    assert max(len(group.text) for group in groups) <= 5
+    assert sum(len(group.text) for group in groups) / len(groups) < 2
+    spans = [index for group in groups for index in range(group.tokens[0], group.tokens[1] + 1)]
+    assert spans == list(range(len(words)))  # tokens are neither lost nor duplicated
+
+
+def test_chinese_punctuation_attaches_to_the_previous_character() -> None:
+    groups = word_groups(_parsed_words("zh_speech40"))
+    texts = [group.text for group in groups]
+
+    assert "水、" in texts
+    assert "食、" in texts
+    assert "气、" in texts
+    water = next(group for group in groups if group.text == "水、")
+    assert water.tokens[1] - water.tokens[0] == 1  # the 、 token rides with 水
+
+
+def test_a_latin_sub_word_token_still_continues_its_word() -> None:
+    """The no-space rule must not break Latin sub-word pieces apart (Tagesschau)."""
+    groups = word_groups(_tagesschau_words())
+
+    assert [group.text for group in groups][5] == "Tagesschau"
+
+
+_NO_SPACE_PAIRS = (
+    ("ส", "ว"),  # Thai
+    ("こ", "ん"),  # Hiragana
+    ("カ", "ナ"),  # Katakana
+    ("ສ", "ວ"),  # Lao
+    ("ក", "រ"),  # Khmer
+    ("က", "ခ"),  # Myanmar
+    ("ཀ", "ཁ"),  # Tibetan
+)
+
+
+@pytest.mark.parametrize(("first", "second"), _NO_SPACE_PAIRS)
+def test_other_no_space_scripts_break_between_characters(first: str, second: str) -> None:
+    groups = word_groups([_word(first, space_before=False), _word(second, space_before=False)])
+
+    assert [group.text for group in groups] == [first, second]
+
+
+def test_a_combining_mark_stays_with_its_base_character() -> None:
+    words = [
+        _word("ก", space_before=False),  # Thai base
+        _word("\u0e48", space_before=False),  # Thai tone mark: not a word start
+        _word("ว", space_before=False),
+    ]
+
+    assert [group.text for group in word_groups(words)] == ["ก\u0e48", "ว"]

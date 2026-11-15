@@ -436,7 +436,12 @@ async def test_transcribe_writes_transcript_segments_and_removes_chunks(
         assert result.status == "done"
         assert result.output["segments"] == 3
         assert result.output["language_code"] == "en"
-        assert result.output["dropped"] == {"no_speech": 0, "repetition": 0, "empty": 0}
+        assert result.output["dropped"] == {
+            "no_speech": 0,
+            "repetition": 0,
+            "empty": 0,
+            "hallucinated_credit": 0,
+        }
         chunk_langs = result.output["chunk_langs"]
         assert isinstance(chunk_langs, list)
         assert len(chunk_langs) == 1

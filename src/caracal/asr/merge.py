@@ -2,7 +2,8 @@
 
 Whisper results are chunk-local; merging shifts them onto the source timeline, keeps each
 word from the chunk whose timeline centre owns it, trims/rebuilds segments and drops
-silence hallucinations and repeated text.
+silence hallucinations, repeated text and the training-data credits whisper invents over
+music and silence (``"Subtitles by the Amara.org community"``, ``"中文字幕志愿者"`` …).
 """
 
 from __future__ import annotations
@@ -18,6 +19,28 @@ from caracal.errors import CaracalError, ErrorCode
 _NO_SPEECH_LIMIT = 0.8
 _LOW_LOGPROB_LIMIT = -1.0
 _REPEAT_LIMIT = 3
+#: Credits are only plausible over the intro/outro or over non-speech; a speaker can say
+#: "thank you for watching" in the middle of a talk and mean it.
+_EDGE_WINDOW_S = 30.0
+
+#: Normalised training-data credit phrases whisper hallucinates over music and silence.
+_CREDIT_PHRASES: tuple[str, ...] = (
+    "字幕志愿者",
+    "中文字幕",
+    "字幕由",
+    "请不吝点赞",
+    "ご視聴ありがとうございました",
+    "untertitel der amara org community",
+    "untertitel im auftrag des zdf",
+    "untertitelung im auftrag",
+    "sous titres réalisés par",
+    "subtitles by the amara org community",
+    "thanks for watching",
+    "thank you for watching",
+)
+
+#: Chinese "subscribe + share + tip" begging appears together or not at all.
+_CREDIT_TOKENS: tuple[str, ...] = ("订阅", "转发", "打赏")
 
 
 def _midpoint(start: float, end: float) -> float:
@@ -36,6 +59,28 @@ def normalise_text(text: str) -> str:
     normalised = unicodedata.normalize("NFKC", text).lower()
     kept = "".join(char if char.isalnum() or char.isspace() else " " for char in normalised)
     return " ".join(kept.split())
+
+
+_NORMALISED_CREDITS: tuple[str, ...] = tuple(normalise_text(phrase) for phrase in _CREDIT_PHRASES)
+_NORMALISED_CREDIT_TOKENS: tuple[str, ...] = tuple(normalise_text(token) for token in _CREDIT_TOKENS)
+
+
+def is_hallucinated_credit(normalised: str) -> bool:
+    """True when normalised segment text is a known whisper credit hallucination."""
+    if any(phrase in normalised for phrase in _NORMALISED_CREDITS):
+        return True
+    return bool(normalised) and all(token in normalised for token in _NORMALISED_CREDIT_TOKENS)
+
+
+def _at_edge(segment: Segment, duration_s: float) -> bool:
+    """True when the segment lies wholly in the first or the last 30 s of the audio."""
+    return segment.end <= _EDGE_WINDOW_S or segment.start >= duration_s - _EDGE_WINDOW_S
+
+
+def _in_non_speech(segment: Segment, silences: Sequence[tuple[float, float]]) -> bool:
+    """True when the segment's midpoint falls in a span measured as silence (music)."""
+    midpoint = _midpoint(segment.start, segment.end)
+    return any(start <= midpoint <= end for start, end in silences)
 
 
 def _kept_segment(
@@ -92,8 +137,13 @@ def _dominant_language(segments: Sequence[Segment]) -> str | None:
     return max(speech, key=speech.__getitem__)
 
 
-def _apply_filters(segments: Sequence[Segment]) -> tuple[list[Segment], dict[str, int]]:
-    dropped = {"no_speech": 0, "repetition": 0, "empty": 0}
+def _apply_filters(
+    segments: Sequence[Segment],
+    *,
+    duration_s: float,
+    silences: Sequence[tuple[float, float]],
+) -> tuple[list[Segment], dict[str, int]]:
+    dropped = {"no_speech": 0, "repetition": 0, "empty": 0, "hallucinated_credit": 0}
     kept: list[Segment] = []
     last_norm: str | None = None
     run = 0
@@ -105,6 +155,10 @@ def _apply_filters(segments: Sequence[Segment]) -> tuple[list[Segment], dict[str
             dropped["empty"] += 1
             continue
         norm = normalise_text(segment.text)
+        at_edge = _at_edge(segment, duration_s)
+        if is_hallucinated_credit(norm) and (at_edge or _in_non_speech(segment, silences)):
+            dropped["hallucinated_credit"] += 1
+            continue
         if norm == last_norm:
             run += 1
         else:
@@ -117,14 +171,30 @@ def _apply_filters(segments: Sequence[Segment]) -> tuple[list[Segment], dict[str
     return kept, dropped
 
 
-def merge_chunks(results: Sequence[WhisperResult], chunks: Sequence[Chunk]) -> Transcript:
-    """Merge chunk-local results into one absolute-timeline :class:`Transcript`."""
+def merge_chunks(
+    results: Sequence[WhisperResult],
+    chunks: Sequence[Chunk],
+    *,
+    duration_s: float | None = None,
+    silences: Sequence[tuple[float, float]] = (),
+) -> Transcript:
+    """Merge chunk-local results into one absolute-timeline :class:`Transcript`.
+
+    ``duration_s`` is the source audio length (default: the end of the last chunk); it bounds
+    the intro/outro window in which hallucinated credits are dropped. ``silences`` are the
+    non-speech spans measured by ``normalize``; a credit inside one is dropped wherever it
+    sits. A caller that does not know them (the transcribe stage) passes none, and only the
+    intro/outro rule applies.
+    """
     if len(results) != len(chunks):
         raise CaracalError(
             ErrorCode.INTERNAL,
             "whisper results and chunks do not line up",
             {"results": len(results), "chunks": len(chunks)},
         )
+    audio_duration = (
+        duration_s if duration_s is not None else max((chunk.end_s for chunk in chunks), default=0.0)
+    )
 
     combined: list[Segment] = []
     for index, (result, chunk) in enumerate(zip(results, chunks, strict=True)):
@@ -143,7 +213,7 @@ def merge_chunks(results: Sequence[WhisperResult], chunks: Sequence[Chunk]) -> T
             )
 
     combined.sort(key=lambda segment: (segment.start, segment.end, segment.id))
-    kept, dropped = _apply_filters(combined)
+    kept, dropped = _apply_filters(combined, duration_s=audio_duration, silences=silences)
     return Transcript(
         segments=tuple(kept),
         language_code=_dominant_language(kept),

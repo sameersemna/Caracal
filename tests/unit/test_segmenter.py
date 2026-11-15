@@ -227,19 +227,31 @@ def test_a_single_word_longer_than_a_line_stays_on_its_own_line() -> None:
     assert cues[0].lines == [long_word, "next"]
 
 
-def test_cjk_punctuation_breaks_between_word_groups() -> None:
-    # Each CJK word is its own whisper token. ``space_before=True`` makes each one a
-    # separate word group; with the real CJK signal (no leading space) grouping would keep
-    # the whole sentence together, so this test isolates the punctuation break rule.
-    words = (
-        _word("一二三四五六七八", 0.0, 0.6),
-        _word("九十一二三四。", 0.7, 1.4),
-        _word("再見", 1.5, 1.9),
-    )
-    cues = cues_from_transcript(_transcript(words))
+def test_real_chinese_cues_break_between_characters_without_a_space_signal() -> None:
+    """Verdict 42 fix 1: whisper's Chinese output has no space-led token at all.
 
-    assert cues[0].lines == ["一二三四五六七八 九十一二三四。"]
-    assert cues[1].lines == ["再見"]
+    Real behaviour: every CJK character must stay breakable, so a cue never holds a whole
+    sentence and no line exceeds the 42-character limit. The trailing credit is dropped by
+    the merge filter, and no line may contain a U+FFFD byte fragment.
+    """
+    result = _real("zh_speech40")
+    transcript = merge_chunks([result], [Chunk(index=0, start_s=0.0, end_s=result.duration)])
+    words = _flat(transcript)
+    cues = cues_from_transcript(transcript)
+
+    assert not any(word.space_before for word in words)
+    assert len(cues) >= 5
+    assert cues[0].lines == ["欧洲阿里亚纳火箭"]
+    for cue in cues:
+        assert 1 <= len(cue.lines) <= _MAX_LINES
+        for line in cue.lines:
+            assert len(line) <= _MAX_CHARS
+            assert "\ufffd" not in line
+    rendered = "".join(line for cue in cues for line in cue.lines)
+    assert rendered == "".join(segment.text for segment in transcript.segments)
+    assert "字幕" not in rendered  # the "中文字幕:CJ" credit at 30 s is not a subtitle
+    covered = [index for cue in cues for index in range(cue.word_span[0], cue.word_span[1] + 1)]
+    assert covered == list(range(len(words)))  # no character lost or duplicated
 
 
 def test_min_duration_is_extended_but_never_up_to_the_next_cue() -> None:
