@@ -3,7 +3,9 @@
 Whisper results are chunk-local; merging shifts them onto the source timeline, keeps each
 word from the chunk whose timeline centre owns it, trims/rebuilds segments and drops
 silence hallucinations, repeated text and the training-data credits whisper invents over
-music and silence (``"Subtitles by the Amara.org community"``, ``"中文字幕志愿者"`` …).
+music and silence (``"Subtitles by the Amara.org community"``, ``"中文字幕志愿者"`` …). A
+credit phrase that recurs is a decoding loop, so every occurrence is dropped wherever it
+sits; a lone occurrence is judged by position and silence.
 """
 
 from __future__ import annotations
@@ -65,11 +67,17 @@ _NORMALISED_CREDITS: tuple[str, ...] = tuple(normalise_text(phrase) for phrase i
 _NORMALISED_CREDIT_TOKENS: tuple[str, ...] = tuple(normalise_text(token) for token in _CREDIT_TOKENS)
 
 
+def credit_matches(normalised: str) -> frozenset[str]:
+    """The credit patterns present in ``normalised`` text (empty when it is not a credit)."""
+    keys = {phrase for phrase in _NORMALISED_CREDITS if phrase in normalised}
+    if normalised and all(token in normalised for token in _NORMALISED_CREDIT_TOKENS):
+        keys.add("+".join(_NORMALISED_CREDIT_TOKENS))
+    return frozenset(keys)
+
+
 def is_hallucinated_credit(normalised: str) -> bool:
     """True when normalised segment text is a known whisper credit hallucination."""
-    if any(phrase in normalised for phrase in _NORMALISED_CREDITS):
-        return True
-    return bool(normalised) and all(token in normalised for token in _NORMALISED_CREDIT_TOKENS)
+    return bool(credit_matches(normalised))
 
 
 def _at_edge(segment: Segment, duration_s: float) -> bool:
@@ -137,6 +145,29 @@ def _dominant_language(segments: Sequence[Segment]) -> str | None:
     return max(speech, key=speech.__getitem__)
 
 
+def _survives_speech_filter(segment: Segment) -> bool:
+    """True when the segment is not a high-no-speech hallucination and has visible text."""
+    if segment.no_speech_prob > _NO_SPEECH_LIMIT and segment.avg_logprob < _LOW_LOGPROB_LIMIT:
+        return False
+    return bool(segment.text.strip())
+
+
+def _is_looped_credit(segments: Sequence[Segment]) -> bool:
+    """True when one credit phrase recurs: whisper conditioned on its own hallucination.
+
+    A single match can be a real sentence at the head of a talk ("thank you for watching"),
+    so position and silence decide it. The same phrase in two or more segments is a decoding
+    loop: the invented line comes back in every window regardless of where it lands. Two
+    *different* one-off credit phrases are each judged by the position rule, not treated as
+    a loop.
+    """
+    counts: dict[str, int] = {}
+    for segment in segments:
+        for key in credit_matches(normalise_text(segment.text)):
+            counts[key] = counts.get(key, 0) + 1
+    return any(count >= 2 for count in counts.values())
+
+
 def _apply_filters(
     segments: Sequence[Segment],
     *,
@@ -144,6 +175,7 @@ def _apply_filters(
     silences: Sequence[tuple[float, float]],
 ) -> tuple[list[Segment], dict[str, int]]:
     dropped = {"no_speech": 0, "repetition": 0, "empty": 0, "hallucinated_credit": 0}
+    looped_credit = _is_looped_credit([segment for segment in segments if _survives_speech_filter(segment)])
     kept: list[Segment] = []
     last_norm: str | None = None
     run = 0
@@ -156,7 +188,7 @@ def _apply_filters(
             continue
         norm = normalise_text(segment.text)
         at_edge = _at_edge(segment, duration_s)
-        if is_hallucinated_credit(norm) and (at_edge or _in_non_speech(segment, silences)):
+        if is_hallucinated_credit(norm) and (looped_credit or at_edge or _in_non_speech(segment, silences)):
             dropped["hallucinated_credit"] += 1
             continue
         if norm == last_norm:

@@ -8,7 +8,8 @@ and then one call per unit. A unit that still fails keeps its source text and is
 
 The translated unit is redistributed over its source cues at word boundaries (characters for
 CJK), proportionally to the source cues' character counts, keeping the original timings, and
-re-wrapped to at most 42 characters per line. Everything in this module is deterministic
+re-wrapped to the same script-aware line limit as source cues (42 columns, 16 characters for
+Han/Kana/Hangul/Thai). Everything in this module is deterministic
 except the LLM call; no filesystem or network access happens here.
 """
 
@@ -28,7 +29,7 @@ from caracal.errors import CaracalError
 from caracal.llm.client import LLMClient
 from caracal.llm.prompts import load_prompt
 from caracal.log import get_logger
-from caracal.subtitles.segmenter import Cue, wrap_lines
+from caracal.subtitles.segmenter import Cue, line_chars, wrap_lines
 
 logger = get_logger("caracal.analysis.translate")
 
@@ -41,7 +42,9 @@ _BATCH_SIZE: Final = 25
 _MAX_GLOSSARY: Final = 60
 _MAX_LINE_CHARS: Final = 42
 _MAX_LINES: Final = 2
-_CJK_LANGS: Final = frozenset({"zh", "ja", "ko", "yue"})
+#: Targets written without word spaces: tokens are characters, never whitespace pieces.
+#: Thai is included because its words run together just like Han/Kana/Hangul.
+_CHAR_BREAK_LANGS: Final = frozenset({"zh", "ja", "ko", "yue", "th"})
 
 #: Targets whose conventional written form is not the Latin script. Names stay verbatim for
 #: every other target; for these the prompt asks for the conventional target-script form
@@ -355,13 +358,13 @@ def redistribute(
     """Spread one translated unit over its source cues, keeping their timings.
 
     Returns the translated cues and the number of cues that needed more than two lines (or
-    a line wider than 42 characters). RTL languages get no injected bidi marks: the model's
-    text is kept exactly as returned.
+    a line wider than the script-aware limit). RTL languages get no injected bidi marks: the
+    model's text is kept exactly as returned.
     """
     if not unit.cues:
         return [], 0
-    cjk = target_lang in _CJK_LANGS
-    tokens = _tokens(translated, break_chars=cjk)
+    char_break = target_lang in _CHAR_BREAK_LANGS
+    tokens = _tokens(translated, break_chars=char_break)
     weights = [max(1, len(cue_text(cue))) for cue in unit.cues]
     if len(tokens) >= len(unit.cues):
         counts = _counts(len(tokens), weights)
@@ -369,7 +372,7 @@ def redistribute(
         offset = 0
         for count in counts:
             chunk_tokens = tokens[offset : offset + count]
-            chunks.append("".join(chunk_tokens) if cjk else " ".join(chunk_tokens))
+            chunks.append("".join(chunk_tokens) if char_break else " ".join(chunk_tokens))
             offset += count
     else:
         chunks = _char_chunks(translated, weights)
@@ -379,9 +382,9 @@ def redistribute(
     for cue, chunk in zip(unit.cues, chunks, strict=True):
         lines, is_overlong = wrap_lines(
             chunk,
-            max_chars=_MAX_LINE_CHARS,
+            max_chars=line_chars(chunk, _MAX_LINE_CHARS),
             max_lines=_MAX_LINES,
-            break_chars=cjk,
+            break_chars=char_break,
         )
         if is_overlong:
             overlong += 1

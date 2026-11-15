@@ -76,7 +76,7 @@ def _is_cjk_heavy(text: str) -> bool:
     return sum(1 for char in visible if _is_cjk_char(char)) * 2 >= len(visible)
 
 
-def _line_chars(text: str, max_chars: int) -> int:
+def line_chars(text: str, max_chars: int) -> int:
     """Characters per line for ``text``: the CJK guideline, else the caller's limit."""
     return _CJK_LINE_CHARS if _is_cjk_heavy(text) else max_chars
 
@@ -208,7 +208,7 @@ def _break_before(
     if group.end - first.start > max_dur:
         return True
     candidate = [*cue_groups, group]
-    if not _renders_within(candidate, words, _line_chars(_text(words, candidate), max_chars), max_lines):
+    if not _renders_within(candidate, words, line_chars(_text(words, candidate), max_chars), max_lines):
         return True
 
     cue_text = _text(words, cue_groups)
@@ -225,7 +225,7 @@ def _break_before(
         return True
     return (
         _ends_with(previous, _CLAUSE_ENDINGS)
-        and cue_len >= _line_chars(cue_text, max_chars) - _PUNCTUATION_BALANCE_SLACK
+        and cue_len >= line_chars(cue_text, max_chars) - _PUNCTUATION_BALANCE_SLACK
     )
 
 
@@ -374,7 +374,7 @@ def cues_from_transcript(
                 index=number,
                 start=start,
                 end=end,
-                lines=_lines(cue_groups, words, _line_chars(_text(words, cue_groups), max_chars)),
+                lines=_lines(cue_groups, words, line_chars(_text(words, cue_groups), max_chars)),
                 speaker=cue_groups[0].speaker,
                 word_span=(cue_groups[0].tokens[0], cue_groups[-1].tokens[1]),
             )

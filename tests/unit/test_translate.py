@@ -254,6 +254,26 @@ def test_redistribute_splits_cjk_by_characters() -> None:
     assert overlong == 0
 
 
+@pytest.mark.parametrize(
+    ("lang", "translated"),
+    [
+        ("zh", "这是一个非常长的翻译句子用来检查每一行不超过十六个字符"),
+        ("ja", "これは非常に長い翻訳文で各行が十六文字を超えないことを確認します"),
+        ("th", "นี่คือคำแปลที่ยาวมากเพื่อทดสอบว่าบรรทัดไม่เกินสิบหกตัวอักษร"),
+    ],
+)
+def test_translated_cjk_and_thai_lines_stay_within_sixteen_characters(lang: str, translated: str) -> None:
+    """A translated cue obeys the same script-aware line limit as a source cue."""
+    unit = _unit([_cue(1, "hello")])
+
+    result, _overlong = redistribute(unit, translated, lang)
+
+    lines = result[0].lines
+    assert len(lines) >= 2
+    assert all(len(line) <= 16 for line in lines)
+    assert "".join(lines) == translated
+
+
 def test_redistribute_marks_a_cue_that_cannot_fit_two_lines() -> None:
     unit = _unit([_cue(1, "hello")])
     translated = " ".join(["word"] * 30)

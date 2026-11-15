@@ -37,6 +37,9 @@ async def test_request_is_explicit_multipart_and_parses_real_fixture() -> None:
     assert form["language"] == "auto"  # the server default is en: always send it explicitly
     assert form["translate"] == "false"
     assert form["temperature"] == "0.0"
+    # The decoder must not condition on its own previous text: that loop repeats a credit
+    # hallucination for the whole file (measured on a 93 s Chinese clip).
+    assert form["max_context"] == "0"
     upload = fake.parts()["file"]
     assert upload.filename == "jfk.wav"
     assert upload.content_type == "audio/wav"
@@ -59,6 +62,7 @@ async def test_forced_language_uses_real_detection_not_the_echo() -> None:
         result = await client.transcribe(AUDIO, language="de")
 
     assert fake.form()["language"] == "de"
+    assert fake.form()["max_context"] == "0"
     assert result.language_code == "en"
     assert result.language_prob == pytest.approx(0.9970652461051941)
 

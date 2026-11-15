@@ -200,6 +200,51 @@ def test_real_chinese_speech_keeps_every_segment_but_the_trailing_credit() -> No
     assert transcript.dropped["hallucinated_credit"] == 1
 
 
+def test_real_chinese_context_loop_is_dropped_entirely() -> None:
+    """zh_full_loop is the 93 s clip: whisper repeated its own credit at 0/30/60/90 s."""
+    result = _real("zh_full_loop")
+    transcript = merge_chunks([result], [Chunk(index=0, start_s=0.0, end_s=result.duration)])
+
+    assert transcript.segments == ()
+    assert transcript.dropped["hallucinated_credit"] == 4
+
+
+def test_a_recurring_credit_is_dropped_even_in_the_middle_of_a_talk() -> None:
+    first = _segment(0, 300.0, 304.0, "Thank you for watching")
+    second = _segment(1, 500.0, 504.0, "Thank you for watching")
+    transcript = merge_chunks([_result((first, second))], [Chunk(index=0, start_s=0.0, end_s=600.0)])
+
+    assert transcript.segments == ()
+    assert transcript.dropped["hallucinated_credit"] == 2
+
+
+def test_two_different_one_off_credits_are_not_a_loop() -> None:
+    """Only a *recurring* phrase is a decoding loop; each lone phrase keeps the old rule."""
+    in_silence = _segment(0, 100.0, 101.0, "Thanks for watching")
+    mid_speech = _segment(1, 200.0, 201.0, "Subtitles by the Amara.org community")
+    transcript = merge_chunks(
+        [_result((in_silence, mid_speech))],
+        [Chunk(index=0, start_s=0.0, end_s=600.0)],
+        duration_s=600.0,
+        silences=[(99.0, 101.0)],
+    )
+
+    assert [segment.text for segment in transcript.segments] == ["Subtitles by the Amara.org community"]
+    assert transcript.dropped["hallucinated_credit"] == 1
+
+
+def test_a_looped_credit_does_not_take_a_real_sentence_with_it() -> None:
+    looped = _segment(0, 30.0, 34.0, "中文字幕志愿者 李宗盛")
+    other_loop = _segment(2, 60.0, 64.0, "中文字幕志愿者 李宗盛")
+    speech = _segment(1, 45.0, 49.0, "有4人被殺 很多人受傷", words=(_word("有4人被殺", 45.0, 49.0),))
+    transcript = merge_chunks(
+        [_result((looped, speech, other_loop))], [Chunk(index=0, start_s=0.0, end_s=600.0)]
+    )
+
+    assert [segment.text for segment in transcript.segments] == ["有4人被殺 很多人受傷"]
+    assert transcript.dropped["hallucinated_credit"] == 2
+
+
 _CREDIT_PHRASES = (
     "中文字幕志愿者 李宗盛",
     "中文字幕:CJ",
