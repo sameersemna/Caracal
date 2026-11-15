@@ -57,10 +57,22 @@ DATABASE_URL=postgresql+psycopg://user:pw@latitude:5432/caracal
 REDIS_URL=redis://:pw@latitude:6379/0             # DB 0 is shared; every key uses REDIS_PREFIX
 CARACAL_DATA_DIR=./data
 OLLAMA_CLOUD_API_KEY=<key>                        # optional: local gemma4:31b-cloud proxy otherwise
+LLM_ALLOWED_MODELS=gemma4:31b-cloud,local:gemma4:31b   # every model a route may use
+LLM_ROUTE_DEFAULT=gemma4:31b-cloud,local:gemma4:31b    # ordered chain; first = preferred
 HF_TOKEN=<hf_...>                                 # pyannote model download
 BRAVE_API_KEY=<key>
 EXA_API_KEY=<key>
 ```
+
+Every LLM call names a pipeline task (`plan`, `content`, `identity`, `verify`, `translate`,
+`review`, `qa`) and runs on that task's `LLM_ROUTE_*` chain; a task without its own route uses
+`LLM_ROUTE_DEFAULT`. A ref is `cloud:<name>` (ollama.com with `OLLAMA_CLOUD_API_KEY`),
+`local:<name>`, or a bare `<name>` (the local daemon, which proxies `-cloud` tags). Every model a
+route uses must be listed in `LLM_ALLOWED_MODELS`, and the chain is tried in order until a model
+answers — the next ref takes over after two failed attempts, an auth rejection, a missing model,
+or unusable output. `caracal doctor` prints one `/api/show` line per allowed model and fails when a
+route has no working model. With no `LLM_ROUTE_*` and no `LLM_ALLOWED_MODELS` the chain is exactly
+the pre-routing behaviour (cloud or local proxy, then `LLM_FALLBACK_MODEL`).
 
 Only `src/caracal/config.py` reads the environment. Secrets are `SecretStr` and are redacted from logs.
 

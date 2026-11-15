@@ -12,12 +12,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from tests.fakes.redis import RecordingRedis, all_keys
 from tests.fakes.repo import force_finished_at, force_upload_created_at, make_fake_repos
 from tests.repo_contract import Repos
 
-from caracal.config import Settings
+from caracal.config import ModelRef, Settings, parse_model_ref
 from caracal.errors import CaracalError, ErrorCode
 from caracal.ops import (
     DoctorCheck,
@@ -25,6 +26,7 @@ from caracal.ops import (
     MetricsRegistry,
     Probe,
     RetentionReport,
+    _probe_ollama_model,
     doctor_exit_code,
     emit_checks,
     run_doctor,
@@ -42,17 +44,21 @@ async def _ok(_settings: Settings) -> Probe:
     return "ok", "ok"
 
 
+async def _ok_model(_settings: Settings, _ref: ModelRef) -> Probe:
+    return "ok", "ok"
+
+
 def _probes(**overrides: Any) -> DoctorProbes:
     values: dict[str, Any] = {
         "postgres": _ok,
         "redis": _ok,
         "whisper": _ok,
-        "ollama": _ok,
         "ffmpeg": _ok,
         "ytdlp": _ok,
         "pyannote": _ok,
         "search": lambda settings, deep: _ok(settings),
         "disk": _ok,
+        "ollama_model": _ok_model,
     }
     values.update(overrides)
     return DoctorProbes(**values)
@@ -64,12 +70,16 @@ async def test_doctor_all_ok_sets_required_flags_and_exit_zero(
     settings = make_settings()
     checks = await run_doctor(settings, _probes())
 
+    # No cloud key in the test settings: the derived chain is the local proxy then the local
+    # fallback model, and every allowed model gets its own /api/show line (docs/02).
     assert [check.check for check in checks] == [
         "config",
         "postgres",
         "redis",
         "whisper",
         "ollama",
+        "ollama:local:gemma4:31b-cloud",
+        "ollama:local:gemma4:31b",
         "ffmpeg",
         "ytdlp",
         "pyannote",
@@ -77,6 +87,9 @@ async def test_doctor_all_ok_sets_required_flags_and_exit_zero(
         "disk",
     ]
     assert all(check.status == "ok" for check in checks)
+    model_lines = [check for check in checks if check.check.startswith("ollama:")]
+    assert all("routes: default, plan, content" in check.detail for check in model_lines)
+    assert not any(check.required for check in model_lines)
     required = {check.check for check in checks if check.required}
     assert required == {"config", "postgres", "redis", "whisper", "ollama", "ffmpeg"}
     assert doctor_exit_code(checks) == 0
@@ -111,11 +124,18 @@ async def test_each_probe_failure_is_reported_with_its_required_flag(
     async def down(_settings: Settings) -> Probe:
         return "fail", f"{name} is down"
 
-    checks = await run_doctor(make_settings(), _probes(**{name: down}))
+    async def down_model(_settings: Settings, _ref: ModelRef) -> Probe:
+        return "fail", f"{name} is down"
+
+    probes = _probes(ollama_model=down_model) if name == "ollama" else _probes(**{name: down})
+    checks = await run_doctor(make_settings(), probes)
 
     check = next(item for item in checks if item.check == name)
     assert check.status == "fail"
-    assert check.detail == f"{name} is down"
+    if name == "ollama":
+        assert "no model answers" in check.detail
+    else:
+        assert check.detail == f"{name} is down"
     assert check.required is required
     assert doctor_exit_code(checks) == (1 if required else 0)
 
@@ -534,3 +554,119 @@ async def test_metrics_records_stage_failures() -> None:
 
     assert 'caracal_stage_failures_total{stage="transcribe"} 2' in lines
     assert 'caracal_stage_failures_total{stage="diarize"} 1' in lines
+
+
+# --- LLM model probes and route aggregation (card 46) ---------------------------------
+
+
+async def test_probe_ollama_model_posts_api_show_to_the_ref_endpoint(make_settings: MakeSettings) -> None:
+    settings = make_settings(OLLAMA_CLOUD_API_KEY="cloud-key")
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        request.read()
+        seen.append(request)
+        return httpx.Response(200, json={"details": {}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        local = await _probe_ollama_model(settings, parse_model_ref("local:gemma4:31b"), client=client)
+        cloud = await _probe_ollama_model(settings, parse_model_ref("cloud:gemma4:31b-cloud"), client=client)
+
+    assert local == ("ok", "local:gemma4:31b available at http://127.0.0.1:11434")
+    assert cloud[0] == "ok"
+    assert str(seen[0].url) == "http://127.0.0.1:11434/api/show"
+    assert "authorization" not in seen[0].headers
+    assert json.loads(seen[0].content) == {"model": "gemma4:31b"}
+    assert str(seen[1].url) == "https://ollama.com/api/show"
+    assert seen[1].headers["authorization"] == "Bearer cloud-key"
+    assert json.loads(seen[1].content) == {"model": "gemma4:31b-cloud"}
+
+
+async def test_probe_ollama_model_reports_a_404_as_fail(make_settings: MakeSettings) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"error": "model not found"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        status, detail = await _probe_ollama_model(
+            make_settings(), parse_model_ref("local:missing:1b"), client=client
+        )
+
+    assert status == "fail"
+    assert "HTTP 404" in detail
+
+
+async def test_probe_ollama_model_fails_a_cloud_ref_without_a_key(make_settings: MakeSettings) -> None:
+    status, detail = await _probe_ollama_model(
+        make_settings(OLLAMA_CLOUD_API_KEY=None), parse_model_ref("cloud:gemma4:31b")
+    )
+
+    assert status == "fail"
+    assert "OLLAMA_CLOUD_API_KEY" in detail
+
+
+async def test_one_line_per_allowed_model_names_the_routes_that_use_it(
+    make_settings: MakeSettings,
+) -> None:
+    settings = make_settings(
+        LLM_ALLOWED_MODELS="local:a,local:b",
+        LLM_ROUTE_DEFAULT="local:a,local:b",
+        LLM_ROUTE_QA="local:b",
+    )
+
+    checks = await run_doctor(settings, _probes())
+
+    details = {check.check: check.detail for check in checks if check.check.startswith("ollama:")}
+    every_route = "default, plan, content, identity, verify, translate, review"
+    assert details["ollama:local:a"] == f"ok; routes: {every_route}"
+    assert details["ollama:local:b"] == f"ok; routes: {every_route}, qa"
+
+
+async def test_a_route_whose_every_model_fails_fails_the_required_ollama_check(
+    make_settings: MakeSettings,
+) -> None:
+    async def down(_settings: Settings, _ref: ModelRef) -> Probe:
+        return "fail", "HTTP 404"
+
+    settings = make_settings(LLM_ALLOWED_MODELS="local:a,local:b", LLM_ROUTE_DEFAULT="local:a,local:b")
+    checks = await run_doctor(settings, _probes(ollama_model=down))
+
+    per_model = [check for check in checks if check.check.startswith("ollama:")]
+    assert [(check.check, check.status) for check in per_model] == [
+        ("ollama:local:a", "fail"),
+        ("ollama:local:b", "fail"),
+    ]
+    aggregate = next(check for check in checks if check.check == "ollama")
+    assert (aggregate.status, aggregate.required) == ("fail", True)
+    assert "no model answers for routes: default" in aggregate.detail
+    assert doctor_exit_code(checks) == 1
+
+
+async def test_a_failing_fallback_only_warns_and_keeps_the_exit_code_zero(
+    make_settings: MakeSettings,
+) -> None:
+    async def show(_settings: Settings, ref: ModelRef) -> Probe:
+        return ("ok", "available") if ref.name == "a" else ("fail", "HTTP 404")
+
+    settings = make_settings(LLM_ALLOWED_MODELS="local:a,local:b", LLM_ROUTE_DEFAULT="local:a,local:b")
+    checks = await run_doctor(settings, _probes(ollama_model=show))
+
+    aggregate = next(check for check in checks if check.check == "ollama")
+    assert (aggregate.status, aggregate.required) == ("warn", True)
+    assert "routes: default" in aggregate.detail
+    assert "every route still answers" in aggregate.detail
+    assert doctor_exit_code(checks) == 0
+
+
+async def test_metrics_render_the_routed_llm_label_set() -> None:
+    redis = RecordingRedis()
+    registry = MetricsRegistry(redis, Keys("caracal:"))
+    await registry.incr_llm_call("local", "json", False, route="qa", model="gemma4:31b")
+
+    text = await registry.render()
+
+    routed = (
+        'caracal_llm_calls_total{route="qa",model="gemma4:31b",'
+        'endpoint="local",mode="json",fallback="false"} 1'
+    )
+    assert routed in text.splitlines()
+    await redis.aclose()

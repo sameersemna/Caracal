@@ -21,7 +21,7 @@ import math
 import shutil
 import sys
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -33,7 +33,7 @@ from alembic.script import ScriptDirectory
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
-from caracal.config import Settings
+from caracal.config import ModelRef, Route, Settings
 from caracal.db.engine import make_engine, session_scope
 from caracal.db.repo import JobRecord
 from caracal.db.tables import JOB_TERMINAL_STATUSES
@@ -49,6 +49,7 @@ CheckStatus = Literal["ok", "warn", "fail"]
 Probe = tuple[CheckStatus, str]
 ProbeFn = Callable[[Settings], Awaitable[Probe]]
 SearchProbeFn = Callable[[Settings, bool], Awaitable[Probe]]
+ModelShowProbeFn = Callable[[Settings, ModelRef], Awaitable[Probe]]
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 _DISK_WARN_BYTES = 20 * 1024 * 1024 * 1024
@@ -80,12 +81,12 @@ class DoctorProbes:
     postgres: ProbeFn
     redis: ProbeFn
     whisper: ProbeFn
-    ollama: ProbeFn
     ffmpeg: ProbeFn
     ytdlp: ProbeFn
     pyannote: ProbeFn
     search: SearchProbeFn
     disk: ProbeFn
+    ollama_model: ModelShowProbeFn
 
 
 def _config_check(settings: Settings) -> DoctorCheck:
@@ -112,19 +113,46 @@ async def run_doctor(
     *,
     deep: bool = False,
 ) -> list[DoctorCheck]:
-    """Run every documented check (docs/02, docs/00). Required failures fail the command."""
+    """Run every documented check (docs/02, docs/00). Required failures fail the command.
+
+    The LLM section is one line per allowed model (``POST /api/show`` on its endpoint) plus one
+    required ``ollama`` line that aggregates the configured routes: a route whose every model
+    fails fails the check, a route whose preferred model fails but whose fallback answers warns.
+    """
     active = probes if probes is not None else default_probes()
     checks: list[DoctorCheck] = [_config_check(settings)]
     required: tuple[tuple[str, ProbeFn], ...] = (
         ("postgres", active.postgres),
         ("redis", active.redis),
         ("whisper", active.whisper),
-        ("ollama", active.ollama),
+    )
+    for name, probe in required:
+        status, detail = await _safe_probe(probe, settings)
+        checks.append(DoctorCheck(name, status, detail, required=name in _REQUIRED_CHECKS))
+
+    model_statuses: dict[str, CheckStatus] = {}
+    model_checks: list[DoctorCheck] = []
+    for ref in settings.llm_allowed_models():
+
+        async def probe_model(probe_settings: Settings, ref: ModelRef = ref) -> Probe:
+            return await active.ollama_model(probe_settings, ref)
+
+        model_status, model_detail = await _safe_probe(probe_model, settings)
+        model_statuses[ref.normalised] = model_status
+        used_by = _routes_using(settings, ref)
+        suffix = f"; routes: {', '.join(used_by)}" if used_by else "; no route uses it"
+        model_checks.append(DoctorCheck(f"ollama:{ref.normalised}", model_status, f"{model_detail}{suffix}"))
+
+    aggregate_status, aggregate_detail = _ollama_route_check(settings, model_statuses)
+    checks.append(DoctorCheck("ollama", aggregate_status, aggregate_detail, required=True))
+    checks.extend(model_checks)
+
+    remaining: tuple[tuple[str, ProbeFn], ...] = (
         ("ffmpeg", active.ffmpeg),
         ("ytdlp", active.ytdlp),
         ("pyannote", active.pyannote),
     )
-    for name, probe in required:
+    for name, probe in remaining:
         status, detail = await _safe_probe(probe, settings)
         checks.append(DoctorCheck(name, status, detail, required=name in _REQUIRED_CHECKS))
     try:
@@ -137,6 +165,40 @@ async def run_doctor(
     disk_status, disk_detail = await _safe_probe(active.disk, settings)
     checks.append(DoctorCheck("disk", disk_status, disk_detail))
     return checks
+
+
+def _routes_using(settings: Settings, ref: ModelRef) -> list[str]:
+    """The routes whose chain contains ``ref`` (compared as ``endpoint:name``)."""
+    return [
+        route.value
+        for route in Route
+        if any(candidate.normalised == ref.normalised for candidate in settings.llm_route_chain(route))
+    ]
+
+
+def _ollama_route_check(settings: Settings, statuses: Mapping[str, CheckStatus]) -> Probe:
+    """Aggregate the per-model ``/api/show`` results into the required ``ollama`` line.
+
+    A route whose every model fails fails the check (required); a route with a failing
+    fallback — or a failing preferred model — still answers, so it only warns.
+    """
+    dead: list[str] = []
+    partial: list[str] = []
+    for route in Route:
+        chain = settings.llm_route_chain(route)
+        if not chain:
+            dead.append(route.value)
+            continue
+        results = [statuses.get(ref.normalised, "fail") for ref in chain]
+        if all(status == "fail" for status in results):
+            dead.append(route.value)
+        elif any(status == "fail" for status in results):
+            partial.append(route.value)
+    if dead:
+        return "fail", f"no model answers for routes: {', '.join(dead)}"
+    if partial:
+        return "warn", f"a model fails for routes: {', '.join(partial)}; every route still answers"
+    return "ok", f"{len(statuses)} allowed models available; every route has a working model"
 
 
 def doctor_exit_code(checks: Sequence[DoctorCheck]) -> int:
@@ -165,12 +227,12 @@ def default_probes() -> DoctorProbes:
         postgres=_probe_postgres,
         redis=_probe_redis,
         whisper=_probe_whisper,
-        ollama=_probe_ollama,
         ffmpeg=_probe_ffmpeg,
         ytdlp=_probe_ytdlp,
         pyannote=_probe_pyannote,
         search=_probe_search,
         disk=_probe_disk,
+        ollama_model=_probe_ollama_model,
     )
 
 
@@ -247,51 +309,42 @@ async def _probe_whisper(settings: Settings) -> Probe:
     return "ok", f"whisper reachable at {settings.WHISPER_URL}"
 
 
-def _model_names(payload: object) -> set[str]:
-    if not isinstance(payload, dict):
-        return set()
-    models = payload.get("models")
-    if not isinstance(models, list):
-        return set()
-    names: set[str] = set()
-    for item in models:
-        if not isinstance(item, dict):
-            continue
-        for field in ("name", "model"):
-            value = item.get(field)
-            if isinstance(value, str):
-                names.add(value)
-    return names
+async def _probe_ollama_model(
+    settings: Settings,
+    ref: ModelRef,
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> Probe:
+    """Availability probe for one model ref: ``POST /api/show`` on its endpoint (docs/02).
 
+    ``/api/tags`` cannot answer this: cloud tags such as ``gemma4:31b-cloud`` resolve on demand
+    and are not listed. ``/api/show`` returns 200 for a model the endpoint can serve and 404 for
+    one it cannot (measured 2026-11-15).
+    """
+    headers: dict[str, str] = {}
+    if ref.endpoint == "cloud":
+        key = settings.OLLAMA_CLOUD_API_KEY
+        if key is None:
+            return "fail", "needs OLLAMA_CLOUD_API_KEY, which is not set"
+        url = settings.OLLAMA_CLOUD_URL
+        headers["Authorization"] = f"Bearer {key.get_secret_value()}"
+    else:
+        url = settings.OLLAMA_LOCAL_URL
+    root = url.rstrip("/")
 
-def _model_listed(names: set[str], wanted: str) -> bool:
-    return wanted in names or f"{wanted}:latest" in names
+    async def probe(active: httpx.AsyncClient) -> Probe:
+        try:
+            response = await active.post(f"{root}/api/show", json={"model": ref.name}, headers=headers)
+        except httpx.HTTPError as exc:
+            return "fail", f"{type(exc).__name__} from {root}/api/show"
+        if response.status_code == 200:
+            return "ok", f"{ref.normalised} available at {root}"
+        return "fail", f"HTTP {response.status_code} from {root}/api/show"
 
-
-async def _probe_ollama(settings: Settings) -> Probe:
-    """Required check: the cloud path or the local fallback must work (docs/02)."""
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        local_ok = False
-        local = await client.get(f"{settings.OLLAMA_LOCAL_URL.rstrip('/')}/api/tags")
-        if local.status_code == 200:
-            local_ok = _model_listed(_model_names(local.json()), settings.LLM_FALLBACK_MODEL)
-        if settings.OLLAMA_CLOUD_API_KEY is None:
-            if not local_ok:
-                return "fail", f"local ollama does not list {settings.LLM_FALLBACK_MODEL}"
-            return "ok", f"local fallback {settings.LLM_FALLBACK_MODEL} listed (local proxy)"
-        headers = {"Authorization": f"Bearer {settings.OLLAMA_CLOUD_API_KEY.get_secret_value()}"}
-        cloud = await client.get(
-            f"{settings.OLLAMA_CLOUD_URL.rstrip('/')}/api/tags",
-            headers=headers,
-        )
-        if cloud.status_code == 200 and local_ok:
-            return "ok", f"cloud reachable; local fallback {settings.LLM_FALLBACK_MODEL} listed"
-        if cloud.status_code == 200:
-            return "warn", f"cloud reachable; local fallback {settings.LLM_FALLBACK_MODEL} is missing"
-        if local_ok:
-            fallback = settings.LLM_FALLBACK_MODEL
-            return "warn", f"cloud HTTP {cloud.status_code}; local fallback {fallback} listed"
-        return "fail", f"cloud HTTP {cloud.status_code} and local fallback is unavailable"
+    if client is not None:
+        return await probe(client)
+    async with httpx.AsyncClient(timeout=10.0) as own_client:
+        return await probe(own_client)
 
 
 async def _run_command(argv: Sequence[str], *, timeout_s: float = 15.0) -> tuple[int, bytes, bytes]:
@@ -666,8 +719,24 @@ class MetricsRegistry:
         """Count one failed stage run (``caracal_stage_failures_total{stage}``)."""
         await self._incr("stage_failures_total", stage)
 
-    async def incr_llm_call(self, endpoint: str, mode: str, fallback: bool) -> None:
-        await self._incr("llm_calls_total", _labels_field(endpoint, mode, "true" if fallback else "false"))
+    async def incr_llm_call(
+        self,
+        endpoint: str,
+        mode: str,
+        fallback: bool,
+        *,
+        route: str = "",
+        model: str = "",
+    ) -> None:
+        """Count one answered LLM call.
+
+        The routing labels (``route``, ``model``) are optional so counters written before
+        T4.5 keep rendering in their three-label shape; the client always passes both.
+        """
+        labels = [endpoint, mode, "true" if fallback else "false"]
+        if route or model:
+            labels = [route, model, *labels]
+        await self._incr("llm_calls_total", _labels_field(*labels))
 
     async def incr_search_query(self, provider: str, *, cached: bool) -> None:
         await self._incr("search_queries_total", _labels_field(provider, "true" if cached else "false"))
@@ -698,10 +767,21 @@ class MetricsRegistry:
             lines.append(f'caracal_stage_failures_total{{stage="{_label(stage)}"}} {_number(value)}')
 
         for field, value in sorted((await self._read("llm_calls_total")).items()):
-            parts = _split_field(field, 3)
-            if parts is None:
+            parts = _split_field(field, 5)
+            if parts is not None:
+                route, model, endpoint, mode, fallback = parts
+                lines.append(
+                    "caracal_llm_calls_total"
+                    f'{{route="{_label(route)}",model="{_label(model)}",'
+                    f'endpoint="{_label(endpoint)}",mode="{_label(mode)}",'
+                    f'fallback="{_label(fallback)}"}}'
+                    f" {_number(value)}"
+                )
                 continue
-            endpoint, mode, fallback = parts
+            legacy = _split_field(field, 3)
+            if legacy is None:
+                continue
+            endpoint, mode, fallback = legacy
             lines.append(
                 "caracal_llm_calls_total"
                 f'{{endpoint="{_label(endpoint)}",mode="{_label(mode)}",fallback="{_label(fallback)}"}}'

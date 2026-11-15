@@ -19,7 +19,7 @@ import pytest
 from pydantic import BaseModel, Field, SecretStr
 
 from caracal.asr import Segment
-from caracal.config import Settings, get_settings
+from caracal.config import Route, Settings, get_settings
 from caracal.llm.client import LLMClient, ToolResult
 from caracal.llm.prompts import load_prompt, render_transcript_lines, wrap_data
 from caracal.llm.schema import DEFAULT_SYNONYMS
@@ -100,7 +100,7 @@ def _content_prompt() -> tuple[str, set[str]]:
     }
 
 
-async def _analyse(settings: Settings) -> ToolResult[Out]:
+async def _analyse(settings: Settings, *, route: Route = Route.DEFAULT) -> ToolResult[Out]:
     async with httpx.AsyncClient() as http:
         client = LLMClient(settings, http)
         return await client.call_tool(
@@ -110,6 +110,7 @@ async def _analyse(settings: Settings) -> ToolResult[Out]:
             tool_name="record_analysis",
             tool_description="Record the language, speaker and entities found in the transcript.",
             synonyms=DEFAULT_SYNONYMS,
+            route=route,
         )
 
 
@@ -188,3 +189,36 @@ async def test_live_content_analysis_is_valid_and_cites_only_transcript_ids() ->
     assert any(result.value.entities for result in valid)
     assert cited
     assert cited <= valid_ids, sorted(cited - valid_ids)
+
+
+async def test_live_every_route_answers_with_its_preferred_model() -> None:
+    """Each task route is answered by the first ref of its configured chain (docs/02)."""
+    settings = get_settings()
+
+    for route in Route:
+        result = await _analyse(settings, route=route)
+
+        _assert_merkel_and_berlin(result)
+        assert result.meta.route is route
+        assert result.meta.model_ref == settings.llm_route_chain(route)[0].normalised
+        assert result.meta.refs_tried == 1
+        assert result.meta.fallback_used is False
+
+
+async def test_live_qa_route_falls_back_to_the_local_model() -> None:
+    """A QA chain whose first ref cannot serve falls over to local ``gemma4:31b``."""
+    settings = get_settings()
+    routed = settings.model_copy(
+        update={
+            "LLM_ALLOWED_MODELS": ["local:nonexistent-model:1b", "local:gemma4:31b"],
+            "LLM_ROUTE_QA": ["local:nonexistent-model:1b", "local:gemma4:31b"],
+        }
+    )
+
+    result = await _analyse(routed, route=Route.QA)
+
+    _assert_merkel_and_berlin(result)
+    assert result.meta.model_ref == "local:gemma4:31b"
+    assert result.meta.endpoint == "local"
+    assert result.meta.refs_tried == 2
+    assert result.meta.fallback_used is True

@@ -2,9 +2,13 @@
 
 Per-cue translation produces grammatical fragments ("A few" becomes "Jahren" in German), so
 translation works on *units*: consecutive cues of one speaker up to a sentence end, at most
-four cues or 200 characters. Units are translated in JSON-mode batches of about 25 (the
-measured gemma4 recipe: exact index sets on 4/4 batches), retried once on an index mismatch
-and then one call per unit. A unit that still fails keeps its source text and is counted.
+four cues or 200 characters. A unit also ends at a pause longer than one second between cues
+in every script, and at a whisper segment boundary when the cue before it is Han/Kana/Hangul/
+Thai text without sentence punctuation (whisper writes those scripts without punctuation, so
+the segment boundary is the only sentence signal). Units are translated in JSON-mode batches
+of about 25 (the measured gemma4 recipe: exact index sets on 4/4 batches), retried once on an
+index mismatch and then one call per unit. A unit that still fails keeps its source text and
+is counted.
 
 The translated unit is redistributed over its source cues at word boundaries (characters for
 CJK), proportionally to the source cues' character counts, keeping the original timings, and
@@ -18,13 +22,14 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from caracal.asr import LANGUAGE_NAMES
+from caracal.asr import LANGUAGE_NAMES, Transcript
+from caracal.config import Route
 from caracal.errors import CaracalError
 from caracal.llm.client import LLMClient
 from caracal.llm.prompts import load_prompt
@@ -38,6 +43,9 @@ _SENTENCE_ENDINGS: Final = frozenset(".?!…。！？؟")  # noqa: RUF001 - CJK/
 _CLOSING_CHARS: Final = "\"'”’»)]}"  # noqa: RUF001 - typographic quotes
 _MAX_UNIT_CUES: Final = 4
 _MAX_UNIT_CHARS: Final = 200
+#: A pause this long between consecutive cues ends the unit in every script (measured: separate
+#: news items 4.8 s apart were merged into one sentence and translated falsely).
+_UNIT_GAP_S: Final = 1.0
 _BATCH_SIZE: Final = 25
 _MAX_GLOSSARY: Final = 60
 _MAX_LINE_CHARS: Final = 42
@@ -283,8 +291,58 @@ def _unit(entries: Sequence[tuple[int, Cue]]) -> TranslationUnit:
     )
 
 
-def units_from_cues(cues: Sequence[Cue]) -> list[TranslationUnit]:
-    """Group cues into sentence units: same speaker, sentence end, 4 cues / 200 chars."""
+def _is_no_space_script(text: str) -> bool:
+    """Han/Kana/Hangul/Thai text: the segmenter wraps those scripts at 16 characters."""
+    return line_chars(text, _MAX_LINE_CHARS) < _MAX_LINE_CHARS
+
+
+def segment_token_starts(transcript: Transcript) -> set[int]:
+    """Global token index at which every whisper segment starts (docs/04 §10).
+
+    Cues carry global token spans (``Cue.word_span``), so membership in this set says whether
+    a cue boundary coincides with a whisper segment boundary.
+    """
+    starts: set[int] = set()
+    offset = 0
+    for segment in transcript.segments:
+        if not segment.words:
+            continue
+        starts.add(offset)
+        offset += len(segment.words)
+    return starts
+
+
+def _ends_unit(
+    next_cue: Cue,
+    previous: Cue,
+    current_len: int,
+    cue_count: int,
+    segment_starts: Collection[int],
+) -> bool:
+    """True when ``next_cue`` starts a new translation unit (docs/04 §10)."""
+    previous_text = cue_text(previous)
+    if next_cue.speaker != previous.speaker:
+        return True
+    if _ends_sentence(previous_text):
+        return True
+    if next_cue.start - previous.end > _UNIT_GAP_S:
+        return True
+    if (
+        next_cue.word_span[0] in segment_starts
+        and not _ends_sentence(previous_text)
+        and _is_no_space_script(previous_text)
+    ):
+        # Whisper writes CJK/Thai without punctuation; the segment boundary is the sentence.
+        return True
+    return current_len > _MAX_UNIT_CHARS or cue_count >= _MAX_UNIT_CUES
+
+
+def units_from_cues(
+    cues: Sequence[Cue],
+    *,
+    segment_starts: Collection[int] = (),
+) -> list[TranslationUnit]:
+    """Group cues into sentence units: same speaker, sentence end, gap, segment, 4 cues/200 chars."""
     units: list[TranslationUnit] = []
     current: list[tuple[int, Cue]] = []
     for position, cue in enumerate(cues):
@@ -293,9 +351,7 @@ def units_from_cues(cues: Sequence[Cue]) -> list[TranslationUnit]:
             continue
         previous = current[-1][1]
         combined = " ".join([*(cue_text(item) for _pos, item in current), cue_text(cue)])
-        too_long = len(combined) > _MAX_UNIT_CHARS
-        too_many = len(current) >= _MAX_UNIT_CUES
-        if cue.speaker != previous.speaker or _ends_sentence(cue_text(previous)) or too_long or too_many:
+        if _ends_unit(cue, previous, len(combined), len(current), segment_starts):
             units.append(_unit(current))
             current = [(position, cue)]
         else:
@@ -437,6 +493,7 @@ async def _call(
         temperature=0.2,
         max_tokens=4096,
         mode="json",
+        route=Route.TRANSLATE,
     )
     return _validate_batch(result.value.cues, len(texts))
 
@@ -538,6 +595,7 @@ __all__ = [
     "normalise_target_langs",
     "redistribute",
     "resolve_target_langs",
+    "segment_token_starts",
     "translate_units",
     "units_from_cues",
 ]

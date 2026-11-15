@@ -33,6 +33,7 @@ from caracal.analysis.translate import (
     normalise_target_langs,
     redistribute,
     resolve_target_langs,
+    segment_token_starts,
     translate_units,
     units_from_cues,
 )
@@ -1290,7 +1291,7 @@ async def stage_translate(ctx: StageContext) -> StageResult:
         raise CaracalError(ErrorCode.INTERNAL, "transcript is missing")
 
     cues = cues_from_transcript(transcript)
-    units = units_from_cues(cues)
+    units = units_from_cues(cues, segment_starts=segment_token_starts(transcript))
     if not units:
         return StageResult(status="skipped", reason="nothing to translate", output=preserved)
 

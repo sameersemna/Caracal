@@ -23,7 +23,7 @@ from typing import Final
 from pydantic import BaseModel, ConfigDict, Field
 
 from caracal.asr import LANGUAGE_NAMES
-from caracal.config import Settings
+from caracal.config import Route, Settings
 from caracal.db.repo import SearchHit, SegmentRepo
 from caracal.errors import CaracalError, ErrorCode
 from caracal.llm.client import LLMClient
@@ -283,6 +283,7 @@ async def _keywords(
         tool_name="qa_keywords",
         tool_description="Return 3 to 8 search keywords in the transcript's dominant language.",
         mode="json",
+        route=Route.QA,
     )
     return _normalise_keywords(result.value.keywords)
 
@@ -404,6 +405,7 @@ async def answer(
         tool_name="qa_answer",
         tool_description="Answer the question with citations to transcript segment ids.",
         mode="json",
+        route=Route.QA,
     )
     allowed = {segment.seg_id: segment for segment in allowed_segments}
     return _finalise(result.value, allowed)

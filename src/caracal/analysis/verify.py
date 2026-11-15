@@ -45,7 +45,7 @@ from caracal.analysis.identity import (
     apply_web_sources,
 )
 from caracal.asr import Segment, Transcript
-from caracal.config import Settings
+from caracal.config import Route, Settings
 from caracal.db.repo import normalise_text
 from caracal.llm.client import LLMClient
 from caracal.llm.prompts import (
@@ -576,6 +576,7 @@ async def _write_queries(
         tool_name="record_verification_queries",
         tool_description="Record one to two web-search queries for every verification target.",
         mode="json",
+        route=Route.VERIFY,
     )
     known = {target.target for target in targets}
     returned: dict[str, list[str]] = {}
@@ -726,6 +727,7 @@ async def _judge_claim(
         tool_name="record_claim_verification",
         tool_description="Record one verdict with its cited web sources.",
         mode="json",
+        route=Route.VERIFY,
     )
     return _finalise_verification(target, result.value, hits)
 
@@ -950,6 +952,7 @@ async def _identity_web(
             tool_name="record_identity_web_evidence",
             tool_description="Record the full name or quote attribution found on the web.",
             mode="json",
+            route=Route.VERIFY,
         )
         for item in result.value.results:
             if item.label:

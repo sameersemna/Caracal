@@ -16,9 +16,11 @@ from caracal.analysis.translate import (
     is_valid_target_lang,
     redistribute,
     resolve_target_langs,
+    segment_token_starts,
     translate_units,
     units_from_cues,
 )
+from caracal.asr import Segment, Transcript, Word, join_words
 from caracal.config import Settings
 from caracal.llm.client import LLMClient
 from caracal.pipeline.stages import JobOptions
@@ -40,6 +42,30 @@ def _cue(index: int, text: str, *, start: float | None = None, speaker: str = "S
         lines=[text],
         speaker=speaker,
         word_span=(0, 0),
+    )
+
+
+def _word(text: str, start: float, end: float) -> Word:
+    return Word(text=text, start=start, end=end, prob=0.9, space_before=True)
+
+
+def _transcript(*segments: tuple[Word, ...]) -> Transcript:
+    return Transcript(
+        segments=tuple(
+            Segment(
+                id=index,
+                start=words[0].start,
+                end=words[-1].end,
+                text=join_words(words),
+                words=words,
+                avg_logprob=0.0,
+                no_speech_prob=0.0,
+                lang="en",
+            )
+            for index, words in enumerate(segments)
+        ),
+        language_code="en",
+        dropped={"no_speech": 0, "repetition": 0, "empty": 0},
     )
 
 
@@ -374,3 +400,128 @@ async def test_translate_prompt_uses_target_script_names_for_arabic(
     assert "write names and place names in the conventional form used in the target script" in system
     assert "مونتريال" in system
     assert "keep every name and place name exactly as written" not in system
+
+
+# --- unit boundaries: pauses and whisper segments (card 46 item 7) ----------------------
+
+
+def _zh_cue(index: int, text: str, *, start: float, end: float, first_token: int) -> Cue:
+    return Cue(
+        index=index,
+        start=start,
+        end=end,
+        lines=[text],
+        speaker="S1",
+        word_span=(first_token, first_token + 3),
+    )
+
+
+_JUDGE_FIRST = "有4人被殺 很多人受傷"
+_JUDGE_SECOND = "在坦桑尼亞 警方說"
+
+
+def test_a_long_pause_ends_a_unit_so_separate_news_items_are_not_merged() -> None:
+    """Measured: two cues 4.8 s apart were translated as one false sentence (card 46)."""
+    first = _zh_cue(1, _JUDGE_FIRST, start=0.0, end=4.8, first_token=0)
+    second = _zh_cue(2, _JUDGE_SECOND, start=9.6, end=13.0, first_token=4)
+
+    units = units_from_cues([first, second])
+
+    assert [unit.text for unit in units] == [_JUDGE_FIRST, _JUDGE_SECOND]
+    assert [unit.cue_indices for unit in units] == [(0,), (1,)]
+
+
+async def test_separate_units_are_translated_as_separate_batch_items(
+    make_settings: MakeSettings,
+) -> None:
+    """The two news items stay two translation units, so neither translation can merge them."""
+    settings = make_settings()
+    first = _zh_cue(1, _JUDGE_FIRST, start=0.0, end=4.8, first_token=0)
+    second = _zh_cue(2, _JUDGE_SECOND, start=9.6, end=13.0, first_token=4)
+    units = units_from_cues([first, second])
+    payloads: list[list[str]] = []
+    english = {
+        _JUDGE_FIRST: "Four people were killed and many were injured.",
+        _JUDGE_SECOND: "In Tanzania, police said.",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        cues = _payload(request)["cues"]
+        payloads.append([item["text"] for item in cues])
+        return json_response({"cues": [{"i": item["i"], "text": english[item["text"]]} for item in cues]})
+
+    translated, failed, _bodies = await _translate(settings, units, handler, lang="en")
+
+    # Both units travel in one batch, but as two independent items: one unit each.
+    assert payloads == [[_JUDGE_FIRST, _JUDGE_SECOND]]
+    assert translated == [english[_JUDGE_FIRST], english[_JUDGE_SECOND]]
+    assert "Tanzania" not in translated[0]
+    assert failed == 0
+
+
+def test_a_short_pause_does_not_end_a_unit() -> None:
+    cues = [
+        _zh_cue(1, "第一部分", start=0.0, end=2.0, first_token=0),
+        _zh_cue(2, "第二部分", start=2.9, end=5.0, first_token=3),
+    ]
+
+    units = units_from_cues(cues)
+
+    assert [unit.cue_indices for unit in units] == [(0, 1)]
+
+
+def test_a_whisper_segment_boundary_ends_a_cjk_unit_without_punctuation() -> None:
+    first = _zh_cue(1, _JUDGE_FIRST, start=0.0, end=3.0, first_token=0)
+    second = _zh_cue(2, _JUDGE_SECOND, start=3.0, end=6.0, first_token=4)
+
+    units = units_from_cues([first, second], segment_starts={4})
+
+    assert [unit.text for unit in units] == [_JUDGE_FIRST, _JUDGE_SECOND]
+
+
+def test_a_segment_boundary_does_not_end_a_latin_unit() -> None:
+    first = _cue(1, "the police said")
+    second = _cue(2, "that the search continued", start=3.5)
+
+    units = units_from_cues([first, second], segment_starts={0, 3})
+
+    assert [unit.cue_indices for unit in units] == [(0, 1)]
+
+
+def test_a_segment_boundary_does_not_end_a_cjk_unit_that_ends_a_sentence() -> None:
+    first = _zh_cue(1, "有4人被殺。", start=0.0, end=3.0, first_token=0)
+    second = _zh_cue(2, _JUDGE_SECOND, start=3.0, end=6.0, first_token=4)
+
+    units = units_from_cues([first, second], segment_starts={4})
+
+    assert [len(unit.cues) for unit in units] == [1, 1]
+
+
+def test_segment_token_starts_counts_words_not_cues() -> None:
+    words_a = (_word("one", 0.0, 0.4), _word("two", 0.4, 0.8))
+    words_b = (_word("three", 0.8, 1.2),)
+    transcript = _transcript(words_a, words_b)
+
+    starts = segment_token_starts(transcript)
+
+    assert starts == {0, 2}
+
+
+async def test_translate_calls_use_the_translate_route(make_settings: MakeSettings) -> None:
+    settings = make_settings(
+        LLM_ALLOWED_MODELS="local:tr-model",
+        LLM_ROUTE_TRANSLATE="local:tr-model",
+    )
+    units = [_unit([_cue(1, "A few years ago")])]
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        request.read()
+        bodies.append(json.loads(request.content))
+        return json_response({"cues": [{"i": 0, "text": "Vor ein paar Jahren"}]})
+
+    translated, failed, _bodies = await _translate(settings, units, handler)
+
+    assert translated == ["Vor ein paar Jahren"]
+    assert failed == 0
+    assert [body["model"] for body in bodies] == ["tr-model"]

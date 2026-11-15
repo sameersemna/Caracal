@@ -35,7 +35,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from caracal.asr import Segment, Transcript
-from caracal.config import Settings
+from caracal.config import Route, Settings
 from caracal.db.repo import normalise_name
 from caracal.errors import CaracalError
 from caracal.llm.client import LLMClient
@@ -822,6 +822,7 @@ async def _extract(
         tool_name="record_identity_mentions",
         tool_description="Record every name mention and a role/description for each speaker label.",
         mode="json",
+        route=Route.IDENTITY,
     )
     return result.value
 
