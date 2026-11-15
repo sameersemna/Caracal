@@ -25,7 +25,7 @@ from tests.fakes.redis import RecordingRedis
 from tests.fakes.repo import make_fake_repos
 from tests.fakes.resolver import FakeResolver
 from tests.fakes.search import FakeProvider, make_hit
-from tests.fakes.whisper import FakeWhisper
+from tests.fakes.whisper import FakeWhisper, load_fixture
 from tests.repo_contract import Repos
 
 from caracal.asr import Segment, Transcript, WhisperResult, Word
@@ -410,6 +410,29 @@ async def _chunk_checkpoint(files: JobFiles, count: int) -> None:
     _write_output(files, Stage.CHUNK, {"chunks": specs})
 
 
+def _normalize_checkpoint(
+    files: JobFiles,
+    *,
+    duration_s: float = 1.0,
+    silences: list[list[float]] | None = None,
+) -> None:
+    """The normalize output ``stage_transcribe`` reads: audio length and measured silences."""
+    _write_output(
+        files,
+        Stage.NORMALIZE,
+        {
+            "probe": {},
+            "stats": {
+                "duration_s": duration_s,
+                "speech_ratio": 1.0,
+                "loudness_lufs": -20.0,
+                "quality": "good",
+                "silences": silences if silences is not None else [],
+            },
+        },
+    )
+
+
 async def test_transcribe_writes_transcript_segments_and_removes_chunks(
     make_settings: MakeSettings, tmp_path: Path
 ) -> None:
@@ -419,6 +442,7 @@ async def test_transcribe_writes_transcript_segments_and_removes_chunks(
     files = JobFiles(tmp_path, job.id)
     files.ensure()
     await _chunk_checkpoint(files, 1)
+    _normalize_checkpoint(files)
     services = _services(settings)
     try:
         result = await stage_transcribe(
@@ -471,6 +495,81 @@ async def test_transcribe_writes_transcript_segments_and_removes_chunks(
         await services.http.aclose()
 
 
+async def test_transcribe_passes_duration_and_silences_to_the_credit_filter(
+    make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    """Verdict 43 fix 3: the credit filter sees the normalize duration and silence spans.
+
+    On a 600 s timeline both fabricated credits sit mid-audio. They are dropped or kept
+    according to the measured silence, which only happens when ``stage_transcribe`` forwards
+    ``duration_s`` and ``silences``. With the old defaults (no duration, no silences) the
+    chunk checkpoint's 1 s end makes every segment an intro credit, so both would be dropped.
+    """
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    await _chunk_checkpoint(files, 1)
+    _normalize_checkpoint(files, duration_s=600.0, silences=[[99.0, 101.0]])
+
+    payload = json.loads(json.dumps(load_fixture("jfk")))
+    payload["duration"] = 600.0
+    payload["segments"] = [
+        *payload["segments"],
+        {
+            "id": 3,
+            "start": 100.0,
+            "end": 101.0,
+            "text": "Thanks for watching",
+            "avg_logprob": -0.2,
+            "no_speech_prob": 0.1,
+        },
+        {
+            "id": 4,
+            "start": 200.0,
+            "end": 201.0,
+            "text": "Subtitles by the Amara.org community",
+            "avg_logprob": -0.2,
+            "no_speech_prob": 0.1,
+        },
+    ]
+    redis = RecordingRedis()
+    keys = Keys(PREFIX)
+    fake = FakeWhisper([httpx.Response(200, json=payload)])
+    http = httpx.AsyncClient(transport=fake.transport())
+    client = WhisperClient(
+        settings.WHISPER_URL,
+        http,
+        timeout_s=5.0,
+        lock=lambda: whisper_lock(redis, keys),
+    )
+    try:
+        result = await stage_transcribe(
+            _context(
+                settings,
+                repos,
+                files,
+                whisper=client,
+                redis=redis,
+                keys=keys,
+                job_id=job.id,
+            )
+        )
+    finally:
+        await http.aclose()
+
+    assert result.status == "done"
+    dropped = result.output["dropped"]
+    assert isinstance(dropped, dict)
+    assert dropped["hallucinated_credit"] == 1
+    stored = json.loads(files.transcript_json.read_text(encoding="utf-8"))
+    texts = [segment["text"] for segment in stored["segments"]]
+    assert "Thanks for watching" not in texts  # midpoint 100.5 s lies in the measured silence
+    assert "Subtitles by the Amara.org community" in texts  # mid-audio speech, not an edge credit
+    assert result.output["segments"] == 4
+
+
 async def test_transcribe_stops_between_chunks_without_writing_a_transcript(
     make_settings: MakeSettings, tmp_path: Path
 ) -> None:
@@ -480,6 +579,7 @@ async def test_transcribe_stops_between_chunks_without_writing_a_transcript(
     files = JobFiles(tmp_path, job.id)
     files.ensure()
     await _chunk_checkpoint(files, 2)
+    _normalize_checkpoint(files, duration_s=2.0)
     services = _services(settings)
     calls = 0
 
@@ -521,6 +621,7 @@ async def test_cancel_between_chunks_settles_the_job_cancelled(
     files = JobFiles(tmp_path, job.id)
     files.ensure()
     await _chunk_checkpoint(files, 2)
+    _normalize_checkpoint(files, duration_s=2.0)
     services = _services(settings)
     checks = 0
 
@@ -2453,6 +2554,7 @@ async def test_transcribe_adds_each_chunk_duration_to_the_whisper_metric(
     files = JobFiles(tmp_path, job.id)
     files.ensure()
     await _chunk_checkpoint(files, 1)
+    _normalize_checkpoint(files)
     services = _services(settings)
     metrics = _RecordingMetrics()
     try:

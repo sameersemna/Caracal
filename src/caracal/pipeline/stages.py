@@ -554,6 +554,20 @@ async def stage_transcribe(ctx: StageContext) -> StageResult:
     """Transcribe every chunk under the whisper lock and persist the merged transcript."""
     specs = _chunk_specs(await _stage_output(ctx, Stage.CHUNK))
     chunks = [_spec_chunk(spec) for spec in specs]
+    # ``normalize`` measures the real audio length and the non-speech spans; the credit
+    # filter needs both. A registry that runs transcribe without normalize (the concurrency
+    # tests' partial pipeline) leaves them unknown, and only the intro/outro rule applies.
+    duration_s: float | None = None
+    silences: list[tuple[float, float]] = []
+    normalize = await _stage_output(ctx, Stage.NORMALIZE)
+    if normalize is not None:
+        stats = _as_dict(normalize.get("stats"), "normalize")
+        duration_s = _as_number(stats.get("duration_s"), "normalize")
+        for raw in _as_list(stats.get("silences", []), "normalize"):
+            pair = _as_list(raw, "normalize")
+            if len(pair) != 2:
+                raise _malformed("normalize")
+            silences.append((_as_number(pair[0], "normalize"), _as_number(pair[1], "normalize")))
     whisper = _require_whisper(ctx)
 
     results: list[WhisperResult] = []
@@ -570,7 +584,12 @@ async def stage_transcribe(ctx: StageContext) -> StageResult:
             f"transcribed chunk {position}/{len(chunks)}",
         )
 
-    transcript = merge_chunks(results, chunks)
+    transcript = merge_chunks(
+        results,
+        chunks,
+        duration_s=duration_s,
+        silences=silences,
+    )
     _write_transcript(ctx, transcript)
     await ctx.repos.segments.replace_for_job(ctx.job_id, _segment_rows(ctx, transcript))
     shutil.rmtree(ctx.files.chunks_dir, ignore_errors=True)

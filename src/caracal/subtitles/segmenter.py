@@ -3,12 +3,18 @@
 The transcript's flat token list is first grouped into whole words (:func:`word_groups`):
 whisper tokens are sub-word pieces, so breaking on a token would cut "Tagesschau" after
 "Tag". Cue breaks, line breaks and the character limit then all act on those groups, so a
-line or cue boundary can never fall inside a word. Cues have at most ``max_lines`` lines and
-``max_chars`` characters per line, are 1-7 s long, with at least ``min_gap`` seconds between
-consecutive cues. Speaker changes, long pauses and size limits always break; once a cue is
-long enough, sentence punctuation then clause punctuation are preferred break points. A
-single group longer than ``max_chars`` stays whole on its own line, and two speakers never
-share a cue.
+line or cue boundary can never fall inside a word — even when whisper cut a word at a chunk
+boundary (``couldn'`` | ``'t``), because grouping spans segments. Cues have at most
+``max_lines`` lines and ``max_chars`` characters per line — except that a cue whose
+characters are at least half Han/Kana/Hangul/Thai uses :data:`_CJK_LINE_CHARS` (subtitle
+guidelines are ~16 characters, not 42 columns, for those scripts) — are 1-7 s long, with at
+least ``min_gap`` seconds between consecutive cues. Speaker changes, long pauses and size
+limits always break. Once a cue is long enough, a whisper segment boundary is a preferred
+break point in every script, just like sentence punctuation, and a hard one for CJK/Thai text
+that carries no sentence punctuation (whisper often emits none there, so the segment boundary
+is the only sentence signal). Sentence punctuation then clause punctuation are the other
+preferred points. A single group longer than the line limit stays whole on its own line, and
+two speakers never share a cue.
 """
 
 from __future__ import annotations
@@ -23,6 +29,26 @@ _CLAUSE_ENDINGS = frozenset(",;:、，")  # noqa: RUF001 - CJK punctuation is in
 _MIN_CUE_CHARS = 15
 _BREAK_PAUSE_S = 1.0
 _PUNCTUATION_BALANCE_SLACK = 8
+#: Subtitle guidelines for scripts written without word spaces: ~16 characters per line.
+_CJK_LINE_CHARS = 16
+
+#: Han, Kana, Hangul and Thai blocks (a cue dominated by them wraps at characters).
+_CJK_RANGES: tuple[tuple[int, int], ...] = (
+    (0x0E00, 0x0E7F),  # Thai
+    (0x1100, 0x11FF),  # Hangul Jamo
+    (0x2E80, 0x2FDF),  # CJK radicals, Kangxi radicals
+    (0x3000, 0x30FF),  # CJK punctuation, Hiragana, Katakana
+    (0x3130, 0x318F),  # Hangul compatibility Jamo
+    (0x31F0, 0x31FF),  # Katakana phonetic extensions
+    (0x3400, 0x4DBF),  # CJK unified ideographs extension A
+    (0x4E00, 0x9FFF),  # CJK unified ideographs
+    (0xA960, 0xA97F),  # Hangul Jamo extended A
+    (0xAC00, 0xD7AF),  # Hangul syllables
+    (0xF900, 0xFAFF),  # CJK compatibility ideographs
+    (0xFE30, 0xFE4F),  # CJK compatibility forms
+    (0xFF00, 0xFFEF),  # half/fullwidth forms (halfwidth Katakana included)
+    (0x20000, 0x3FFFF),  # CJK unified ideographs extension B and beyond
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,8 +63,43 @@ class Cue:
     word_span: tuple[int, int]
 
 
-def _flatten(transcript: Transcript) -> list[Word]:
-    return [word for segment in transcript.segments for word in segment.words]
+def _is_cjk_char(char: str) -> bool:
+    code = ord(char)
+    return any(low <= code <= high for low, high in _CJK_RANGES)
+
+
+def _is_cjk_heavy(text: str) -> bool:
+    """True when at least half of the rendered characters are Han/Kana/Hangul/Thai."""
+    visible = [char for char in text if not char.isspace()]
+    if not visible:
+        return False
+    return sum(1 for char in visible if _is_cjk_char(char)) * 2 >= len(visible)
+
+
+def _line_chars(text: str, max_chars: int) -> int:
+    """Characters per line for ``text``: the CJK guideline, else the caller's limit."""
+    return _CJK_LINE_CHARS if _is_cjk_heavy(text) else max_chars
+
+
+def _words_and_groups(transcript: Transcript) -> tuple[list[Word], list[WordGroup], set[int]]:
+    """Flatten the transcript, group it into words and locate the segment boundaries.
+
+    Returns the flat words, the groups with global token indices, and the global token index
+    at which each whisper segment starts. Grouping is global so a word whisper cut across a
+    chunk boundary (``couldn'`` | ``'t``) stays one word; such a group contains a segment
+    start that cannot be a break point, and :func:`_spans` only sees the boundary when it
+    falls on a group's first token.
+    """
+    words: list[Word] = []
+    segment_starts: set[int] = set()
+    offset = 0
+    for segment in transcript.segments:
+        if not segment.words:
+            continue
+        segment_starts.add(offset)
+        words.extend(segment.words)
+        offset += len(segment.words)
+    return words, word_groups(words), segment_starts
 
 
 def _text(words: Sequence[Word], groups: Sequence[WordGroup]) -> str:
@@ -135,6 +196,7 @@ def _break_before(
     max_lines: int,
     max_dur: float,
     min_dur: float,
+    new_segment: bool,
 ) -> bool:
     """True when ``group`` must start a new cue (hard break, then preferred break)."""
     previous = cue_groups[-1]
@@ -145,21 +207,32 @@ def _break_before(
     first = cue_groups[0]
     if group.end - first.start > max_dur:
         return True
-    if not _renders_within([*cue_groups, group], words, max_chars, max_lines):
+    candidate = [*cue_groups, group]
+    if not _renders_within(candidate, words, _line_chars(_text(words, candidate), max_chars), max_lines):
+        return True
+
+    cue_text = _text(words, cue_groups)
+    if new_segment and _is_cjk_heavy(cue_text) and not _ends_with(previous, _SENTENCE_ENDINGS):
+        # Whisper usually writes CJK/Thai without punctuation: the segment boundary is the
+        # only sentence signal, so it breaks even a short cue.
         return True
 
     cue_dur = previous.end - first.start
-    cue_len = len(_text(words, cue_groups))
+    cue_len = len(cue_text)
     if cue_dur < min_dur or cue_len < _MIN_CUE_CHARS:
         return False
-    if _ends_with(previous, _SENTENCE_ENDINGS):
+    if _ends_with(previous, _SENTENCE_ENDINGS) or new_segment:
         return True
-    return _ends_with(previous, _CLAUSE_ENDINGS) and cue_len >= max_chars - _PUNCTUATION_BALANCE_SLACK
+    return (
+        _ends_with(previous, _CLAUSE_ENDINGS)
+        and cue_len >= _line_chars(cue_text, max_chars) - _PUNCTUATION_BALANCE_SLACK
+    )
 
 
 def _spans(
     groups: Sequence[WordGroup],
     words: Sequence[Word],
+    segment_starts: set[int],
     *,
     max_chars: int,
     max_lines: int,
@@ -177,6 +250,7 @@ def _spans(
             max_lines=max_lines,
             max_dur=max_dur,
             min_dur=min_dur,
+            new_segment=groups[index].tokens[0] in segment_starts,
         ):
             spans.append((start, index - 1))
             start = index
@@ -281,11 +355,11 @@ def cues_from_transcript(
     min_gap: float = 0.08,
 ) -> list[Cue]:
     """Turn the transcript's flat token list into ordered, non-overlapping cues."""
-    words = _flatten(transcript)
-    groups = word_groups(words)
+    words, groups, segment_starts = _words_and_groups(transcript)
     spans = _spans(
         groups,
         words,
+        segment_starts,
         max_chars=max_chars,
         max_lines=max_lines,
         max_dur=max_dur,
@@ -300,7 +374,7 @@ def cues_from_transcript(
                 index=number,
                 start=start,
                 end=end,
-                lines=_lines(cue_groups, words, max_chars),
+                lines=_lines(cue_groups, words, _line_chars(_text(words, cue_groups), max_chars)),
                 speaker=cue_groups[0].speaker,
                 word_span=(cue_groups[0].tokens[0], cue_groups[-1].tokens[1]),
             )
