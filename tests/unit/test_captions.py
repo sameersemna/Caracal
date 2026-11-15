@@ -171,6 +171,52 @@ def test_agreement_is_none_when_either_side_has_too_few_words() -> None:
     assert caption_agreement(transcript, captions) is None
 
 
+def test_token_split_transcript_scores_the_same_as_whole_words() -> None:
+    halves = [(f"word{index}a", f"word{index}b") for index in range(25)]
+    captions = [
+        CaptionWord(text=left + right, start=float(index), end=float(index) + 1.0)
+        for index, (left, right) in enumerate(halves)
+    ]
+
+    whole_tokens = tuple(
+        Word(text=left + right, start=float(index), end=float(index) + 1.0, prob=1.0, space_before=True)
+        for index, (left, right) in enumerate(halves)
+    )
+    split_tokens = tuple(
+        word
+        for index, (left, right) in enumerate(halves)
+        for word in (
+            Word(text=left, start=float(index), end=float(index) + 0.5, prob=1.0, space_before=True),
+            Word(text=right, start=float(index) + 0.5, end=float(index) + 1.0, prob=1.0, space_before=False),
+        )
+    )
+
+    def transcript(words: tuple[Word, ...]) -> Transcript:
+        return Transcript(
+            segments=(
+                Segment(
+                    id=0,
+                    start=0.0,
+                    end=25.0,
+                    text=" ".join(word.text for word in words if word.space_before),
+                    words=words,
+                    avg_logprob=0.0,
+                    no_speech_prob=0.0,
+                    lang="en",
+                ),
+            ),
+            language_code="en",
+            dropped={},
+        )
+
+    whole = caption_agreement(transcript(whole_tokens), captions)
+    split = caption_agreement(transcript(split_tokens), captions)
+
+    assert whole == pytest.approx(1.0)
+    assert split == pytest.approx(1.0)
+    assert split == whole
+
+
 def test_agreement_is_one_for_identical_words() -> None:
     captions = [
         CaptionWord(text=f"word{index}", start=float(index), end=float(index) + 0.5) for index in range(30)
@@ -183,7 +229,8 @@ def test_agreement_is_one_for_identical_words() -> None:
                 end=30.0,
                 text=" ".join(word.text for word in captions),
                 words=tuple(
-                    Word(text=word.text, start=word.start, end=word.end, prob=1.0) for word in captions
+                    Word(text=word.text, start=word.start, end=word.end, prob=1.0, space_before=True)
+                    for word in captions
                 ),
                 avg_logprob=0.0,
                 no_speech_prob=0.0,

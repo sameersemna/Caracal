@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import replace
 
-from caracal.asr import Segment, Transcript, Word, join_words
+from caracal.asr import Segment, Transcript, Word, join_words, word_groups
 from caracal.speakers.diarize import Turn
 
 _NEAREST_TURN_TOLERANCE_S = 1.0
@@ -52,7 +52,12 @@ def _speaker_for(midpoint: float, turns: Sequence[Turn]) -> str | None:
 
 
 def assign_speakers(transcript: Transcript, exclusive_turns: Sequence[Turn]) -> Transcript:
-    """Set ``word.speaker`` from the exclusive turns and split segments at speaker changes."""
+    """Set ``word.speaker`` from the exclusive turns and split segments at speaker changes.
+
+    One speaker is chosen per *word group* from the group's midpoint and written to every
+    token of the group, so a word split into whisper tokens is never shared by two speakers.
+    Consecutive groups with the same speaker stay in one segment.
+    """
     turns = sorted(exclusive_turns, key=lambda turn: (turn.start, turn.end))
     segments: list[Segment] = []
     next_id = 0
@@ -62,29 +67,29 @@ def assign_speakers(transcript: Transcript, exclusive_turns: Sequence[Turn]) -> 
             next_id += 1
             continue
 
-        groups: list[list[Word]] = []
-        for word in segment.words:
-            label = _speaker_for(_midpoint(word), turns)
-            labelled = replace(word, speaker=label)
-            if groups and groups[-1][0].speaker == label:
-                groups[-1].append(labelled)
+        labelled_groups: list[tuple[str | None, list[Word]]] = []
+        for group in word_groups(segment.words):
+            label = _speaker_for((group.start + group.end) / 2.0, turns)
+            tokens = [
+                replace(word, speaker=label) for word in segment.words[group.tokens[0] : group.tokens[1] + 1]
+            ]
+            if labelled_groups and labelled_groups[-1][0] == label:
+                labelled_groups[-1][1].extend(tokens)
             else:
-                groups.append([labelled])
+                labelled_groups.append((label, tokens))
 
-        for group in groups:
-            label = group[0].speaker
-            speaker = label if all(word.speaker == label for word in group) else None
+        for label, tokens in labelled_groups:
             segments.append(
                 Segment(
                     id=next_id,
-                    start=group[0].start,
-                    end=group[-1].end,
-                    text=join_words(group),
-                    words=tuple(group),
+                    start=tokens[0].start,
+                    end=tokens[-1].end,
+                    text=join_words(tokens),
+                    words=tuple(tokens),
                     avg_logprob=segment.avg_logprob,
                     no_speech_prob=segment.no_speech_prob,
                     lang=segment.lang,
-                    speaker=speaker,
+                    speaker=label,
                     lang_prob=segment.lang_prob,
                 )
             )

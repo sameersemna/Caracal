@@ -1,10 +1,14 @@
 """Cue segmentation from word timestamps (docs/04 §10).
 
-The flat word list of a transcript is split into subtitle cues of at most ``max_lines``
-lines and ``max_chars`` characters per line, 1-7 s long, with at least ``min_gap`` seconds
-between consecutive cues. Speaker changes, long pauses and size limits always break; once a
-cue is long enough, sentence punctuation then clause punctuation are preferred break points.
-Words are never split and two speakers never share a cue.
+The transcript's flat token list is first grouped into whole words (:func:`word_groups`):
+whisper tokens are sub-word pieces, so breaking on a token would cut "Tagesschau" after
+"Tag". Cue breaks, line breaks and the character limit then all act on those groups, so a
+line or cue boundary can never fall inside a word. Cues have at most ``max_lines`` lines and
+``max_chars`` characters per line, are 1-7 s long, with at least ``min_gap`` seconds between
+consecutive cues. Speaker changes, long pauses and size limits always break; once a cue is
+long enough, sentence punctuation then clause punctuation are preferred break points. A
+single group longer than ``max_chars`` stays whole on its own line, and two speakers never
+share a cue.
 """
 
 from __future__ import annotations
@@ -12,7 +16,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from caracal.asr import Transcript, Word, join_words
+from caracal.asr import Transcript, Word, WordGroup, join_words, word_groups
 
 _SENTENCE_ENDINGS = frozenset(".?!…。！？")  # noqa: RUF001 - CJK punctuation is intentional
 _CLAUSE_ENDINGS = frozenset(",;:、，")  # noqa: RUF001 - CJK punctuation is intentional
@@ -37,19 +41,25 @@ def _flatten(transcript: Transcript) -> list[Word]:
     return [word for segment in transcript.segments for word in segment.words]
 
 
-def _ends_with(word: Word, endings: frozenset[str]) -> bool:
-    return bool(word.text) and word.text[-1] in endings
+def _text(words: Sequence[Word], groups: Sequence[WordGroup]) -> str:
+    """Render whole groups, preserving whisper's own spacing between their tokens."""
+    tokens = [word for group in groups for word in words[group.tokens[0] : group.tokens[1] + 1]]
+    return join_words(tokens)
 
 
-def _line_slices(words: Sequence[Word], max_chars: int) -> tuple[int, ...]:
-    """Split point(s) that render ``words`` as at most two balanced lines."""
-    if len(words) < 2 or len(join_words(words)) <= max_chars:
+def _ends_with(group: WordGroup, endings: frozenset[str]) -> bool:
+    return bool(group.text) and group.text[-1] in endings
+
+
+def _line_group_slices(groups: Sequence[WordGroup], words: Sequence[Word], max_chars: int) -> tuple[int, ...]:
+    """Split point(s) that render ``groups`` as at most two balanced lines."""
+    if len(groups) < 2 or len(_text(words, groups)) <= max_chars:
         return ()
     best: tuple[int, int] | None = None
     fallback: tuple[int, int] | None = None
-    for split in range(1, len(words)):
-        left = join_words(words[:split])
-        right = join_words(words[split:])
+    for split in range(1, len(groups)):
+        left = _text(words, groups[:split])
+        right = _text(words, groups[split:])
         widest = max(len(left), len(right))
         candidate = (split, abs(len(left) - len(right)))
         if fallback is None or widest < fallback[1]:
@@ -64,11 +74,11 @@ def _line_slices(words: Sequence[Word], max_chars: int) -> tuple[int, ...]:
 
     balanced = best[1]
     punctuated: tuple[int, int] | None = None
-    for split in range(1, len(words)):
-        if not _ends_with(words[split - 1], _SENTENCE_ENDINGS | _CLAUSE_ENDINGS):
+    for split in range(1, len(groups)):
+        if not _ends_with(groups[split - 1], _SENTENCE_ENDINGS | _CLAUSE_ENDINGS):
             continue
-        left = join_words(words[:split])
-        right = join_words(words[split:])
+        left = _text(words, groups[:split])
+        right = _text(words, groups[split:])
         if len(left) > max_chars or len(right) > max_chars:
             continue
         imbalance = abs(len(left) - len(right))
@@ -80,61 +90,66 @@ def _line_slices(words: Sequence[Word], max_chars: int) -> tuple[int, ...]:
     return (chosen[0],)
 
 
-def _packed_lines(words: Sequence[Word], max_chars: int) -> list[list[Word]]:
-    """Greedy word-wrap: the fewest lines of at most ``max_chars`` (a long word gets its own)."""
-    lines: list[list[Word]] = []
-    current: list[Word] = []
-    for word in words:
-        if current and len(join_words([*current, word])) > max_chars:
+def _packed_group_lines(
+    groups: Sequence[WordGroup], words: Sequence[Word], max_chars: int
+) -> list[list[WordGroup]]:
+    """Greedy group-wrap: the fewest lines of at most ``max_chars`` (a long word gets its own)."""
+    lines: list[list[WordGroup]] = []
+    current: list[WordGroup] = []
+    for group in groups:
+        if current and len(_text(words, [*current, group])) > max_chars:
             lines.append(current)
-            current = [word]
+            current = [group]
         else:
-            current = [*current, word]
+            current = [*current, group]
     if current:
         lines.append(current)
     return lines
 
 
-def _renders_within(words: Sequence[Word], max_chars: int, max_lines: int) -> bool:
-    if len(join_words(words)) > max_lines * max_chars:
+def _renders_within(
+    groups: Sequence[WordGroup], words: Sequence[Word], max_chars: int, max_lines: int
+) -> bool:
+    if len(_text(words, groups)) > max_lines * max_chars:
         return False
-    return len(_packed_lines(words, max_chars)) <= max_lines
+    return len(_packed_group_lines(groups, words, max_chars)) <= max_lines
 
 
-def _lines(words: Sequence[Word], max_chars: int) -> list[str]:
-    splits = _line_slices(words, max_chars)
+def _lines(groups: Sequence[WordGroup], words: Sequence[Word], max_chars: int) -> list[str]:
+    splits = _line_group_slices(groups, words, max_chars)
     if not splits:
-        packed = _packed_lines(words, max_chars)
+        packed = _packed_group_lines(groups, words, max_chars)
         if len(packed) <= 1:
-            return [join_words(words)]
-        return [join_words(line) for line in packed]
+            return [_text(words, groups)]
+        return [_text(words, line) for line in packed]
     split = splits[0]
-    return [join_words(words[:split]), join_words(words[split:])]
+    return [_text(words, groups[:split]), _text(words, groups[split:])]
 
 
 def _break_before(
-    cue_words: Sequence[Word],
-    word: Word,
+    cue_groups: Sequence[WordGroup],
+    group: WordGroup,
+    words: Sequence[Word],
     *,
     max_chars: int,
     max_lines: int,
     max_dur: float,
     min_dur: float,
 ) -> bool:
-    """True when ``word`` must start a new cue (hard break, then preferred break)."""
-    previous = cue_words[-1]
-    if word.speaker != previous.speaker:
+    """True when ``group`` must start a new cue (hard break, then preferred break)."""
+    previous = cue_groups[-1]
+    if group.speaker != previous.speaker:
         return True
-    if word.start - previous.end > _BREAK_PAUSE_S:
+    if group.start - previous.end > _BREAK_PAUSE_S:
         return True
-    first = cue_words[0]
-    if word.end - first.start > max_dur:
+    first = cue_groups[0]
+    if group.end - first.start > max_dur:
         return True
-    if not _renders_within([*cue_words, word], max_chars, max_lines):
+    if not _renders_within([*cue_groups, group], words, max_chars, max_lines):
         return True
 
     cue_dur = previous.end - first.start
-    cue_len = len(join_words(cue_words))
+    cue_len = len(_text(words, cue_groups))
     if cue_dur < min_dur or cue_len < _MIN_CUE_CHARS:
         return False
     if _ends_with(previous, _SENTENCE_ENDINGS):
@@ -143,6 +158,7 @@ def _break_before(
 
 
 def _spans(
+    groups: Sequence[WordGroup],
     words: Sequence[Word],
     *,
     max_chars: int,
@@ -152,10 +168,11 @@ def _spans(
 ) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
     start = 0
-    for index in range(1, len(words)):
+    for index in range(1, len(groups)):
         if _break_before(
-            words[start:index],
-            words[index],
+            groups[start:index],
+            groups[index],
+            words,
             max_chars=max_chars,
             max_lines=max_lines,
             max_dur=max_dur,
@@ -163,24 +180,24 @@ def _spans(
         ):
             spans.append((start, index - 1))
             start = index
-    if words:
-        spans.append((start, len(words) - 1))
+    if groups:
+        spans.append((start, len(groups) - 1))
     return spans
 
 
 def _timings(
-    words: Sequence[Word],
+    groups: Sequence[WordGroup],
     spans: Sequence[tuple[int, int]],
     *,
     min_dur: float,
     min_gap: float,
     max_dur: float,
 ) -> list[tuple[float, float]]:
-    starts = [words[first].start for first, _ in spans]
+    starts = [groups[first].start for first, _ in spans]
     ends: list[float] = []
     for position, (_first, last) in enumerate(spans):
         start = starts[position]
-        end = words[last].end
+        end = groups[last].end
         if end - start < min_dur:
             end = start + min_dur
         if position + 1 < len(spans):
@@ -263,27 +280,29 @@ def cues_from_transcript(
     min_dur: float = 1.0,
     min_gap: float = 0.08,
 ) -> list[Cue]:
-    """Turn the transcript's flat word list into ordered, non-overlapping cues."""
+    """Turn the transcript's flat token list into ordered, non-overlapping cues."""
     words = _flatten(transcript)
+    groups = word_groups(words)
     spans = _spans(
+        groups,
         words,
         max_chars=max_chars,
         max_lines=max_lines,
         max_dur=max_dur,
         min_dur=min_dur,
     )
-    timings = _timings(words, spans, min_dur=min_dur, min_gap=min_gap, max_dur=max_dur)
+    timings = _timings(groups, spans, min_dur=min_dur, min_gap=min_gap, max_dur=max_dur)
     cues: list[Cue] = []
     for number, ((first, last), (start, end)) in enumerate(zip(spans, timings, strict=True), start=1):
-        cue_words = words[first : last + 1]
+        cue_groups = groups[first : last + 1]
         cues.append(
             Cue(
                 index=number,
                 start=start,
                 end=end,
-                lines=_lines(cue_words, max_chars),
-                speaker=cue_words[0].speaker,
-                word_span=(first, last),
+                lines=_lines(cue_groups, words, max_chars),
+                speaker=cue_groups[0].speaker,
+                word_span=(cue_groups[0].tokens[0], cue_groups[-1].tokens[1]),
             )
         )
     return cues

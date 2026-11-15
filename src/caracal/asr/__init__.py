@@ -1,7 +1,7 @@
 """ASR data model and the whisper language table (docs/01 §3, docs/04 §4).
 
-Every model is a frozen dataclass with :meth:`to_dict` so a stage checkpoint can be written
-as JSON without a custom encoder. Whisper text and word text are stored stripped;
+Every persisted model is a frozen dataclass with :meth:`to_dict` so a stage checkpoint can
+be written as JSON without a custom encoder. Whisper text and word text are stored stripped;
 :attr:`Word.space_before` keeps whisper's leading-whitespace signal so a rebuilt segment can
 reproduce the original punctuation and contraction spacing.
 """
@@ -182,6 +182,72 @@ def join_words(words: Sequence[Word]) -> str:
             parts.append(" ")
         parts.append(word.text)
     return "".join(parts).strip()
+
+
+@dataclass(frozen=True, slots=True)
+class WordGroup:
+    """Consecutive whisper tokens that spell one word (docs/04 §10).
+
+    Whisper emits sub-word pieces: ``Tag`` + ``ess`` + ``chau`` and ``Sek`` + ``unden`` +
+    ``.``. A token whose raw text had no leading space (``space_before is False``) continues
+    the previous word, so grouping never breaks a word in the middle. ``tokens`` is the
+    inclusive global index span of the group's tokens.
+    """
+
+    text: str
+    start: float
+    end: float
+    tokens: tuple[int, int]
+    speaker: str | None
+    space_before: bool
+
+
+def _majority_speaker(tokens: Sequence[Word]) -> str | None:
+    """The speaker most of the group's tokens carry; a tie goes to the first token's."""
+    counts: dict[str, int] = {}
+    for token in tokens:
+        if token.speaker is not None:
+            counts[token.speaker] = counts.get(token.speaker, 0) + 1
+    if not counts:
+        return None
+    best = max(counts.values())
+    leaders = [label for label, count in counts.items() if count == best]
+    first = tokens[0].speaker
+    if first is not None and first in leaders:
+        return first
+    return leaders[0]
+
+
+def _group(tokens: Sequence[Word], start_index: int) -> WordGroup:
+    return WordGroup(
+        text=join_words(tokens),
+        start=tokens[0].start,
+        end=tokens[-1].end,
+        tokens=(start_index, start_index + len(tokens) - 1),
+        speaker=_majority_speaker(tokens),
+        space_before=tokens[0].space_before,
+    )
+
+
+def word_groups(words: Sequence[Word]) -> list[WordGroup]:
+    """Group tokens into words using whisper's leading-whitespace signal (docs/04 §10).
+
+    A token with ``space_before is False`` continues the current group, which also attaches
+    detached punctuation (``,``, ``.``, ``."``) to the word it closes. The first token of a
+    sequence always starts a new group.
+    """
+    groups: list[WordGroup] = []
+    current: list[Word] = []
+    start_index = 0
+    for index, word in enumerate(words):
+        if current and word.space_before:
+            groups.append(_group(current, start_index))
+            current = []
+            start_index = index
+        current.append(word)
+    if current:
+        groups.append(_group(current, start_index))
+    return groups
 
 
 @dataclass(frozen=True, slots=True)

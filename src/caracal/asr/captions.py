@@ -14,7 +14,7 @@ import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from caracal.asr import Transcript
+from caracal.asr import Transcript, word_groups
 
 _TIMING_RE = re.compile(r"(?P<start>\d{1,2}:\d{2}:\d{2}\.\d{3})\s*-->\s*(?P<end>\d{1,2}:\d{2}:\d{2}\.\d{3})")
 _INLINE_RE = re.compile(r"<(?P<ts>\d{1,2}:\d{2}:\d{2}\.\d{3})>")
@@ -173,8 +173,11 @@ def caption_agreement(
 ) -> float | None:
     """Word-level agreement between the transcript and platform captions, or ``None``.
 
-    Both sides are restricted to their overlapping time range and compared per ``window_s``
-    bucket, so the edit distance never becomes one global O(n·m) matrix.
+    The transcript side is tokenised into whole words with :func:`caracal.asr.word_groups`,
+    so a word whisper split into several tokens is compared as one word, exactly like the
+    captions' word-timed entries. Both sides are restricted to their overlapping time range
+    and compared per ``window_s`` bucket, so the edit distance never becomes one global
+    O(n·m) matrix.
     """
     if window_s <= 0:
         raise ValueError("window_s must be positive")
@@ -186,10 +189,10 @@ def caption_agreement(
             reference.append(((caption_word.start + caption_word.end) / 2.0, token))
     hypothesis: list[tuple[float, str]] = []
     for segment in transcript.segments:
-        for word in segment.words:
-            token = normalise_word(word.text)
+        for group in word_groups(segment.words):
+            token = normalise_word(group.text)
             if token:
-                hypothesis.append(((word.start + word.end) / 2.0, token))
+                hypothesis.append(((group.start + group.end) / 2.0, token))
 
     if not reference or not hypothesis:
         return None

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from caracal.ingest.router import classify_source_static
+from caracal.ingest.router import canonical_url, classify_source_static
 
 
 @pytest.mark.parametrize(
@@ -43,6 +43,59 @@ def test_media_extensions_are_direct(url: str) -> None:
 )
 def test_everything_else_is_platform(url: str) -> None:
     assert classify_source_static(url) == "platform"
+
+
+# --- canonical URL (T4.4): YouTube shapes and tracking parameters ---
+
+_VIDEO_ID = "dQw4w9WgXcQ"
+_WATCH = f"https://www.youtube.com/watch?v={_VIDEO_ID}"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        f"https://www.youtube.com/watch?v={_VIDEO_ID}",
+        f"https://youtube.com/watch?v={_VIDEO_ID}&t=42s",
+        f"https://m.youtube.com/watch?v={_VIDEO_ID}&si=tracking",
+        f"https://music.youtube.com/watch?v={_VIDEO_ID}&feature=share",
+        f"https://youtu.be/{_VIDEO_ID}",
+        f"https://www.youtube.com/shorts/{_VIDEO_ID}",
+        f"https://www.youtube.com/embed/{_VIDEO_ID}",
+        f"https://www.youtube.com/live/{_VIDEO_ID}?si=tracking",
+        f"https://www.youtube.com/v/{_VIDEO_ID}",
+        f"HTTPS://WWW.YouTube.COM/watch?v={_VIDEO_ID}#t=9",
+    ],
+)
+def test_youtube_shapes_canonicalise_to_one_watch_url(url: str) -> None:
+    assert canonical_url(url) == _WATCH
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        (
+            "HTTPS://Example.COM/Path/To?utm_source=x&id=7&fbclid=y#frag",
+            "https://example.com/Path/To?id=7",
+        ),
+        ("https://example.com/talk?t=42&start=3", "https://example.com/talk"),
+        ("https://example.com/watch?v=abc&gclid=z", "https://example.com/watch?v=abc"),
+        ("https://example.com/talk", "https://example.com/talk"),
+    ],
+)
+def test_non_youtube_urls_keep_their_path_and_clean_the_query(url: str, expected: str) -> None:
+    assert canonical_url(url) == expected
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://youtu.be/too-short?si=x", "https://youtu.be/too-short"),
+        ("https://m.youtube.com/shorts/abc?t=1#frag", "https://m.youtube.com/shorts/abc"),
+        ("https://www.youtube.com/watch?v=abc", "https://www.youtube.com/watch?v=abc"),
+    ],
+)
+def test_youtube_url_without_a_valid_id_is_only_cleaned(url: str, expected: str) -> None:
+    assert canonical_url(url) == expected
 
 
 # --- async router: platform hosts, static extensions and the HEAD probe (T1.1) ---

@@ -8,7 +8,7 @@ import re
 import pytest
 from tests.fakes.whisper import load_fixture
 
-from caracal.asr import Segment, Transcript, WhisperResult, Word, join_words
+from caracal.asr import Segment, Transcript, WhisperResult, Word, join_words, word_groups
 from caracal.asr.merge import merge_chunks
 from caracal.asr.whisper import parse_whisper_response
 from caracal.audio.chunking import Chunk
@@ -227,15 +227,18 @@ def test_a_single_word_longer_than_a_line_stays_on_its_own_line() -> None:
     assert cues[0].lines == [long_word, "next"]
 
 
-def test_cjk_punctuation_breaks_without_inserting_spaces() -> None:
+def test_cjk_punctuation_breaks_between_word_groups() -> None:
+    # Each CJK word is its own whisper token. ``space_before=True`` makes each one a
+    # separate word group; with the real CJK signal (no leading space) grouping would keep
+    # the whole sentence together, so this test isolates the punctuation break rule.
     words = (
-        _word("一二三四五六七八", 0.0, 0.6, space_before=False),
-        _word("九十一二三四。", 0.7, 1.4, space_before=False),
-        _word("再見", 1.5, 1.9, space_before=False),
+        _word("一二三四五六七八", 0.0, 0.6),
+        _word("九十一二三四。", 0.7, 1.4),
+        _word("再見", 1.5, 1.9),
     )
     cues = cues_from_transcript(_transcript(words))
 
-    assert cues[0].lines == ["一二三四五六七八九十一二三四。"]
+    assert cues[0].lines == ["一二三四五六七八 九十一二三四。"]
     assert cues[1].lines == ["再見"]
 
 
@@ -264,3 +267,74 @@ def test_a_gap_smaller_than_min_gap_pulls_the_earlier_end_back() -> None:
     assert len(cues) == 2
     assert cues[0].end == pytest.approx(0.96)
     assert cues[1].start - cues[0].end == pytest.approx(0.08)
+
+
+def test_real_tagesschau_cues_and_lines_break_only_between_word_groups() -> None:
+    payload = load_fixture("tagesschau_seg0")
+    fixture_words = tuple(
+        Word(
+            text=item["text"],
+            start=item["start"],
+            end=item["end"],
+            prob=item["prob"],
+            speaker=item.get("speaker"),
+            space_before=item["space_before"],
+        )
+        for item in payload["words"]
+    )
+    transcript = Transcript(
+        segments=(
+            Segment(
+                id=payload["id"],
+                start=payload["start"],
+                end=payload["end"],
+                text=payload["text"],
+                words=fixture_words,
+                avg_logprob=0.0,
+                no_speech_prob=0.0,
+                lang="de",
+                speaker=payload.get("speaker"),
+            ),
+        ),
+        language_code="de",
+        dropped={"no_speech": 0, "repetition": 0, "empty": 0},
+    )
+    words = _flat(transcript)
+    groups = word_groups(words)
+    cues = cues_from_transcript(transcript, max_chars=20)
+
+    assert len(cues) > 1
+    assert any(len(cue.lines) == 2 for cue in cues)  # a wrap is forced and exercised
+
+    # A cue boundary never falls inside "Tagesschau" or "Sekunden.".
+    for cue in cues[1:]:
+        assert words[cue.word_span[0]].space_before is True
+
+    starts = {group.tokens[0] for group in groups}
+    ends = {group.tokens[1] for group in groups}
+    for cue in cues:
+        first, last = cue.word_span
+        assert first in starts
+        assert last in ends
+        # Every rendered whitespace-delimited word is one whole group, in order: no line
+        # boundary can sit inside a group.
+        expected = [group.text for group in groups if first <= group.tokens[0] and group.tokens[1] <= last]
+        assert " ".join(cue.lines).split() == expected
+
+    rendered = " ".join(" ".join(cue.lines) for cue in cues)
+    assert "Tagesschau" in rendered
+    assert "Tag esschau" not in rendered
+    assert "Sekunden." in rendered
+
+
+def test_a_word_split_into_tokens_and_longer_than_a_line_stays_whole() -> None:
+    long_word = "a" * 30 + "b" * 30
+    words = (
+        _word(long_word[:30], 0.0, 0.5, space_before=False),
+        _word(long_word[30:], 0.5, 1.0, space_before=False),
+        _word("next", 1.1, 1.4),
+    )
+    cues = cues_from_transcript(_transcript(words))
+
+    assert cues[0].lines == [long_word, "next"]
+    assert cues[0].word_span == (0, 2)

@@ -56,7 +56,7 @@ from caracal.config import Settings
 from caracal.db.repo import JobRecord, KnownSpeakerRecord, StageRecord
 from caracal.db.tables import EMB_DIM, JOB_STATUSES, JOB_TERMINAL_STATUSES
 from caracal.errors import CaracalError, ErrorCode
-from caracal.ingest.router import classify_source_static
+from caracal.ingest.router import canonical_url, classify_source_static
 from caracal.ingest.upload import UploadInfo, save_upload
 from caracal.llm.client import LLMClient
 from caracal.log import get_logger
@@ -260,6 +260,7 @@ class JobService:
         """Validate, deduplicate, persist and enqueue one job (docs/03 §2, docs/06 S11)."""
         upload_id = source.upload_id
         url = source.url
+        canonical = canonical_url(url) if url is not None else None
         options_dict = options.model_dump()
         sha256: str | None = None
 
@@ -295,9 +296,16 @@ class JobService:
         if options_dict["depth"] != "deep":
             existing = await self.repos.jobs.find_recent_done(
                 sha256=sha256,
-                source_url=url if upload_id is None else None,
+                source_url=canonical if upload_id is None else None,
                 options=options_dict,
             )
+            if existing is None and upload_id is None and url is not None and canonical != url:
+                # Rows created before the canonical-URL change still hold the raw URL.
+                existing = await self.repos.jobs.find_recent_done(
+                    sha256=None,
+                    source_url=url,
+                    options=options_dict,
+                )
             if existing is not None:
                 return JobCreated(
                     job_id=existing.id,
@@ -306,10 +314,10 @@ class JobService:
                     links=self.links(existing.id),
                 )
 
-        source_kind = classify_source_static(url) if url is not None else "upload"
+        source_kind = classify_source_static(canonical) if canonical is not None else "upload"
         job = await self.repos.jobs.create(
             source_kind=source_kind,
-            source_url=url,
+            source_url=canonical,
             upload_id=upload_id,
             options=options_dict,
             sha256=sha256,
