@@ -13,3 +13,5 @@
   synonyms such as `location`), `format:"json"` without tools (fenced JSON), `format:<schema>` without tools (ignored → markdown).
 - `search/*.json` — real Brave Web Search and Exa `/search` responses recorded 2026-11-14 (keys removed): "All Ears English podcast co-host Lindsay"
   (both name Lindsay McMahon), the JFK quote query, and both providers' invalid-key error responses (Brave 422 `SUBSCRIPTION_TOKEN_INVALID`, Exa 401).
+- `whisper/tagesschau_seg0.json` — first merged segment (14 whisper tokens, ~2.6 s) of a Caracal transcript of a "Tagesschau in 100 Sekunden"
+  re-upload (YouTube OgDZqde_My4), recorded 2026-11-15. Shows sub-word tokens without a leading space (`Tag`+`ess`+`chau`, `Sek`+`unden`).

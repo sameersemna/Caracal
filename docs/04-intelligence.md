@@ -192,6 +192,10 @@ infers protected attributes (gender, age, ethnicity, religion, health) from the 
 
 ## 10. Translation and subtitles
 
+**Words vs tokens** (measured, verdict 42): whisper tokens are sub-word pieces; a token whose raw text had no leading space continues the
+previous word (`Tag`+`ess`+`chau` = "Tagesschau"; 216 such tokens in a 2-min German clip). Every consumer that reasons about *words*
+— cue and line breaking, caption agreement, speaker alignment — works on **word groups** (`asr.word_groups`), never on raw tokens.
+
 - Translate **sentence units**, not single cues (measured: a cue holding only "A few" before "years ago, …" is translated in isolation
   into an ungrammatical fragment — German needs "Vor ein paar Jahren"). Units = consecutive cues of one speaker up to a sentence end
   (max 4 cues / 200 chars). Batches of ≈ 25 units per call (`translate.md`, json mode), input `[{i, text}]`, output `[{i, text}]`; the

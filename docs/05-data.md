@@ -17,7 +17,8 @@ Verified 2026-11-14: PostgreSQL **18.6** on latitude, database `caracal`, user `
 
 `EMB_DIM = 256` (measured 2026-11-14: community-1 `speaker_embeddings` shape (n, 256)).
 
-Dedup: a new job whose source `sha256` (uploads) or `webpage_url` (platform) matches a `done` job from the last
+Dedup: a new job whose source `sha256` (uploads) or **canonical URL** (platform — see `ingest.router.canonical_url`; YouTube
+`watch?v=` / `youtu.be/` / `shorts/` / `embed/` / `live/` / `m.` / `music.` all map to `https://www.youtube.com/watch?v=<id>`) matches a `done` job from the last
 7 days with identical options returns the existing job id with `"deduplicated": true` unless `options.depth=="deep"`.
 
 Conventions: all ids are `uuid` generated in Python (`uuid.uuid4()`); timestamps `timestamptz` set by the DB
