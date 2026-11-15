@@ -12,14 +12,14 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import httpx
 import pytest
 from pydantic import BaseModel, Field, SecretStr
 
 from caracal.asr import Segment
-from caracal.config import Settings, get_settings
+from caracal.config import Route, Settings, get_settings
 from caracal.llm.client import LLMClient, ToolResult
 from caracal.llm.prompts import load_prompt, render_transcript_lines, wrap_data
 from caracal.llm.schema import DEFAULT_SYNONYMS
@@ -100,7 +100,7 @@ def _content_prompt() -> tuple[str, set[str]]:
     }
 
 
-async def _analyse(settings: Settings) -> ToolResult[Out]:
+async def _analyse(settings: Settings, *, route: Route = Route.DEFAULT) -> ToolResult[Out]:
     async with httpx.AsyncClient() as http:
         client = LLMClient(settings, http)
         return await client.call_tool(
@@ -110,7 +110,30 @@ async def _analyse(settings: Settings) -> ToolResult[Out]:
             tool_name="record_analysis",
             tool_description="Record the language, speaker and entities found in the transcript.",
             synonyms=DEFAULT_SYNONYMS,
+            route=route,
         )
+
+
+def _default_chain(settings: Settings) -> list[str]:
+    """The pre-routing chain: cloud with the key, otherwise the local ``-cloud`` proxy, then local."""
+    if settings.OLLAMA_CLOUD_API_KEY is not None:
+        return [f"cloud:{settings.LLM_MODEL}", f"local:{settings.LLM_FALLBACK_MODEL}"]
+    return [f"local:{settings.LLM_LOCAL_PROXY_MODEL}", f"local:{settings.LLM_FALLBACK_MODEL}"]
+
+
+def _settings(chain: list[str] | None = None, **overrides: Any) -> Settings:
+    """A ``Settings`` whose LLM routing is explicit, so the owner's ``.env`` cannot leak into a test.
+
+    Every ``LLM_ROUTE_*`` variable and the allow-list are overwritten instead of inherited; the
+    remaining values still come from the owner's real configuration (endpoints, keys, models).
+    """
+    base = get_settings()
+    refs = list(chain) if chain is not None else _default_chain(base)
+    routing: dict[str, Any] = {"LLM_ALLOWED_MODELS": refs}
+    for route in Route:
+        routing[f"LLM_ROUTE_{route.name}"] = list(refs)
+    routing.update(overrides)
+    return Settings(_env_file=None, **{**base.model_dump(), **routing})
 
 
 def _assert_merkel_and_berlin(result: ToolResult[Out]) -> None:
@@ -123,7 +146,7 @@ def _assert_merkel_and_berlin(result: ToolResult[Out]) -> None:
 
 
 async def test_live_cloud_tool_call_is_valid_after_coercion() -> None:
-    settings = get_settings()
+    settings = _settings()
     if settings.OLLAMA_CLOUD_API_KEY is None:
         pytest.skip("OLLAMA_CLOUD_API_KEY is not configured")
 
@@ -137,24 +160,23 @@ async def test_live_cloud_tool_call_is_valid_after_coercion() -> None:
 
 
 async def test_live_forced_fallback_uses_local_ollama() -> None:
-    settings = get_settings()
-    forced = settings.model_copy(
-        update={
-            "OLLAMA_CLOUD_URL": "http://127.0.0.1:9",
-            "OLLAMA_CLOUD_API_KEY": SecretStr("invalid-cloud-key"),
-        }
+    base = get_settings()
+    settings = _settings(
+        chain=[f"cloud:{base.LLM_MODEL}", f"local:{base.LLM_FALLBACK_MODEL}"],
+        OLLAMA_CLOUD_URL="http://127.0.0.1:9",
+        OLLAMA_CLOUD_API_KEY=SecretStr("invalid-cloud-key"),
     )
 
-    result = await _analyse(forced)
+    result = await _analyse(settings)
 
     _assert_merkel_and_berlin(result)
     assert result.meta.endpoint == "local"
-    assert result.meta.model == settings.LLM_FALLBACK_MODEL
+    assert result.meta.model == base.LLM_FALLBACK_MODEL
     assert result.meta.fallback_used is True
 
 
 async def test_live_content_analysis_is_valid_and_cites_only_transcript_ids() -> None:
-    settings = get_settings()
+    settings = _settings()
     if settings.OLLAMA_CLOUD_API_KEY is None:
         pytest.skip("OLLAMA_CLOUD_API_KEY is not configured")
 
@@ -188,3 +210,30 @@ async def test_live_content_analysis_is_valid_and_cites_only_transcript_ids() ->
     assert any(result.value.entities for result in valid)
     assert cited
     assert cited <= valid_ids, sorted(cited - valid_ids)
+
+
+async def test_live_every_route_answers_with_its_preferred_model() -> None:
+    """Each task route is answered by the first ref of its configured chain (docs/02)."""
+    settings = _settings()
+
+    for route in Route:
+        result = await _analyse(settings, route=route)
+
+        _assert_merkel_and_berlin(result)
+        assert result.meta.route is route
+        assert result.meta.model_ref == settings.llm_route_chain(route)[0].normalised
+        assert result.meta.refs_tried == 1
+        assert result.meta.fallback_used is False
+
+
+async def test_live_qa_route_falls_back_to_the_local_model() -> None:
+    """A QA chain whose first ref cannot serve falls over to local ``gemma4:31b``."""
+    routed = _settings(chain=["local:nonexistent-model:1b", "local:gemma4:31b"])
+
+    result = await _analyse(routed, route=Route.QA)
+
+    _assert_merkel_and_berlin(result)
+    assert result.meta.model_ref == "local:gemma4:31b"
+    assert result.meta.endpoint == "local"
+    assert result.meta.refs_tried == 2
+    assert result.meta.fallback_used is True

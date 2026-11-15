@@ -8,11 +8,14 @@ load so downstream code can trust them.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
+from dataclasses import dataclass
+from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
-from pydantic import SecretStr, field_validator
+from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 _DATABASE_SCHEME = re.compile(
@@ -22,6 +25,7 @@ _DATABASE_SCHEME = re.compile(
 _DB_SCHEMA = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 _OLLAMA_SUFFIXES = ("/api", "/v1")
 _LOG_LEVELS = frozenset({"CRITICAL", "DEBUG", "ERROR", "INFO", "WARNING"})
+_MODEL_REF_PREFIXES: tuple[Literal["cloud", "local"], ...] = ("cloud", "local")
 
 
 def _as_plain(value: Any) -> Any:
@@ -74,10 +78,181 @@ def parse_csv(value: Any) -> list[str]:
     return parsed
 
 
+def parse_ref_csv(value: Any) -> list[str]:
+    """Parse a comma-separated model-ref list, preserving the case of every ref."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        parts: list[Any] = value.split(",")
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        parts = list(value)
+    else:
+        raise ValueError("expected a comma-separated string or a list of strings")
+    return [str(part).strip() for part in parts if str(part).strip()]
+
+
+class Route(StrEnum):
+    """The task a structured LLM call is made for (docs/02 ``LLM_ROUTE_*``)."""
+
+    DEFAULT = "default"
+    PLAN = "plan"
+    CONTENT = "content"
+    IDENTITY = "identity"
+    VERIFY = "verify"
+    TRANSLATE = "translate"
+    REVIEW = "review"
+    QA = "qa"
+
+
+@dataclass(frozen=True, slots=True)
+class ModelRef:
+    """One model reference: which Ollama endpoint to call and the model name on it.
+
+    ``raw`` is the text the owner wrote (``cloud:gemma4:31b``, ``local:gemma4:31b`` or a bare
+    ``gemma4:31b-cloud``); ``normalised`` compares refs regardless of the prefix the owner used.
+    """
+
+    endpoint: Literal["cloud", "local"]
+    name: str
+    raw: str
+
+    @property
+    def normalised(self) -> str:
+        return f"{self.endpoint}:{self.name}"
+
+
+def parse_model_ref(raw: str) -> ModelRef:
+    """Parse one model reference (docs/02 ``LLM_ALLOWED_MODELS``).
+
+    ``cloud:<name>`` calls ``OLLAMA_CLOUD_URL`` with the bearer key, ``local:<name>`` calls
+    ``OLLAMA_LOCAL_URL``, and a bare ``<name>`` is local (the daemon proxies ``-cloud`` tags).
+    """
+    text = raw.strip()
+    if not text:
+        raise ValueError("a model reference must not be empty")
+    for prefix in _MODEL_REF_PREFIXES:
+        marker = f"{prefix}:"
+        if text.startswith(marker):
+            name = text[len(marker) :].strip()
+            if not name:
+                raise ValueError(f"model reference {text!r} has no model name")
+            return ModelRef(endpoint=prefix, name=name, raw=text)
+    return ModelRef(endpoint="local", name=text, raw=text)
+
+
+#: The environment variable that configures each route.
+ROUTE_FIELDS: dict[Route, str] = {
+    Route.DEFAULT: "LLM_ROUTE_DEFAULT",
+    Route.PLAN: "LLM_ROUTE_PLAN",
+    Route.CONTENT: "LLM_ROUTE_CONTENT",
+    Route.IDENTITY: "LLM_ROUTE_IDENTITY",
+    Route.VERIFY: "LLM_ROUTE_VERIFY",
+    Route.TRANSLATE: "LLM_ROUTE_TRANSLATE",
+    Route.REVIEW: "LLM_ROUTE_REVIEW",
+    Route.QA: "LLM_ROUTE_QA",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class LlmRouting:
+    """The resolved allow-list and the ordered fallback chain of every route."""
+
+    allowed: tuple[ModelRef, ...]
+    chains: dict[Route, tuple[ModelRef, ...]]
+
+
+def _dedupe(refs: Iterable[ModelRef]) -> tuple[ModelRef, ...]:
+    seen: set[str] = set()
+    ordered: list[ModelRef] = []
+    for ref in refs:
+        if ref.normalised not in seen:
+            seen.add(ref.normalised)
+            ordered.append(ref)
+    return tuple(ordered)
+
+
+def _legacy_chain(settings: Settings) -> tuple[ModelRef, ModelRef]:
+    """Today's behaviour: cloud (key) or the local cloud proxy, then the local fallback."""
+    if settings.OLLAMA_CLOUD_API_KEY is not None:
+        primary = ModelRef(
+            endpoint="cloud",
+            name=settings.LLM_MODEL,
+            raw=f"cloud:{settings.LLM_MODEL}",
+        )
+    else:
+        primary = ModelRef(
+            endpoint="local",
+            name=settings.LLM_LOCAL_PROXY_MODEL,
+            raw=settings.LLM_LOCAL_PROXY_MODEL,
+        )
+    fallback = ModelRef(
+        endpoint="local",
+        name=settings.LLM_FALLBACK_MODEL,
+        raw=f"local:{settings.LLM_FALLBACK_MODEL}",
+    )
+    return primary, fallback
+
+
+def resolve_llm_routing(settings: Settings) -> LlmRouting:
+    """Resolve ``LLM_ALLOWED_MODELS`` and every ``LLM_ROUTE_*`` into ordered ref chains.
+
+    With neither the allow-list nor any route configured the result is exactly the
+    pre-routing behaviour (cloud or local proxy, then the local fallback model), so an
+    existing deployment keeps working unchanged. Every ref of every chain must appear in
+    the allow-list (compared as ``endpoint:name``); a violation raises ``ValueError`` that
+    names the route's variable and the offending model.
+    """
+    explicit_allowed = [parse_model_ref(raw) for raw in settings.LLM_ALLOWED_MODELS]
+    configured: dict[Route, tuple[ModelRef, ...]] = {}
+    for route, field in ROUTE_FIELDS.items():
+        refs = tuple(parse_model_ref(raw) for raw in getattr(settings, field))
+        if refs:
+            configured[route] = refs
+
+    default: tuple[ModelRef, ...]
+    if not explicit_allowed and not configured:
+        primary, fallback = _legacy_chain(settings)
+        allowed = _dedupe([primary, fallback])
+        default = (primary, fallback)
+    else:
+        allowed = _dedupe(
+            explicit_allowed if explicit_allowed else [ref for chain in configured.values() for ref in chain]
+        )
+        default = configured.get(Route.DEFAULT) or allowed
+
+    chains: dict[Route, tuple[ModelRef, ...]] = {Route.DEFAULT: default}
+    for route, chain in configured.items():
+        if route is not Route.DEFAULT:
+            chains[route] = chain
+    for route in Route:
+        chains.setdefault(route, default)
+
+    allowed_names = {ref.normalised for ref in allowed}
+    for route in Route:
+        for ref in chains[route]:
+            if ref.normalised not in allowed_names:
+                listed = ", ".join(sorted(allowed_names)) or "empty"
+                raise ValueError(
+                    f"{ROUTE_FIELDS[route]} uses model {ref.raw!r} ({ref.normalised}), which is "
+                    f"not in LLM_ALLOWED_MODELS ([{listed}])"
+                )
+    for ref in allowed:
+        if ref.endpoint == "cloud" and settings.OLLAMA_CLOUD_API_KEY is None:
+            raise ValueError(
+                f"model {ref.raw!r} ({ref.normalised}) needs OLLAMA_CLOUD_API_KEY, which is not set"
+            )
+    return LlmRouting(allowed=allowed, chains=chains)
+
+
 class Settings(BaseSettings):
     """Validated Caracal configuration. See docs/02 for every variable."""
 
-    model_config = SettingsConfigDict(env_file=".env", env_prefix="", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_prefix="",
+        extra="ignore",
+        hide_input_in_errors=True,
+    )
 
     CARACAL_HOST: str = "127.0.0.1"
     CARACAL_PORT: int = 11404
@@ -102,6 +277,15 @@ class Settings(BaseSettings):
     LLM_MODEL: str = "gemma4:31b"
     LLM_LOCAL_PROXY_MODEL: str = "gemma4:31b-cloud"
     LLM_FALLBACK_MODEL: str = "gemma4:31b"
+    LLM_ALLOWED_MODELS: Annotated[list[str], NoDecode] = []
+    LLM_ROUTE_DEFAULT: Annotated[list[str], NoDecode] = []
+    LLM_ROUTE_PLAN: Annotated[list[str], NoDecode] = []
+    LLM_ROUTE_CONTENT: Annotated[list[str], NoDecode] = []
+    LLM_ROUTE_IDENTITY: Annotated[list[str], NoDecode] = []
+    LLM_ROUTE_VERIFY: Annotated[list[str], NoDecode] = []
+    LLM_ROUTE_TRANSLATE: Annotated[list[str], NoDecode] = []
+    LLM_ROUTE_REVIEW: Annotated[list[str], NoDecode] = []
+    LLM_ROUTE_QA: Annotated[list[str], NoDecode] = []
     LLM_TIMEOUT_S: int = 180
     LLM_KEEP_ALIVE: str = "30m"
     CARACAL_LLM_CONCURRENCY: int = 4
@@ -176,6 +360,28 @@ class Settings(BaseSettings):
         return parse_csv(value)
 
     @field_validator(
+        "LLM_ALLOWED_MODELS",
+        "LLM_ROUTE_DEFAULT",
+        "LLM_ROUTE_PLAN",
+        "LLM_ROUTE_CONTENT",
+        "LLM_ROUTE_IDENTITY",
+        "LLM_ROUTE_VERIFY",
+        "LLM_ROUTE_TRANSLATE",
+        "LLM_ROUTE_REVIEW",
+        "LLM_ROUTE_QA",
+        mode="before",
+    )
+    @classmethod
+    def _parse_ref_csv_fields(cls, value: Any) -> list[str]:
+        return parse_ref_csv(value)
+
+    @model_validator(mode="after")
+    def _validate_llm_routing(self) -> Settings:
+        """Reject a route that uses a model outside ``LLM_ALLOWED_MODELS`` at startup."""
+        resolve_llm_routing(self)
+        return self
+
+    @field_validator(
         "OLLAMA_CLOUD_API_KEY",
         "HF_TOKEN",
         "BRAVE_API_KEY",
@@ -213,6 +419,14 @@ class Settings(BaseSettings):
         if level not in _LOG_LEVELS:
             raise ValueError(f"CARACAL_LOG_LEVEL must be one of {sorted(_LOG_LEVELS)}")
         return level
+
+    def llm_allowed_models(self) -> tuple[ModelRef, ...]:
+        """Every model a route may use, in allow-list order (docs/02)."""
+        return resolve_llm_routing(self).allowed
+
+    def llm_route_chain(self, route: Route) -> tuple[ModelRef, ...]:
+        """The ordered fallback chain of ``route``; an unconfigured task uses DEFAULT."""
+        return resolve_llm_routing(self).chains[route]
 
 
 @lru_cache(maxsize=1)

@@ -1,11 +1,17 @@
-"""Ollama chat client with tool-call and JSON modes, coercion, repair and fallback (docs/04 §1).
+"""Ollama chat client with tool-call and JSON modes, coercion, repair and per-task routing.
 
 The measured gemma4 behaviour drives the design. Small schemas use the tool-call protocol:
 one tool definition with an inlined schema, then a coercion pass and pydantic validation.
 Big multi-section schemas use JSON mode (``format: "json"`` with the prepared schema in the
 system prompt), because tool calls there validate but are never complete and sometimes come
-back empty. An empty tool reply automatically retries the call in JSON mode. Two consecutive
-primary failures (or an auth rejection) move the call to the local fallback model. Prompts are
+back empty. An empty tool reply automatically retries the call in JSON mode.
+
+Every call names a :class:`~caracal.config.Route`; the route's ordered chain
+(``LLM_ROUTE_<TASK>``, docs/02) is tried ref by ref. Within one ref the transport retries
+and the repair attempts apply; a ref is abandoned after two consecutive transport/5xx/timeout
+failures, on a 401/403, on a 404 model-not-found, or when its structured output is still
+invalid after the repairs — then the next ref of the chain answers. A local ref gets a
+cold-start timeout (``max(LLM_TIMEOUT_S, 240)``) unless it is the first ref. Prompts are
 never logged at INFO.
 """
 
@@ -14,14 +20,14 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, TypeVar, cast
 
 import httpx
 from pydantic import BaseModel, ValidationError
 
-from caracal.config import Settings
+from caracal.config import ModelRef, Route, Settings
 from caracal.errors import CaracalError, ErrorCode
 from caracal.llm.jsonx import extract_json
 from caracal.llm.schema import DEFAULT_SYNONYMS, coerce, prepare_schema
@@ -37,7 +43,15 @@ Mode = Literal["tool", "json"]
 class LlmMetrics(Protocol):
     """The one metric the client records per call (``caracal_llm_calls_total``)."""
 
-    async def incr_llm_call(self, endpoint: str, mode: str, fallback: bool) -> None: ...
+    async def incr_llm_call(
+        self,
+        endpoint: str,
+        mode: str,
+        fallback: bool,
+        *,
+        route: str = ...,
+        model: str = ...,
+    ) -> None: ...
 
 
 _TOOL_SUFFIX = (
@@ -51,12 +65,14 @@ _JSON_SUFFIX = (
 _BACKOFF_PRIMARY = 1.0
 _BACKOFF_SWITCH = 4.0
 _MAX_REPAIRS = 2
-_MAX_PRIMARY_FAILURES = 2
-_MAX_FALLBACK_FAILURES = 2
+_MAX_REF_FAILURES = 2
 _REPAIR_ERRORS = 5
 _DEBUG_CHARS = 500
+#: A local model may be cold (measured 21-43 s to load); the chain's fallback gets this.
+_LOCAL_COLD_START_TIMEOUT_S = 240.0
 
-_auth_failed_logged = False
+#: Model refs whose 401/403 was already logged (``llm.auth_failed`` is once per ref).
+_auth_failed_refs: set[str] = set()
 
 
 @dataclass(frozen=True)
@@ -70,6 +86,9 @@ class CallMeta:
     fallback_used: bool
     duration_s: float
     mode_used: Mode
+    route: Route = Route.DEFAULT
+    model_ref: str = ""
+    refs_tried: int = 1
 
 
 @dataclass(frozen=True)
@@ -82,19 +101,24 @@ class ToolResult[T: BaseModel]:
 
 @dataclass(frozen=True)
 class _Endpoint:
+    """One model ref resolved against the settings (URL, key and timeout included)."""
+
     kind: EndpointKind
     url: str
     model: str
     api_key: str | None
+    ref: ModelRef
+    timeout_s: float
 
 
 @dataclass
 class _CallState:
+    """Per-ref request accounting; ``fallback_used`` means a later ref of the chain answers."""
+
     endpoint: _Endpoint
     fallback_used: bool = False
     requests: int = 0
-    primary_failures: int = 0
-    fallback_failures: int = 0
+    failures: int = 0
 
 
 @dataclass
@@ -114,18 +138,31 @@ class _AuthFailed(Exception):
         self.status = status
 
 
+class _ModelNotFound(Exception):
+    def __init__(self, error: CaracalError) -> None:
+        super().__init__(error.message)
+        self.error = error
+
+
 class _Fatal(Exception):
     def __init__(self, error: CaracalError) -> None:
         super().__init__(error.message)
         self.error = error
 
 
-def _log_auth_failed_once(status: int) -> None:
-    global _auth_failed_logged
-    if _auth_failed_logged:
+class _RefFailed(Exception):
+    """One model ref is exhausted; the route's next ref is tried."""
+
+    def __init__(self, error: CaracalError) -> None:
+        super().__init__(error.message)
+        self.error = error
+
+
+def _log_auth_failed_once(model_ref: str, status: int) -> None:
+    if model_ref in _auth_failed_refs:
         return
-    _auth_failed_logged = True
-    logger.warning("llm.auth_failed", extra={"status": status})
+    _auth_failed_refs.add(model_ref)
+    logger.warning("llm.auth_failed", extra={"model_ref": model_ref, "status": status})
 
 
 def _system_prompt(system: str, tool_name: str) -> str:
@@ -226,28 +263,41 @@ class LLMClient:
         self._semaphore = (
             semaphore if semaphore is not None else asyncio.Semaphore(settings.CARACAL_LLM_CONCURRENCY)
         )
-        self._primary = self._build_primary()
-        self._fallback = _Endpoint(
-            kind="local",
-            url=settings.OLLAMA_LOCAL_URL,
-            model=settings.LLM_FALLBACK_MODEL,
-            api_key=None,
-        )
 
-    def _build_primary(self) -> _Endpoint:
-        api_key = self._settings.OLLAMA_CLOUD_API_KEY
-        if api_key is not None:
+    def _chain(self, route: Route) -> tuple[_Endpoint, ...]:
+        """Resolve the route's refs: first ref keeps ``LLM_TIMEOUT_S``, later locals get 240 s."""
+        endpoints: list[_Endpoint] = []
+        for index, ref in enumerate(self._settings.llm_route_chain(route)):
+            timeout = float(self._settings.LLM_TIMEOUT_S)
+            if index > 0 and ref.endpoint == "local":
+                timeout = max(timeout, _LOCAL_COLD_START_TIMEOUT_S)
+            endpoints.append(self._endpoint(ref, timeout))
+        return tuple(endpoints)
+
+    def _endpoint(self, ref: ModelRef, timeout_s: float) -> _Endpoint:
+        if ref.endpoint == "cloud":
+            api_key = self._settings.OLLAMA_CLOUD_API_KEY
+            if api_key is None:  # Settings rejects a cloud ref without a key at startup
+                raise CaracalError(
+                    ErrorCode.INVALID_INPUT,
+                    "a cloud model reference needs OLLAMA_CLOUD_API_KEY",
+                    {"model": ref.normalised},
+                )
             return _Endpoint(
                 kind="cloud",
                 url=self._settings.OLLAMA_CLOUD_URL,
-                model=self._settings.LLM_MODEL,
+                model=ref.name,
                 api_key=api_key.get_secret_value(),
+                ref=ref,
+                timeout_s=timeout_s,
             )
         return _Endpoint(
             kind="local",
             url=self._settings.OLLAMA_LOCAL_URL,
-            model=self._settings.LLM_LOCAL_PROXY_MODEL,
+            model=ref.name,
             api_key=None,
+            ref=ref,
+            timeout_s=timeout_s,
         )
 
     async def call_tool(
@@ -262,12 +312,14 @@ class LLMClient:
         max_tokens: int = 4096,
         synonyms: Mapping[str, str] | None = None,
         mode: Mode = "tool",
+        route: Route = Route.DEFAULT,
     ) -> ToolResult[ModelT]:
         """Call ``tool_name`` once and return a validated ``model_cls`` instance.
 
         ``mode="json"`` sends ``format: "json"`` with the prepared schema in the system prompt
         instead of a tool definition (big multi-section schemas; docs/04 §1). In tool mode an
         empty reply — no tool call and no text — retries the same attempt in JSON mode.
+        ``route`` selects the ordered model chain (docs/02 ``LLM_ROUTE_*``).
         """
         started = time.monotonic()
         prepared = prepare_schema(model_cls)
@@ -286,7 +338,171 @@ class LLMClient:
             if mode == "tool"
             else None
         )
-        current_mode: Mode = mode
+        last: CaracalError | None = None
+        refs_tried = 0
+        attempts = 0
+        for endpoint in self._chain(route):
+            refs_tried += 1
+            state = _CallState(endpoint=endpoint, fallback_used=refs_tried > 1)
+            if refs_tried > 1:
+                logger.warning(
+                    "llm.fallback",
+                    extra={"route": route.value, "model_ref": endpoint.ref.normalised},
+                )
+            try:
+                value, coerced, mode_used = await self._tool_attempt(
+                    state,
+                    system=system,
+                    prompt=prompt,
+                    prepared=prepared,
+                    synonyms=merged_synonyms,
+                    model_cls=model_cls,
+                    tool_name=tool_name,
+                    tools=tools,
+                    initial_mode=mode,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+            except _RefFailed as failed:
+                attempts += state.requests
+                last = failed.error
+                continue
+
+            attempts += state.requests
+            duration = time.monotonic() - started
+            logger.info(
+                "llm.call",
+                extra={
+                    "route": route.value,
+                    "model": state.endpoint.model,
+                    "model_ref": state.endpoint.ref.normalised,
+                    "endpoint": state.endpoint.kind,
+                    "attempts": attempts,
+                    "coerced": coerced,
+                    "fallback_used": state.fallback_used,
+                    "refs_tried": refs_tried,
+                    "mode": mode_used,
+                    "duration_s": round(duration, 3),
+                },
+            )
+            await self._record_call(state, mode_used, route)
+            return ToolResult(
+                value=value,
+                meta=CallMeta(
+                    model=state.endpoint.model,
+                    endpoint=state.endpoint.kind,
+                    attempts=attempts,
+                    coerced=coerced,
+                    fallback_used=state.fallback_used,
+                    duration_s=duration,
+                    mode_used=mode_used,
+                    route=route,
+                    model_ref=state.endpoint.ref.normalised,
+                    refs_tried=refs_tried,
+                ),
+            )
+        raise self._chain_exhausted(route, refs_tried, last) from None
+
+    async def chat(
+        self,
+        *,
+        prompt: str,
+        system: str,
+        temperature: float = 0.3,
+        max_tokens: int = 2048,
+        route: Route = Route.DEFAULT,
+    ) -> str:
+        """Free-text chat completion (no tools, no validation) along the route's chain."""
+        started = time.monotonic()
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ]
+        last: CaracalError | None = None
+        refs_tried = 0
+        for endpoint in self._chain(route):
+            refs_tried += 1
+            state = _CallState(endpoint=endpoint, fallback_used=refs_tried > 1)
+            if refs_tried > 1:
+                logger.warning(
+                    "llm.fallback",
+                    extra={"route": route.value, "model_ref": endpoint.ref.normalised},
+                )
+            try:
+                message = await self._exchange(
+                    state,
+                    messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    tools=None,
+                )
+            except _RefFailed as failed:
+                last = failed.error
+                continue
+            content = message.get("content")
+            if not isinstance(content, str) or not content.strip():
+                last = CaracalError(
+                    ErrorCode.INTERNAL,
+                    "LLM chat reply has no text content",
+                    {"model_ref": endpoint.ref.normalised},
+                    retryable=True,
+                )
+                continue
+            duration = time.monotonic() - started
+            logger.info(
+                "llm.chat",
+                extra={
+                    "route": route.value,
+                    "model": state.endpoint.model,
+                    "model_ref": state.endpoint.ref.normalised,
+                    "endpoint": state.endpoint.kind,
+                    "attempts": state.requests,
+                    "fallback_used": state.fallback_used,
+                    "refs_tried": refs_tried,
+                    "duration_s": round(duration, 3),
+                },
+            )
+            await self._record_call(state, "chat", route)
+            return content
+        raise self._chain_exhausted(route, refs_tried, last) from None
+
+    @staticmethod
+    def _chain_exhausted(route: Route, refs_tried: int, last: CaracalError | None) -> CaracalError:
+        """The error of the last ref, re-labelled with the route that ran out of models."""
+        details: dict[str, Any] = {"route": route.value, "refs_tried": refs_tried}
+        if last is not None:
+            details["error"] = last.message
+            return CaracalError(
+                last.code,
+                f"every model of route {route.value} failed: {last.message}",
+                details,
+                retryable=True,
+            )
+        return CaracalError(
+            ErrorCode.DEPENDENCY_DOWN,
+            f"route {route.value} has no model to call",
+            details,
+            retryable=True,
+        )
+
+    async def _tool_attempt(
+        self,
+        state: _CallState,
+        *,
+        system: str,
+        prompt: str,
+        prepared: Mapping[str, Any],
+        synonyms: Mapping[str, str],
+        model_cls: type[ModelT],
+        tool_name: str,
+        tools: list[dict[str, Any]] | None,
+        initial_mode: Mode,
+        temperature: float,
+        max_tokens: int,
+    ) -> tuple[ModelT, bool, Mode]:
+        """Run the tool/JSON protocol against one ref; raise ``_RefFailed`` when it is done."""
+        current_mode: Mode = initial_mode
+        current_tools = tools
         messages = _messages(
             system,
             prompt,
@@ -294,7 +510,6 @@ class LLMClient:
             prepared=prepared,
             tool_name=tool_name,
         )
-        state = _CallState(endpoint=self._primary)
         repairs = 0
         while True:
             message = await self._exchange(
@@ -302,14 +517,14 @@ class LLMClient:
                 messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                tools=tools,
+                tools=current_tools,
                 json_mode=current_mode == "json",
             )
             if current_mode == "tool" and _is_empty_reply(message):
                 # Ollama drops a malformed tool call; the same attempt continues in JSON mode
                 # (docs/04 §1: "empty tool reply → next attempt json mode").
                 current_mode = "json"
-                tools = None
+                current_tools = None
                 repairs = 0
                 messages = _messages(
                     system,
@@ -324,16 +539,18 @@ class LLMClient:
                     message,
                     model_cls=model_cls,
                     prepared=prepared,
-                    synonyms=merged_synonyms,
+                    synonyms=synonyms,
                     mode=current_mode,
                 )
             except _InvalidOutput as invalid:
                 if repairs >= _MAX_REPAIRS:
-                    raise CaracalError(
-                        ErrorCode.INTERNAL,
-                        "LLM did not return valid structured output",
-                        {"errors": invalid.errors[:_REPAIR_ERRORS], "mode": current_mode},
-                        retryable=True,
+                    raise _RefFailed(
+                        CaracalError(
+                            ErrorCode.INTERNAL,
+                            "LLM did not return valid structured output",
+                            {"errors": invalid.errors[:_REPAIR_ERRORS], "mode": current_mode},
+                            retryable=True,
+                        )
                     ) from None
                 repairs += 1
                 if current_mode == "tool":
@@ -349,83 +566,20 @@ class LLMClient:
                     )
                     messages.append({"role": "user", "content": _json_repair_message(invalid.errors)})
                 continue
+            return value, coerced, current_mode
 
-            duration = time.monotonic() - started
-            logger.info(
-                "llm.call",
-                extra={
-                    "model": state.endpoint.model,
-                    "endpoint": state.endpoint.kind,
-                    "attempts": state.requests,
-                    "coerced": coerced,
-                    "fallback_used": state.fallback_used,
-                    "mode": current_mode,
-                    "duration_s": round(duration, 3),
-                },
-            )
-            await self._record_call(state, current_mode)
-            return ToolResult(
-                value=value,
-                meta=CallMeta(
-                    model=state.endpoint.model,
-                    endpoint=state.endpoint.kind,
-                    attempts=state.requests,
-                    coerced=coerced,
-                    fallback_used=state.fallback_used,
-                    duration_s=duration,
-                    mode_used=current_mode,
-                ),
-            )
-
-    async def chat(
-        self,
-        *,
-        prompt: str,
-        system: str,
-        temperature: float = 0.3,
-        max_tokens: int = 2048,
-    ) -> str:
-        """Free-text chat completion (no tools, no validation)."""
-        started = time.monotonic()
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": prompt},
-        ]
-        state = _CallState(endpoint=self._primary)
-        message = await self._exchange(
-            state,
-            messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            tools=None,
-        )
-        content = message.get("content")
-        if not isinstance(content, str) or not content.strip():
-            raise CaracalError(
-                ErrorCode.INTERNAL,
-                "LLM chat reply has no text content",
-                retryable=True,
-            )
-        duration = time.monotonic() - started
-        logger.info(
-            "llm.chat",
-            extra={
-                "model": state.endpoint.model,
-                "endpoint": state.endpoint.kind,
-                "attempts": state.requests,
-                "fallback_used": state.fallback_used,
-                "duration_s": round(duration, 3),
-            },
-        )
-        await self._record_call(state, "chat")
-        return content
-
-    async def _record_call(self, state: _CallState, mode: str) -> None:
+    async def _record_call(self, state: _CallState, mode: str, route: Route) -> None:
         """Increment ``caracal_llm_calls_total``; metrics must never fail an LLM call."""
         if self._metrics is None:
             return
         try:
-            await self._metrics.incr_llm_call(state.endpoint.kind, mode, state.fallback_used)
+            await self._metrics.incr_llm_call(
+                state.endpoint.kind,
+                mode,
+                state.fallback_used,
+                route=route.value,
+                model=state.endpoint.model,
+            )
         except Exception as exc:  # best-effort telemetry, like the worker's job metrics
             logger.warning("llm.metrics_failed", extra={"error": type(exc).__name__})
 
@@ -488,7 +642,11 @@ class LLMClient:
         tools: list[dict[str, Any]] | None,
         json_mode: bool = False,
     ) -> dict[str, Any]:
-        """One logical exchange; retries, auth fallback and model fallback happen here."""
+        """One logical exchange against ``state.endpoint``; transport retries happen here.
+
+        Raises ``_RefFailed`` when this ref is exhausted: two consecutive transport/5xx/timeout
+        failures, an auth rejection or a 404 model-not-found.
+        """
         while True:
             body = self._body(
                 state.endpoint,
@@ -502,67 +660,38 @@ class LLMClient:
                 message = await self._post(state.endpoint, body)
             except _AuthFailed as exc:
                 state.requests += 1
-                if state.endpoint.kind == "cloud":
-                    _log_auth_failed_once(exc.status)
-                    self._switch_to_fallback(state)
-                    continue
-                raise CaracalError(
-                    ErrorCode.DEPENDENCY_DOWN,
-                    "Ollama rejected the request",
-                    {"endpoint": state.endpoint.kind},
-                    retryable=True,
+                _log_auth_failed_once(state.endpoint.ref.normalised, exc.status)
+                raise _RefFailed(
+                    CaracalError(
+                        ErrorCode.DEPENDENCY_DOWN,
+                        "Ollama rejected the request",
+                        {"endpoint": state.endpoint.kind, "model_ref": state.endpoint.ref.normalised},
+                        retryable=True,
+                    )
                 ) from None
+            except _ModelNotFound as exc:
+                state.requests += 1
+                raise _RefFailed(exc.error) from None
             except _Retryable as exc:
                 state.requests += 1
-                await self._handle_failure(state, exc.error)
+                state.failures += 1
+                if state.failures >= _MAX_REF_FAILURES:
+                    await self._sleep(_BACKOFF_SWITCH)
+                    raise _RefFailed(exc.error) from None
+                await self._sleep(_BACKOFF_PRIMARY)
                 continue
             except _Fatal as exc:
+                # A 400/other 4xx or a malformed body is not model-specific: fail the call.
                 state.requests += 1
                 raise exc.error from None
             state.requests += 1
-            state.primary_failures = 0
-            state.fallback_failures = 0
+            state.failures = 0
             return message
-
-    async def _handle_failure(self, state: _CallState, error: CaracalError) -> None:
-        if state.endpoint.kind == "cloud":
-            state.primary_failures += 1
-            if state.primary_failures >= _MAX_PRIMARY_FAILURES:
-                await self._sleep(_BACKOFF_SWITCH)
-                self._switch_to_fallback(state)
-                return
-            await self._sleep(_BACKOFF_PRIMARY)
-            return
-        if not state.fallback_used:
-            state.primary_failures += 1
-            if state.primary_failures >= _MAX_PRIMARY_FAILURES:
-                await self._sleep(_BACKOFF_SWITCH)
-                self._switch_to_fallback(state)
-                return
-            await self._sleep(_BACKOFF_PRIMARY)
-            return
-        state.fallback_failures += 1
-        if state.fallback_failures >= _MAX_FALLBACK_FAILURES:
-            raise CaracalError(
-                ErrorCode.DEPENDENCY_DOWN,
-                "Ollama is unavailable on both the primary and fallback endpoints",
-                {"error": error.message},
-                retryable=True,
-            ) from None
-        await self._sleep(_BACKOFF_SWITCH)
-
-    def _switch_to_fallback(self, state: _CallState) -> None:
-        state.endpoint = self._fallback
-        state.fallback_used = True
-        logger.warning(
-            "llm.fallback",
-            extra={"model": self._fallback.model, "endpoint": self._fallback.kind},
-        )
 
     def _body(
         self,
         endpoint: _Endpoint,
-        messages: list[dict[str, Any]],
+        messages: Sequence[Mapping[str, Any]],
         *,
         temperature: float,
         max_tokens: int,
@@ -571,7 +700,7 @@ class LLMClient:
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": endpoint.model,
-            "messages": messages,
+            "messages": list(messages),
             "stream": False,
             "keep_alive": self._settings.LLM_KEEP_ALIVE,
             "options": {"temperature": temperature, "num_predict": max_tokens},
@@ -593,14 +722,17 @@ class LLMClient:
                     f"{endpoint.url}/api/chat",
                     json=body,
                     headers=headers,
-                    timeout=float(self._settings.LLM_TIMEOUT_S),
+                    timeout=endpoint.timeout_s,
                 )
             except httpx.TimeoutException as exc:
                 raise _Retryable(
                     CaracalError(
                         ErrorCode.DEPENDENCY_DOWN,
                         "Ollama request timed out",
-                        {"timeout_s": self._settings.LLM_TIMEOUT_S},
+                        {
+                            "timeout_s": endpoint.timeout_s,
+                            "model_ref": endpoint.ref.normalised,
+                        },
                         retryable=True,
                     )
                 ) from exc
@@ -609,11 +741,19 @@ class LLMClient:
                     CaracalError(
                         ErrorCode.DEPENDENCY_DOWN,
                         "Ollama is unreachable",
-                        {"error": type(exc).__name__},
+                        {"error": type(exc).__name__, "model_ref": endpoint.ref.normalised},
                         retryable=True,
                     )
                 ) from exc
 
+        if response.status_code == 404:
+            raise _ModelNotFound(
+                CaracalError(
+                    ErrorCode.INTERNAL,
+                    f"model {endpoint.model!r} is not available on the {endpoint.kind} endpoint",
+                    {"status": 404, "model_ref": endpoint.ref.normalised},
+                )
+            )
         if response.status_code in (401, 403):
             raise _AuthFailed(response.status_code)
         if response.status_code >= 500:
@@ -621,7 +761,7 @@ class LLMClient:
                 CaracalError(
                     ErrorCode.DEPENDENCY_DOWN,
                     f"Ollama failed with HTTP {response.status_code}",
-                    {"status": response.status_code},
+                    {"status": response.status_code, "model_ref": endpoint.ref.normalised},
                     retryable=True,
                 )
             )
@@ -630,7 +770,7 @@ class LLMClient:
                 CaracalError(
                     ErrorCode.INTERNAL,
                     f"Ollama rejected the request with HTTP {response.status_code}",
-                    {"status": response.status_code},
+                    {"status": response.status_code, "model_ref": endpoint.ref.normalised},
                 )
             )
         try:
@@ -645,4 +785,4 @@ class LLMClient:
         return cast(dict[str, Any], message)
 
 
-__all__ = ["CallMeta", "LLMClient", "LlmMetrics", "Mode", "ToolResult"]
+__all__ = ["CallMeta", "LLMClient", "LlmMetrics", "Mode", "Route", "ToolResult"]

@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from caracal.analysis import AnalysisOptions
 from caracal.asr import Segment, Transcript
+from caracal.config import Route
 from caracal.errors import CaracalError
 from caracal.llm.client import LLMClient
 from caracal.llm.prompts import load_prompt, render_metadata, render_transcript_lines, wrap_data
@@ -296,6 +297,7 @@ async def _profile(inputs: PlanInputs, llm: LLMClient | None) -> tuple[ContentPr
             model_cls=ContentProfile,
             tool_name="record_content_profile",
             tool_description="Record the likely genre and whether identity and verification matter.",
+            route=Route.PLAN,
         )
     except CaracalError:
         return _default_profile(), LLM_UNAVAILABLE_REASON

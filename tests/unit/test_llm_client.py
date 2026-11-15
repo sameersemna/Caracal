@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import copy
 import json
 import logging
+from collections.abc import Sequence
+from pathlib import Path
 from typing import Any, Literal
 
 import httpx
@@ -23,7 +26,7 @@ from tests.fakes.ollama import (
 )
 
 import caracal.llm.client as client_module
-from caracal.config import Settings
+from caracal.config import Route, Settings
 from caracal.errors import CaracalError, ErrorCode
 from caracal.llm.client import LLMClient
 from caracal.llm.prompts import load_prompt, wrap_data
@@ -83,7 +86,7 @@ def _settings(**overrides: object) -> Settings:
     return Settings(_env_file=None, **data)
 
 
-async def _call(client: LLMClient, prompt: str = "PROMPT") -> Any:
+async def _call(client: LLMClient, prompt: str = "PROMPT", *, route: Route = Route.DEFAULT) -> Any:
     return await client.call_tool(
         prompt=prompt,
         system="SYS",
@@ -91,6 +94,7 @@ async def _call(client: LLMClient, prompt: str = "PROMPT") -> Any:
         tool_name="record_analysis",
         tool_description="Record the analysis.",
         synonyms=DEFAULT_SYNONYMS,
+        route=route,
     )
 
 
@@ -359,7 +363,7 @@ async def test_401_falls_back_immediately_and_logs_auth_failed_once(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(client_module, "_auth_failed_logged", False)
+    monkeypatch.setattr(client_module, "_auth_failed_refs", set())
     caplog.set_level(logging.INFO, logger="caracal.llm.client")
     fake = FakeOllama(
         [
@@ -402,7 +406,7 @@ async def test_all_endpoints_failing_raises_retryable_dependency_down() -> None:
     assert caught.value.code is ErrorCode.DEPENDENCY_DOWN
     assert caught.value.retryable is True
     assert len(fake.requests) == 4
-    assert waits == [1.0, 4.0, 4.0]
+    assert waits == [1.0, 4.0, 1.0, 4.0]
 
 
 async def test_semaphore_limits_concurrent_requests() -> None:
@@ -473,13 +477,21 @@ def test_wrap_data_cannot_be_closed_by_the_data() -> None:
 
 
 class _RecordingLlmMetrics:
-    """A structural ``LlmMetrics`` that records every call."""
+    """A structural ``LlmMetrics`` that records every call and its routing labels."""
 
     def __init__(self) -> None:
-        self.calls: list[tuple[str, str, bool]] = []
+        self.calls: list[tuple[str, str, bool, str, str]] = []
 
-    async def incr_llm_call(self, endpoint: str, mode: str, fallback: bool) -> None:
-        self.calls.append((endpoint, mode, fallback))
+    async def incr_llm_call(
+        self,
+        endpoint: str,
+        mode: str,
+        fallback: bool,
+        *,
+        route: str = "",
+        model: str = "",
+    ) -> None:
+        self.calls.append((endpoint, mode, fallback, route, model))
 
 
 async def test_call_tool_records_one_metric_per_successful_call() -> None:
@@ -488,7 +500,7 @@ async def test_call_tool_records_one_metric_per_successful_call() -> None:
     async with httpx.AsyncClient(transport=fake.transport()) as http:
         await _call(LLMClient(_settings(), http, metrics=metrics))
 
-    assert metrics.calls == [("cloud", "tool", False)]
+    assert metrics.calls == [("cloud", "tool", False, "default", "gemma4:31b")]
 
 
 async def test_call_tool_metric_reflects_the_fallback_endpoint_and_mode() -> None:
@@ -503,12 +515,20 @@ async def test_call_tool_metric_reflects_the_fallback_endpoint_and_mode() -> Non
     async with httpx.AsyncClient(transport=fake.transport()) as http:
         await _call(LLMClient(settings, http, sleep=sleep, metrics=metrics))
 
-    assert metrics.calls == [("local", "tool", True)]
+    assert metrics.calls == [("local", "tool", True, "default", "gemma4:local-test")]
 
 
 async def test_chat_records_its_own_mode_and_never_fails_on_a_metrics_error() -> None:
     class BrokenMetrics:
-        async def incr_llm_call(self, endpoint: str, mode: str, fallback: bool) -> None:
+        async def incr_llm_call(
+            self,
+            endpoint: str,
+            mode: str,
+            fallback: bool,
+            *,
+            route: str = "",
+            model: str = "",
+        ) -> None:
             raise RuntimeError("redis is down")
 
     fake = FakeOllama([message_response(text_message("hello"))])
@@ -516,3 +536,237 @@ async def test_chat_records_its_own_mode_and_never_fails_on_a_metrics_error() ->
         text = await LLMClient(_settings(), http, metrics=BrokenMetrics()).chat(prompt="hi", system="sys")
 
     assert text == "hello"
+
+
+# --- per-task routing (card 46) -------------------------------------------------------
+
+
+def _routed(**overrides: object) -> Settings:
+    """Settings with an explicit allow-list and the DEFAULT chain ``primary -> secondary``."""
+    data: dict[str, object] = {
+        "LLM_ALLOWED_MODELS": "local:primary,local:secondary,local:qa-primary",
+        "LLM_ROUTE_DEFAULT": "local:primary,local:secondary",
+    }
+    data.update(overrides)
+    return _settings(**data)
+
+
+def _invalid_tool_response() -> httpx.Response:
+    return message_response(
+        tool_call_message(
+            {"language": "de", "entities": [{"text": "Berlin", "entity_type": "place"}], "confidence": 0.5}
+        )
+    )
+
+
+async def test_a_task_route_uses_its_own_chain_and_reports_the_route() -> None:
+    fake = FakeOllama([_recorded_response()])
+    settings = _routed(LLM_ROUTE_QA="local:qa-primary")
+    async with httpx.AsyncClient(transport=fake.transport()) as http:
+        result = await _call(LLMClient(settings, http), route=Route.QA)
+
+    assert str(fake.requests[0].url) == "http://127.0.0.1:11434/api/chat"
+    assert fake.body()["model"] == "qa-primary"
+    assert result.meta.route is Route.QA
+    assert result.meta.model_ref == "local:qa-primary"
+    assert result.meta.refs_tried == 1
+    assert result.meta.fallback_used is False
+
+
+async def test_an_unconfigured_task_route_uses_the_default_chain() -> None:
+    fake = FakeOllama([_recorded_response()])
+    settings = _routed()
+    async with httpx.AsyncClient(transport=fake.transport()) as http:
+        result = await _call(LLMClient(settings, http), route=Route.TRANSLATE)
+
+    assert fake.body()["model"] == "primary"
+    assert result.meta.route is Route.TRANSLATE
+    assert result.meta.model_ref == "local:primary"
+
+
+async def test_a_cloud_ref_calls_the_cloud_endpoint_with_the_bearer_key() -> None:
+    fake = FakeOllama([_recorded_response()])
+    settings = _routed(
+        LLM_ALLOWED_MODELS="cloud:gemma4:31b,local:secondary",
+        LLM_ROUTE_DEFAULT="cloud:gemma4:31b,local:secondary",
+    )
+    async with httpx.AsyncClient(transport=fake.transport()) as http:
+        result = await _call(LLMClient(settings, http))
+
+    assert str(fake.requests[0].url) == "https://ollama.com/api/chat"
+    assert fake.requests[0].headers["authorization"] == "Bearer cloud-secret-key"
+    assert fake.body()["model"] == "gemma4:31b"
+    assert result.meta.model_ref == "cloud:gemma4:31b"
+
+
+async def test_two_failures_on_a_ref_move_to_the_next_ref_of_the_chain() -> None:
+    waits: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        waits.append(seconds)
+
+    fake = FakeOllama([error_response(500), error_response(500), _recorded_response()])
+    async with httpx.AsyncClient(transport=fake.transport()) as http:
+        result = await _call(LLMClient(_routed(), http, sleep=sleep))
+
+    assert [fake.body(index)["model"] for index in range(len(fake.requests))] == [
+        "primary",
+        "primary",
+        "secondary",
+    ]
+    assert waits == [1.0, 4.0]
+    assert result.meta.model_ref == "local:secondary"
+    assert result.meta.refs_tried == 2
+    assert result.meta.attempts == 3
+    assert result.meta.fallback_used is True
+
+
+async def test_a_404_model_not_found_moves_straight_to_the_next_ref() -> None:
+    waits: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        waits.append(seconds)
+
+    fake = FakeOllama([error_response(404), _recorded_response()])
+    async with httpx.AsyncClient(transport=fake.transport()) as http:
+        result = await _call(LLMClient(_routed(), http, sleep=sleep))
+
+    assert [fake.body(index)["model"] for index in range(len(fake.requests))] == [
+        "primary",
+        "secondary",
+    ]
+    assert waits == []
+    assert result.meta.model_ref == "local:secondary"
+    assert result.meta.refs_tried == 2
+
+
+async def test_invalid_output_after_the_repairs_moves_to_the_next_ref() -> None:
+    fake = FakeOllama(
+        [
+            _invalid_tool_response(),
+            _invalid_tool_response(),
+            _invalid_tool_response(),
+            _recorded_response(),
+        ]
+    )
+    async with httpx.AsyncClient(transport=fake.transport()) as http:
+        result = await _call(LLMClient(_routed(), http, sleep=_no_sleep))
+
+    assert [fake.body(index)["model"] for index in range(len(fake.requests))] == [
+        "primary",
+        "primary",
+        "primary",
+        "secondary",
+    ]
+    assert result.meta.model_ref == "local:secondary"
+    assert result.meta.refs_tried == 2
+    assert result.meta.coerced is True
+
+
+async def _no_sleep(_seconds: float) -> None:
+    return None
+
+
+@pytest.mark.parametrize(("configured", "expected_local"), [(180, 240.0), (300, 300.0)])
+async def test_a_local_ref_after_the_first_gets_the_cold_start_timeout(
+    configured: int, expected_local: float
+) -> None:
+    fake = FakeOllama([error_response(500), error_response(500), _recorded_response()])
+    settings = _routed(LLM_TIMEOUT_S=configured)
+    async with httpx.AsyncClient(transport=fake.transport()) as http:
+        await _call(LLMClient(settings, http, sleep=_no_sleep))
+
+    first = fake.requests[0].extensions["timeout"]["read"]
+    fallback = fake.requests[2].extensions["timeout"]["read"]
+    assert first == float(configured)
+    assert fallback == expected_local
+
+
+async def test_the_metric_carries_the_route_model_endpoint_mode_and_fallback_labels() -> None:
+    metrics = _RecordingLlmMetrics()
+    fake = FakeOllama([error_response(500), error_response(500), _recorded_response()])
+    settings = _routed(LLM_ROUTE_QA="local:primary,local:qa-primary")
+    async with httpx.AsyncClient(transport=fake.transport()) as http:
+        await _call(LLMClient(settings, http, sleep=_no_sleep, metrics=metrics), route=Route.QA)
+
+    assert metrics.calls == [("local", "tool", True, "qa", "qa-primary")]
+
+
+async def test_chat_follows_the_route_chain() -> None:
+    fake = FakeOllama([error_response(404), message_response(text_message("hello"))])
+    settings = _routed(LLM_ROUTE_QA="local:primary,local:qa-primary")
+    async with httpx.AsyncClient(transport=fake.transport()) as http:
+        answer = await LLMClient(settings, http, sleep=_no_sleep).chat(
+            prompt="hi", system="sys", route=Route.QA
+        )
+
+    assert answer == "hello"
+    assert [fake.body(index)["model"] for index in range(len(fake.requests))] == [
+        "primary",
+        "qa-primary",
+    ]
+
+
+_ANALYSIS_CALL_SITE_ROUTES: dict[str, tuple[str, int]] = {
+    "planner": ("PLAN", 1),
+    "content": ("CONTENT", 1),
+    "identity": ("IDENTITY", 1),
+    "verify": ("VERIFY", 3),
+    "translate": ("TRANSLATE", 1),
+    "review": ("REVIEW", 1),
+    "qa": ("QA", 2),
+}
+
+
+def _analysis_call_sites(module: str) -> Sequence[ast.Call]:
+    """Every ``llm.call_tool`` / ``llm.chat`` call in one analysis module, as AST nodes."""
+    path = Path(__file__).resolve().parents[2] / "src" / "caracal" / "analysis" / f"{module}.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in {"call_tool", "chat"}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("module", "route", "count"),
+    [(module, route, count) for module, (route, count) in _ANALYSIS_CALL_SITE_ROUTES.items()],
+)
+def test_every_analysis_module_passes_its_route(module: str, route: str, count: int) -> None:
+    """Each call site in the seven analysis modules names the route of its pipeline task."""
+    sites = _analysis_call_sites(module)
+    assert len(sites) == count, f"{module}: expected {count} LLM call sites, found {len(sites)}"
+    for site in sites:
+        keywords = {keyword.arg: keyword.value for keyword in site.keywords}
+        assert "route" in keywords, f"{module}:{site.lineno}: LLM call without route="
+        value = keywords["route"]
+        assert isinstance(value, ast.Attribute), f"{module}:{site.lineno}: route is not Route.<TASK>"
+        assert isinstance(value.value, ast.Name) and value.value.id == "Route"
+        assert value.attr == route, f"{module}:{site.lineno}: route is {value.attr}, expected {route}"
+
+
+async def test_auth_failures_are_logged_once_per_model_ref(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(client_module, "_auth_failed_refs", set())
+    caplog.set_level(logging.INFO, logger="caracal.llm.client")
+    settings = _routed(
+        LLM_ALLOWED_MODELS="local:a,local:b,local:c",
+        LLM_ROUTE_DEFAULT="local:a,local:b,local:c",
+    )
+    fake = FakeOllama([error_response(401), error_response(403), _recorded_response()])
+    async with httpx.AsyncClient(transport=fake.transport()) as http:
+        result = await _call(LLMClient(settings, http, sleep=_no_sleep))
+
+    assert [fake.body(index)["model"] for index in range(len(fake.requests))] == ["a", "b", "c"]
+    assert result.meta.model_ref == "local:c"
+    assert result.meta.refs_tried == 3
+    auth_records = [record for record in caplog.records if record.getMessage() == "llm.auth_failed"]
+    assert [(record.model_ref, record.status) for record in auth_records] == [
+        ("local:a", 401),
+        ("local:b", 403),
+    ]

@@ -895,6 +895,63 @@ async def test_stage_translate_checkpoints_units_and_cue_timings(
     )
 
 
+async def test_stage_translate_ends_a_unit_at_a_whisper_segment_boundary_for_cjk(
+    make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    """Whisper writes CJK without punctuation, so the adjacent segment boundary ends the unit.
+
+    Card 46 item 7: without it the two unrelated news items would be translated as one
+    sentence. The pause between them is zero, so only the whisper segment boundary can split
+    the unit; this proves ``stage_translate`` passes the segment starts to the unit builder.
+    """
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path, CARACAL_DEFAULT_TARGET_LANGS=["de"])
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    transcript = Transcript(
+        segments=(
+            Segment(
+                id=0,
+                start=0.0,
+                end=1.0,
+                text="有4人被殺 很多人受傷",
+                words=(_word("有4人被殺", 0.0, 0.5), _word("很多人受傷", 0.5, 1.0)),
+                avg_logprob=0.0,
+                no_speech_prob=0.0,
+                lang="zh",
+            ),
+            Segment(
+                id=1,
+                start=1.0,
+                end=2.0,
+                text="在坦桑尼亞 警方說",
+                words=(_word("在坦桑尼亞", 1.0, 1.5), _word("警方說", 1.5, 2.0)),
+                avg_logprob=0.0,
+                no_speech_prob=0.0,
+                lang="zh",
+            ),
+        ),
+        language_code="zh",
+        dropped={},
+    )
+    files.write_json(files.transcript_json, transcript.to_dict())
+    http, llm = _translating_llm(settings)
+    try:
+        result = await stage_translate(_context(settings, repos, files, llm=llm, job_id=job.id))
+    finally:
+        await http.aclose()
+
+    assert result.status == "done"
+    langs = result.output["langs"]
+    assert isinstance(langs, dict)
+    entry = langs["de"]
+    assert entry["units"] == 2
+    assert " ".join(" ".join(cue["lines"]) for cue in entry["cues"]) == (
+        "DE 有4人被殺 很多人受傷 DE 在坦桑尼亞 警方說"
+    )
+
+
 async def test_stage_subtitles_renders_every_translated_language(
     make_settings: MakeSettings, tmp_path: Path
 ) -> None:
@@ -2415,18 +2472,21 @@ async def test_stage_review_skips_quick_music_and_missing_llm(
     result = await stage_review(_context(settings, repos, files, job_id=job.id))
     assert (result.status, result.reason) == ("skipped", "llm unavailable")
 
-    # A model that never returns valid JSON is also a non-fatal skip (initial + 2 repairs).
+    # A model that never returns valid JSON is also a non-fatal skip: the client allows the
+    # initial call plus two repairs on each model ref of the route (card 46), so the derived
+    # two-ref chain makes six requests before the stage reports the LLM as unavailable.
     job = await _create_job(repos)
     files = JobFiles(tmp_path, job.id)
     files.ensure()
     _seed_review_inputs(files, _transcript(["hello there"]))
-    fake = FakeOllama([message_response(text_message("not json")) for _ in range(3)])
+    fake = FakeOllama([message_response(text_message("not json")) for _ in range(6)])
     client, http = _review_client(settings, fake)
     try:
         result = await stage_review(_context(settings, repos, files, job_id=job.id, llm=client))
     finally:
         await http.aclose()
     assert (result.status, result.reason) == ("skipped", "llm unavailable")
+    assert len(fake.requests) == 6
 
 
 async def test_stage_review_builds_the_draft_without_writing_the_report(

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from caracal.config import Settings, get_settings
+from caracal.config import Route, Settings, get_settings, parse_model_ref
 
 MakeSettings = Callable[..., Settings]
 
@@ -49,6 +49,24 @@ def test_empty_token_is_rejected() -> None:
             DATABASE_URL="postgresql://u:p@h:5432/caracal",
             REDIS_URL="redis://:p@h:6379/0",
         )
+
+
+def test_validation_errors_never_echo_the_settings_input() -> None:
+    """A mistyped value may be a secret; the error must name the field but not repeat the input."""
+    planted = "sk-live-planted-secret-0123456789"
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(
+            _env_file=None,
+            CARACAL_API_TOKEN="t" * 32,
+            DATABASE_URL="postgresql://u:p@h:5432/caracal",
+            REDIS_URL="redis://:p@h:6379/0",
+            CARACAL_PORT=planted,
+        )
+
+    message = str(excinfo.value)
+    assert "CARACAL_PORT" in message
+    assert planted not in message
+    assert planted not in repr(excinfo.value)
 
 
 def test_token_of_exactly_32_characters_is_accepted(make_settings: MakeSettings) -> None:
@@ -298,3 +316,164 @@ def test_db_schema_is_read_from_the_environment(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setenv("REDIS_URL", "redis://:p@h:6379/0")
     monkeypatch.setenv("CARACAL_DB_SCHEMA", "caracal_t_deadbeef")
     assert Settings(_env_file=None).CARACAL_DB_SCHEMA == "caracal_t_deadbeef"
+
+
+# --- per-task LLM routing (card 46) ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "endpoint", "name", "normalised"),
+    [
+        ("gemma4:31b", "local", "gemma4:31b", "local:gemma4:31b"),
+        ("gemma4:31b-cloud", "local", "gemma4:31b-cloud", "local:gemma4:31b-cloud"),
+        ("local:gemma4:31b", "local", "gemma4:31b", "local:gemma4:31b"),
+        ("cloud:gemma4:31b", "cloud", "gemma4:31b", "cloud:gemma4:31b"),
+        ("cloud:gemma4:31b-cloud", "cloud", "gemma4:31b-cloud", "cloud:gemma4:31b-cloud"),
+        ("  local:gemma4:31b  ", "local", "gemma4:31b", "local:gemma4:31b"),
+    ],
+)
+def test_model_refs_parse_into_an_endpoint_and_a_name(
+    raw: str, endpoint: str, name: str, normalised: str
+) -> None:
+    ref = parse_model_ref(raw)
+
+    assert (ref.endpoint, ref.name, ref.normalised) == (endpoint, name, normalised)
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "cloud:", "local:   "])
+def test_a_model_ref_without_a_name_is_rejected(raw: str) -> None:
+    with pytest.raises(ValueError):
+        parse_model_ref(raw)
+
+
+def test_backward_compatible_chain_without_a_cloud_key(make_settings: MakeSettings) -> None:
+    settings = make_settings(LLM_LOCAL_PROXY_MODEL="gemma4:31b-cloud", LLM_FALLBACK_MODEL="gemma4:31b")
+
+    assert [ref.normalised for ref in settings.llm_allowed_models()] == [
+        "local:gemma4:31b-cloud",
+        "local:gemma4:31b",
+    ]
+    for route in Route:
+        assert [ref.normalised for ref in settings.llm_route_chain(route)] == [
+            "local:gemma4:31b-cloud",
+            "local:gemma4:31b",
+        ]
+
+
+def test_backward_compatible_chain_with_a_cloud_key(make_settings: MakeSettings) -> None:
+    settings = make_settings(
+        OLLAMA_CLOUD_API_KEY="key",
+        LLM_MODEL="gemma4:31b",
+        LLM_FALLBACK_MODEL="gemma4:31b",
+    )
+
+    assert [ref.normalised for ref in settings.llm_allowed_models()] == [
+        "cloud:gemma4:31b",
+        "local:gemma4:31b",
+    ]
+    assert [ref.normalised for ref in settings.llm_route_chain(Route.DEFAULT)] == [
+        "cloud:gemma4:31b",
+        "local:gemma4:31b",
+    ]
+    assert [ref.normalised for ref in settings.llm_route_chain(Route.QA)] == [
+        "cloud:gemma4:31b",
+        "local:gemma4:31b",
+    ]
+
+
+def test_explicit_routes_use_the_default_for_unconfigured_tasks(make_settings: MakeSettings) -> None:
+    settings = make_settings(
+        LLM_ALLOWED_MODELS="gemma4:31b-cloud, local:gemma4:31b",
+        LLM_ROUTE_DEFAULT="gemma4:31b-cloud,local:gemma4:31b",
+        LLM_ROUTE_QA="local:gemma4:31b",
+        LLM_ROUTE_VERIFY="",
+    )
+
+    assert [ref.normalised for ref in settings.llm_allowed_models()] == [
+        "local:gemma4:31b-cloud",
+        "local:gemma4:31b",
+    ]
+    assert [ref.normalised for ref in settings.llm_route_chain(Route.QA)] == ["local:gemma4:31b"]
+    # An empty route variable is treated as unset, so it falls back to DEFAULT.
+    assert [ref.normalised for ref in settings.llm_route_chain(Route.VERIFY)] == [
+        "local:gemma4:31b-cloud",
+        "local:gemma4:31b",
+    ]
+    assert [ref.normalised for ref in settings.llm_route_chain(Route.PLAN)] == [
+        "local:gemma4:31b-cloud",
+        "local:gemma4:31b",
+    ]
+
+
+def test_a_route_ref_outside_the_allow_list_names_the_route_and_model(
+    make_settings: MakeSettings,
+) -> None:
+    with pytest.raises(ValidationError) as excinfo:
+        make_settings(
+            LLM_ALLOWED_MODELS="local:gemma4:31b",
+            LLM_ROUTE_QA="local:gemma4:31b,local:not-allowed:1b",
+        )
+
+    message = str(excinfo.value)
+    assert "LLM_ROUTE_QA" in message
+    assert "local:not-allowed:1b" in message
+    assert "not in LLM_ALLOWED_MODELS" in message
+
+
+def test_a_route_ref_is_matched_against_the_allow_list_by_normalised_ref(
+    make_settings: MakeSettings,
+) -> None:
+    settings = make_settings(
+        LLM_ALLOWED_MODELS="local:gemma4:31b",
+        LLM_ROUTE_QA="gemma4:31b",
+    )
+
+    assert [ref.normalised for ref in settings.llm_route_chain(Route.QA)] == ["local:gemma4:31b"]
+
+
+def test_a_cloud_ref_without_a_cloud_key_is_rejected(make_settings: MakeSettings) -> None:
+    with pytest.raises(ValidationError, match="OLLAMA_CLOUD_API_KEY"):
+        make_settings(OLLAMA_CLOUD_API_KEY=None, LLM_ALLOWED_MODELS="cloud:gemma4:31b")
+
+
+def test_an_allow_list_without_routes_becomes_the_default_chain(make_settings: MakeSettings) -> None:
+    settings = make_settings(LLM_ALLOWED_MODELS="local:first,local:second")
+
+    assert [ref.normalised for ref in settings.llm_route_chain(Route.DEFAULT)] == [
+        "local:first",
+        "local:second",
+    ]
+    assert [ref.normalised for ref in settings.llm_route_chain(Route.TRANSLATE)] == [
+        "local:first",
+        "local:second",
+    ]
+
+
+def test_routes_without_an_allow_list_allow_exactly_their_own_models(make_settings: MakeSettings) -> None:
+    settings = make_settings(
+        LLM_ROUTE_DEFAULT="local:primary",
+        LLM_ROUTE_QA="local:primary,local:qa",
+    )
+
+    assert [ref.normalised for ref in settings.llm_allowed_models()] == [
+        "local:primary",
+        "local:qa",
+    ]
+    assert [ref.normalised for ref in settings.llm_route_chain(Route.QA)] == [
+        "local:primary",
+        "local:qa",
+    ]
+
+
+def test_route_refs_are_read_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CARACAL_API_TOKEN", "e" * 32)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@h:5432/caracal")
+    monkeypatch.setenv("REDIS_URL", "redis://:p@h:6379/0")
+    monkeypatch.setenv("LLM_ALLOWED_MODELS", "local:a,local:b")
+    monkeypatch.setenv("LLM_ROUTE_REVIEW", "local:b")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.LLM_ALLOWED_MODELS == ["local:a", "local:b"]
+    assert [ref.normalised for ref in settings.llm_route_chain(Route.REVIEW)] == ["local:b"]
+    assert [ref.normalised for ref in settings.llm_route_chain(Route.PLAN)] == ["local:a", "local:b"]

@@ -26,7 +26,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, create_model
 
 from caracal.analysis import AnalysisOptions, Depth
 from caracal.asr import Segment, Transcript
-from caracal.config import Settings
+from caracal.config import Route, Settings
 from caracal.llm.client import CallMeta, LLMClient, Mode, ToolResult
 from caracal.llm.prompts import load_prompt, render_metadata, render_transcript_lines, wrap_data
 from caracal.report.evidence import normalise_ids
@@ -676,6 +676,7 @@ async def _call[ModelT: BaseModel](
         tool_name=tool_name,
         tool_description=tool_description,
         mode=mode,
+        route=Route.CONTENT,
     )
 
 

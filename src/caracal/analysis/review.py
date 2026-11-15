@@ -33,6 +33,7 @@ from typing import Any, Final
 from pydantic import BaseModel, ConfigDict, Field
 
 from caracal.asr import Segment, Transcript
+from caracal.config import Route
 from caracal.llm.client import LLMClient
 from caracal.llm.prompts import load_prompt, render_transcript_lines, wrap_data
 from caracal.report.model import Report, ReviewFlag, Severity
@@ -295,6 +296,7 @@ async def review_report(
         mode="json",
         temperature=0.1,
         max_tokens=2048,
+        route=Route.REVIEW,
     )
     flags, dropped = _validated_flags(result.value.flags)
     meta = ReviewLlmMeta(
