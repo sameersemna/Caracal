@@ -247,7 +247,12 @@ def resolve_llm_routing(settings: Settings) -> LlmRouting:
 class Settings(BaseSettings):
     """Validated Caracal configuration. See docs/02 for every variable."""
 
-    model_config = SettingsConfigDict(env_file=".env", env_prefix="", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_prefix="",
+        extra="ignore",
+        hide_input_in_errors=True,
+    )
 
     CARACAL_HOST: str = "127.0.0.1"
     CARACAL_PORT: int = 11404

@@ -51,6 +51,24 @@ def test_empty_token_is_rejected() -> None:
         )
 
 
+def test_validation_errors_never_echo_the_settings_input() -> None:
+    """A mistyped value may be a secret; the error must name the field but not repeat the input."""
+    planted = "sk-live-planted-secret-0123456789"
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(
+            _env_file=None,
+            CARACAL_API_TOKEN="t" * 32,
+            DATABASE_URL="postgresql://u:p@h:5432/caracal",
+            REDIS_URL="redis://:p@h:6379/0",
+            CARACAL_PORT=planted,
+        )
+
+    message = str(excinfo.value)
+    assert "CARACAL_PORT" in message
+    assert planted not in message
+    assert planted not in repr(excinfo.value)
+
+
 def test_token_of_exactly_32_characters_is_accepted(make_settings: MakeSettings) -> None:
     settings = make_settings(CARACAL_API_TOKEN="y" * 32)
     assert _token(settings) == "y" * 32
