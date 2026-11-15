@@ -2,7 +2,9 @@
 
 One call per chunk. The server is single-slot, so the caller may pass a lock factory (the
 transcribe stage passes ``queue.whisper_lock``); the request is always made inside it. The
-server always receives an explicit ``language`` because its default is ``en``.
+server always receives an explicit ``language`` because its default is ``en``, and
+``max_context=0`` because otherwise it conditions on its own previous output and can repeat
+an invented credit for a whole file.
 
 whisper.cpp emits CJK and other multi-byte characters as UTF-8 byte fragments: a character
 whose bytes straddle a token boundary arrives as several tokens that each decode to U+FFFD,
@@ -281,6 +283,11 @@ class WhisperClient:
             "language": language,
             "temperature": str(temperature),
             "translate": "true" if translate else "false",
+            # Without this whisper conditions on its own previous text and repeats a credit
+            # hallucination for the whole file (measured: a 93 s Chinese clip decoded the same
+            # invented credit at 0/30/60/90 s). ``0`` also agrees better with the platform
+            # captions (TED 0.943 -> 0.967) and is faster.
+            "max_context": "0",
         }
         content = await asyncio.to_thread(wav.read_bytes)
         files = {"file": (wav.name, content, "audio/wav")}
