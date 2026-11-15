@@ -12,9 +12,9 @@ from pathlib import Path
 
 import httpx
 import pytest
-from tests.fakes.whisper import FakeWhisper, html_response, json_response
+from tests.fakes.whisper import FakeWhisper, html_response, json_response, load_fixture
 
-from caracal.asr.whisper import WhisperClient
+from caracal.asr.whisper import WhisperClient, parse_whisper_response
 from caracal.errors import CaracalError, ErrorCode
 
 AUDIO = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "audio" / "jfk.wav"
@@ -219,3 +219,113 @@ async def test_word_space_before_records_whisper_whitespace() -> None:
     assert all(segment.words[0].space_before is True for segment in result.segments)
     assert result.segments[1].words[1].space_before is True
     assert first.to_dict()["words"][1]["space_before"] is True
+
+
+def _flat_text(text: str) -> str:
+    return "".join(text.split())
+
+
+@pytest.mark.parametrize("name", ["zh_news40", "zh_speech40"])
+def test_multibyte_byte_fragments_are_repaired_from_the_segment_text(name: str) -> None:
+    """whisper splits a Han character across tokens (U+FFFD); the segment text is correct."""
+    result = parse_whisper_response(load_fixture(name))
+
+    assert result.language_code == "zh"
+    assert result.segments
+    for segment in result.segments:
+        assert all("\ufffd" not in word.text for word in segment.words)
+        # Every rebuilt token is a piece of whisper's own text, in order.
+        assert all(word.text in _flat_text(segment.text) for word in segment.words)
+        assert _flat_text("".join(word.text for word in segment.words)) == _flat_text(segment.text)
+
+
+def test_a_split_character_becomes_one_token_spanning_its_fragments() -> None:
+    """志 � � 者 is 志愿者: the two byte fragments are one character with their joint time."""
+    words = parse_whisper_response(load_fixture("zh_news40")).segments[0].words
+
+    assert [word.text for word in words] == list("中文字幕志愿者") + list("李宗盛")
+    volunteer = words[5]
+    assert volunteer.text == "愿"
+    assert volunteer.start == pytest.approx(21.4)  # first fragment start
+    assert volunteer.end == pytest.approx(25.67)  # last fragment end
+    # the whitespace-only token before 李 carried the word separator
+    assert words[7].text == "李"
+    assert words[7].space_before is True
+
+
+async def test_chinese_response_through_the_client_has_no_replacement_character() -> None:
+    fake = FakeWhisper.from_fixtures("zh_speech40")
+    async with httpx.AsyncClient(transport=fake.transport()) as http:
+        client = WhisperClient("http://whisper.test", http, timeout_s=5.0)
+        result = await client.transcribe(AUDIO, language="zh")
+
+    assert fake.form()["language"] == "zh"
+    words = [word for segment in result.segments for word in segment.words]
+    assert len(words) == 103
+    assert not any("\ufffd" in word.text for word in words)
+    assert [word.text for word in words[:4]] == ["欧", "洲", "阿", "里"]
+
+
+def test_unrepairable_alignment_falls_back_to_one_token_per_character() -> None:
+    """A fragment run with no anchor before it and no room to assign: spread the characters."""
+    payload = {
+        "segments": [
+            {
+                "id": 0,
+                "text": "志愿者",
+                "start": 1.0,
+                "end": 4.0,
+                "words": [
+                    {"word": "者", "start": 3.0, "end": 3.5, "probability": 0.8},
+                    {"word": "\ufffd", "start": 3.5, "end": 4.0, "probability": 0.5},
+                ],
+                "avg_logprob": 0.0,
+                "no_speech_prob": 0.0,
+            }
+        ],
+        "duration": 4.0,
+    }
+
+    segment = parse_whisper_response(payload).segments[0]
+
+    assert [word.text for word in segment.words] == ["志", "愿", "者"]
+    assert [(word.start, word.end) for word in segment.words] == [(1.0, 2.0), (2.0, 3.0), (3.0, 4.0)]
+
+
+def test_all_fragment_segment_is_spread_over_the_segment_span() -> None:
+    payload = {
+        "segments": [
+            {
+                "id": 0,
+                "text": "火箭",
+                "start": 0.0,
+                "end": 2.0,
+                "words": [
+                    {"word": "\ufffd", "start": 0.0, "end": 1.0, "probability": 0.4},
+                    {"word": "\ufffd", "start": 1.0, "end": 2.0, "probability": 0.6},
+                ],
+                "avg_logprob": 0.0,
+                "no_speech_prob": 0.0,
+            }
+        ],
+        "duration": 2.0,
+    }
+
+    segment = parse_whisper_response(payload).segments[0]
+
+    assert [word.text for word in segment.words] == ["火", "箭"]
+    assert [(word.start, word.end) for word in segment.words] == [(0.0, 1.0), (1.0, 2.0)]
+    assert [word.prob for word in segment.words] == [pytest.approx(0.5), pytest.approx(0.5)]
+
+
+def test_latin_tokens_are_not_touched_by_the_repair() -> None:
+    result = parse_whisper_response(load_fixture("jfk"))
+
+    assert [word.text for word in result.segments[0].words] == [
+        "And",
+        "so",
+        "my",
+        "fellow",
+        "Americans",
+        ",",
+    ]

@@ -149,6 +149,73 @@ async def test_depth_deep_bypasses_dedup(make_harness: Callable[..., Harness]) -
     assert len(jobs) == 2
 
 
+_WATCH = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+_SHORTS = "https://youtube.com/shorts/dQw4w9WgXcQ?si=tracking"
+
+
+async def test_job_stores_the_canonical_youtube_url(make_harness: Callable[..., Harness]) -> None:
+    h = make_harness()
+    async with h.client() as client:
+        response = await client.post(
+            "/v1/jobs", headers=AUTH, json=_body("https://youtu.be/dQw4w9WgXcQ?t=42&si=abc#frag")
+        )
+        assert response.status_code == 202
+        job_id = uuid.UUID(response.json()["job_id"])
+        status = await client.get(f"/v1/jobs/{job_id}", headers=AUTH)
+
+    job = await h.repos.jobs.get(job_id)
+    assert job is not None
+    assert job.source_kind == "platform"
+    assert job.source_url == _WATCH
+    assert status.json()["source"] == {"kind": "platform", "url": _WATCH}
+
+
+async def test_shorts_url_deduplicates_a_done_watch_job(
+    make_harness: Callable[..., Harness],
+) -> None:
+    h = make_harness()
+    existing = await h.repos.jobs.create(
+        source_kind="platform", source_url=_WATCH, options=JobOptions().model_dump()
+    )
+    await h.repos.jobs.set_status(existing.id, "done")
+
+    async with h.client() as client:
+        deduplicated = await client.post("/v1/jobs", headers=AUTH, json=_body(_SHORTS))
+        deep = await client.post("/v1/jobs", headers=AUTH, json=_body(_SHORTS, depth="deep"))
+
+    assert deduplicated.status_code == 200
+    payload = deduplicated.json()
+    assert payload["job_id"] == str(existing.id)
+    assert payload["status"] == "done"
+    assert payload["deduplicated"] is True
+
+    assert deep.status_code == 202
+    assert deep.json()["deduplicated"] is False
+    assert deep.json()["job_id"] != str(existing.id)
+
+    jobs, _ = await h.repos.jobs.list()
+    assert len(jobs) == 2
+    assert await h.redis.xlen(h.keys.jobs_stream()) == 1
+
+
+async def test_dedup_falls_back_to_the_raw_url_of_a_legacy_row(
+    make_harness: Callable[..., Harness],
+) -> None:
+    h = make_harness()
+    legacy = "https://youtu.be/dQw4w9WgXcQ"
+    existing = await h.repos.jobs.create(
+        source_kind="platform", source_url=legacy, options=JobOptions().model_dump()
+    )
+    await h.repos.jobs.set_status(existing.id, "done")
+
+    async with h.client() as client:
+        response = await client.post("/v1/jobs", headers=AUTH, json=_body(legacy))
+
+    assert response.status_code == 200
+    assert response.json()["job_id"] == str(existing.id)
+    assert response.json()["deduplicated"] is True
+
+
 async def test_rate_limit_returns_429_with_retry_after(make_harness: Callable[..., Harness]) -> None:
     h = make_harness(settings_overrides={"CARACAL_RATE_LIMIT_PER_MIN": 1})
     async with h.client() as client:

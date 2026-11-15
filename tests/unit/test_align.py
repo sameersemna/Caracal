@@ -78,6 +78,24 @@ def test_segment_is_split_at_a_mid_segment_speaker_change_without_spacing_artefa
     assert (aligned.segments[1].start, aligned.segments[1].end) == (1.2, 1.7)
 
 
+def test_group_straddling_a_turn_boundary_gets_one_speaker_on_every_token() -> None:
+    words = [
+        _word("Tag", 0.9, 1.0, space_before=False),
+        _word("ess", 1.0, 1.2, space_before=False),
+        _word("chau", 1.2, 1.4, space_before=False),
+        _word("next", 1.5, 1.8, space_before=True),
+    ]
+    transcript = _transcript(_segment(0, words))
+
+    aligned = assign_speakers(transcript, [Turn(0.0, 1.0, "S1"), Turn(1.0, 2.0, "S2")])
+
+    # "Tagesschau" is one group whose midpoint (1.15 s) lies in S2's turn: the token at
+    # 0.9-1.0 s must not stay with S1, and the segment must not split inside the word.
+    assert _speakers(aligned) == ["S2", "S2", "S2", "S2"]
+    assert [segment.text for segment in aligned.segments] == ["Tagesschau next"]
+    assert [segment.speaker for segment in aligned.segments] == ["S2"]
+
+
 def test_speaker_stats_shares_sum_to_one_and_first_appearance_is_the_earliest_word() -> None:
     transcript = _transcript(
         _segment(

@@ -15,3 +15,6 @@
   (both name Lindsay McMahon), the JFK quote query, and both providers' invalid-key error responses (Brave 422 `SUBSCRIPTION_TOKEN_INVALID`, Exa 401).
 - `whisper/tagesschau_seg0.json` — first merged segment (14 whisper tokens, ~2.6 s) of a Caracal transcript of a "Tagesschau in 100 Sekunden"
   re-upload (YouTube OgDZqde_My4), recorded 2026-11-15. Shows sub-word tokens without a leading space (`Tag`+`ess`+`chau`, `Sek`+`unden`).
+- `whisper/zh_news40.json` (intro: hallucinated credits only) and `whisper/zh_speech40.json` (60–100 s: real speech) — real whisper.cpp (large-v3) `verbose_json` for the first 40 s of a Chinese news clip (YouTube HPVvfcTOSJg),
+  recorded 2026-11-15. Shows (a) CJK tokens without spaces, (b) multi-byte characters split into `U+FFFD` byte-fragment tokens
+  (`志` `�` `�` `者` for 志愿者) while the segment `text` is correct, (c) the classic hallucinated credit "中文字幕志愿者 李宗盛" at 0 s.

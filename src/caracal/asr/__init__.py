@@ -1,14 +1,20 @@
 """ASR data model and the whisper language table (docs/01 §3, docs/04 §4).
 
-Every model is a frozen dataclass with :meth:`to_dict` so a stage checkpoint can be written
-as JSON without a custom encoder. Whisper text and word text are stored stripped;
+Every persisted model is a frozen dataclass with :meth:`to_dict` so a stage checkpoint can
+be written as JSON without a custom encoder. Whisper text and word text are stored stripped;
 :attr:`Word.space_before` keeps whisper's leading-whitespace signal so a rebuilt segment can
 reproduce the original punctuation and contraction spacing.
+
+Whisper writes some scripts without spaces between words (Han, Kana, Thai, Lao, Khmer,
+Myanmar, Tibetan). There ``space_before`` is ``False`` for every token, so it cannot delimit
+words; every token that begins with a character of such a script is treated as one word
+instead (:func:`word_groups`), and the cue/line breaker can split between characters.
 """
 
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -166,6 +172,51 @@ def _is_closing_token(text: str) -> bool:
     return bool(text) and _CLOSING_TOKEN_RE.fullmatch(text) is not None
 
 
+# Scripts whisper writes without spaces between words, as inclusive code-point ranges.
+# Every token that starts with one of these characters is its own breakable word.
+_NO_SPACE_RANGES: tuple[tuple[int, int], ...] = (
+    (0x0E00, 0x0E7F),  # Thai
+    (0x0E80, 0x0EFF),  # Lao
+    (0x0F00, 0x0FFF),  # Tibetan
+    (0x1000, 0x109F),  # Myanmar
+    (0x1780, 0x17FF),  # Khmer
+    (0x2E80, 0x2FFF),  # CJK radicals supplement, Kangxi radicals
+    (0x3005, 0x3007),  # ideographic iteration/zero marks
+    (0x3040, 0x309F),  # Hiragana
+    (0x30A0, 0x30FF),  # Katakana
+    (0x3400, 0x4DBF),  # CJK unified ideographs extension A
+    (0x4E00, 0x9FFF),  # CJK unified ideographs
+    (0xF900, 0xFAFF),  # CJK compatibility ideographs
+    (0xFF66, 0xFF9D),  # halfwidth Katakana
+)
+
+#: whisper's replacement character: a multi-byte character that was split across tokens.
+REPLACEMENT_CHAR = "\ufffd"
+
+
+def is_no_space_char(char: str) -> bool:
+    """True for a character of a script that whisper writes without word spaces."""
+    code = ord(char)
+    return any(low <= code <= high for low, high in _NO_SPACE_RANGES)
+
+
+def _is_punctuation(text: str) -> bool:
+    """True when every character of ``text`` is punctuation (``。``, ``、``, ``:``, ``「``)."""
+    return bool(text) and all(unicodedata.category(char).startswith("P") for char in text)
+
+
+def _starts_no_space_word(word: Word) -> bool:
+    """True when a token opens a new word in a script written without spaces."""
+    if not word.text or word.text.startswith(REPLACEMENT_CHAR):
+        return False  # empty/fragment tokens never open a word
+    if _is_punctuation(word.text):
+        return False  # punctuation attaches to the word it closes
+    first = word.text[0]
+    if unicodedata.category(first).startswith("M"):
+        return False  # a combining mark (Thai tone, Tibetan vowel) belongs to the base before it
+    return is_no_space_char(first)
+
+
 def join_words(words: Sequence[Word]) -> str:
     """Rebuild text from words using whisper's spacing signal.
 
@@ -182,6 +233,75 @@ def join_words(words: Sequence[Word]) -> str:
             parts.append(" ")
         parts.append(word.text)
     return "".join(parts).strip()
+
+
+@dataclass(frozen=True, slots=True)
+class WordGroup:
+    """Consecutive whisper tokens that spell one word (docs/04 §10).
+
+    Whisper emits sub-word pieces: ``Tag`` + ``ess`` + ``chau`` and ``Sek`` + ``unden`` +
+    ``.``. A token whose raw text had no leading space (``space_before is False``) continues
+    the previous word, so grouping never breaks a word in the middle — except in scripts
+    written without spaces, where every token that begins with such a character is its own
+    word. ``tokens`` is the inclusive global index span of the group's tokens.
+    """
+
+    text: str
+    start: float
+    end: float
+    tokens: tuple[int, int]
+    speaker: str | None
+    space_before: bool
+
+
+def _majority_speaker(tokens: Sequence[Word]) -> str | None:
+    """The speaker most of the group's tokens carry; a tie goes to the first token's."""
+    counts: dict[str, int] = {}
+    for token in tokens:
+        if token.speaker is not None:
+            counts[token.speaker] = counts.get(token.speaker, 0) + 1
+    if not counts:
+        return None
+    best = max(counts.values())
+    leaders = [label for label, count in counts.items() if count == best]
+    first = tokens[0].speaker
+    if first is not None and first in leaders:
+        return first
+    return leaders[0]
+
+
+def _group(tokens: Sequence[Word], start_index: int) -> WordGroup:
+    return WordGroup(
+        text=join_words(tokens),
+        start=tokens[0].start,
+        end=tokens[-1].end,
+        tokens=(start_index, start_index + len(tokens) - 1),
+        speaker=_majority_speaker(tokens),
+        space_before=tokens[0].space_before,
+    )
+
+
+def word_groups(words: Sequence[Word]) -> list[WordGroup]:
+    """Group tokens into words using whisper's leading-whitespace signal (docs/04 §10).
+
+    A token with ``space_before is False`` continues the current group, which also attaches
+    detached punctuation (``,``, ``.``, ``."``) to the word it closes. In a script whispered
+    without spaces (Han, Kana, Thai …) a token that begins with such a character starts a new
+    group even though ``space_before`` is ``False``, so a cue can break between characters.
+    The first token of a sequence always starts a new group.
+    """
+    groups: list[WordGroup] = []
+    current: list[Word] = []
+    start_index = 0
+    for index, word in enumerate(words):
+        if current and (word.space_before or _starts_no_space_word(word)):
+            groups.append(_group(current, start_index))
+            current = []
+            start_index = index
+        current.append(word)
+    if current:
+        groups.append(_group(current, start_index))
+    return groups
 
 
 @dataclass(frozen=True, slots=True)
