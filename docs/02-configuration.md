@@ -25,6 +25,8 @@ No other module reads `os.environ` (enforced by `scripts/check_rules.py`). Secre
 | `LLM_MODEL` | str | `gemma4:31b` | primary model name **on the cloud** |
 | `LLM_LOCAL_PROXY_MODEL` | str | `gemma4:31b-cloud` | primary when no cloud key: the local daemon proxies this tag to the cloud |
 | `LLM_FALLBACK_MODEL` | str | `gemma4:31b` | **local** model (installed, runs on the GB10); used when the primary errors/times out twice in a row |
+| `LLM_ALLOWED_MODELS` | csv | derived | every model a route may use (refs: `cloud:<name>` = ollama.com with the key, `local:<name>` or bare `<name>` = local daemon; `-cloud` tags are proxied by the daemon). Owner: `gemma4:31b-cloud,local:gemma4:31b` |
+| `LLM_ROUTE_DEFAULT`, `LLM_ROUTE_PLAN`, `…_CONTENT`, `…_IDENTITY`, `…_VERIFY`, `…_TRANSLATE`, `…_REVIEW`, `…_QA` | csv chains | DEFAULT / derived | ordered fallback chain per task; unset task → DEFAULT; unset everything → today's behaviour (`LLM_MODEL` cloud, then `LLM_FALLBACK_MODEL` local) |
 | `LLM_TIMEOUT_S` | int | `180` | |
 | `LLM_KEEP_ALIVE` | str | `30m` | passed through to Ollama |
 | `CARACAL_LLM_CONCURRENCY` | int | `4` | |

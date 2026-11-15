@@ -18,3 +18,4 @@
 - `whisper/zh_news40.json` (intro: hallucinated credits only) and `whisper/zh_speech40.json` (60–100 s: real speech) — real whisper.cpp (large-v3) `verbose_json` for the first 40 s of a Chinese news clip (YouTube HPVvfcTOSJg),
   recorded 2026-11-15. Shows (a) CJK tokens without spaces, (b) multi-byte characters split into `U+FFFD` byte-fragment tokens
   (`志` `�` `�` `者` for 志愿者) while the segment `text` is correct, (c) the classic hallucinated credit "中文字幕志愿者 李宗盛" at 0 s.
+- `whisper/zh_full_loop.json` — real whisper.cpp output for the **whole** 93 s of HPVvfcTOSJg with default context: the credit hallucination repeated at 0/30/60/90 s (context loop). Recorded 2026-11-15.
