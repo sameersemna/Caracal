@@ -7,7 +7,8 @@ Rules:
 - Keep the subtitle register: short, plain, spoken language. No commentary, no explanations, no notes.
 - Do not add evidence ids, citations, labels or metadata to the translated text.
 - Names and place names: {name_rule}
-- Apply the same name rule to these names from the recording: {glossary}
+- Apply that same rule to these names from the recording: {glossary}. They appear in the source script; never copy one into the target text in a script the rule does not allow.
+- Write the whole translated unit in the script of the target language; never leave characters of the source script in the text.
 - Keep numbers, dates, units of measure and proper nouns unchanged unless they have a standard, widely used translation.
 - Do not add quotation marks, bidi control characters or other marks that are not in the source.
 - Context of the recording: {summary}

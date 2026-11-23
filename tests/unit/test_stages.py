@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import itertools
 import json
 import shutil
 import uuid
@@ -25,11 +26,14 @@ from tests.fakes.redis import RecordingRedis
 from tests.fakes.repo import make_fake_repos
 from tests.fakes.resolver import FakeResolver
 from tests.fakes.search import FakeProvider, make_hit
-from tests.fakes.whisper import FakeWhisper, load_fixture
+from tests.fakes.whisper import FakeWhisper, fixture_response, load_fixture
+from tests.fakes.whisper import json_response as whisper_json_response
 from tests.repo_contract import Repos
 
 from caracal.asr import Segment, Transcript, WhisperResult, Word
-from caracal.asr.whisper import WhisperClient
+from caracal.asr.merge import merge_chunks
+from caracal.asr.whisper import WhisperClient, parse_whisper_response
+from caracal.audio.chunking import Chunk
 from caracal.config import Settings
 from caracal.db.repo import JobRecord
 from caracal.errors import CaracalError, ErrorCode
@@ -465,6 +469,7 @@ async def test_transcribe_writes_transcript_segments_and_removes_chunks(
             "repetition": 0,
             "empty": 0,
             "hallucinated_credit": 0,
+            "credit_recovered_spans": 0,
         }
         chunk_langs = result.output["chunk_langs"]
         assert isinstance(chunk_langs, list)
@@ -2636,3 +2641,343 @@ async def test_transcribe_adds_each_chunk_duration_to_the_whisper_metric(
     assert result.status == "done"
     # The chunk is one second long even though the whisper fixture itself reports ~11 s.
     assert metrics.whisper_seconds == [1.0]
+
+
+# --- credit recovery and script leaks (card 48, docs/04 §4, §10) -----------------------
+
+
+def _zh_credit_payload() -> dict[str, object]:
+    """A chunk whose first 30 s are one credit segment, then two real speech segments."""
+    return {
+        "duration": 60.0,
+        "detected_language": "chinese",
+        "detected_language_probability": 0.99,
+        "language_probabilities": {"zh": 0.99},
+        "segments": [
+            {
+                "id": 0,
+                "start": 0.0,
+                "end": 30.0,
+                "text": "中文字幕志愿者 李宗盛",
+                "avg_logprob": -0.3,
+                "no_speech_prob": 0.35,
+            },
+            {
+                "id": 1,
+                "start": 40.0,
+                "end": 44.0,
+                "text": "有4人被殺 很多人受傷",
+                "avg_logprob": -0.2,
+                "no_speech_prob": 0.05,
+            },
+            {
+                "id": 2,
+                "start": 44.0,
+                "end": 48.0,
+                "text": "在坦桑尼亞 警方說",
+                "avg_logprob": -0.2,
+                "no_speech_prob": 0.05,
+            },
+        ],
+    }
+
+
+async def test_transcribe_drops_a_credit_even_when_every_window_is_pure_music(
+    make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    """Every recovery window returns the credit again: no credit text, no other change."""
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    await _make_wav(files.audio_wav, 60.0)
+    files.chunk(0).parent.mkdir(parents=True, exist_ok=True)
+    files.chunk(0).write_bytes(b"RIFF")
+    _write_output(
+        files,
+        Stage.CHUNK,
+        {"chunks": [{"index": 0, "start_s": 0.0, "end_s": 60.0, "path": "chunks/000.wav"}]},
+    )
+    _normalize_checkpoint(files, duration_s=60.0)
+
+    redis = RecordingRedis()
+    keys = Keys(PREFIX)
+    fake = FakeWhisper(
+        [
+            whisper_json_response(_zh_credit_payload()),
+            *(fixture_response("zh_intro_w0-10") for _window in range(4)),
+        ]
+    )
+    http = httpx.AsyncClient(transport=fake.transport())
+    client = WhisperClient(
+        settings.WHISPER_URL,
+        http,
+        timeout_s=5.0,
+        lock=lambda: whisper_lock(redis, keys),
+    )
+    try:
+        result = await stage_transcribe(
+            _context(
+                settings,
+                repos,
+                files,
+                whisper=client,
+                redis=redis,
+                keys=keys,
+                job_id=job.id,
+            )
+        )
+    finally:
+        await http.aclose()
+
+    assert result.status == "done"
+    stored = json.loads(files.transcript_json.read_text(encoding="utf-8"))
+    assert [(segment["start"], segment["end"], segment["text"]) for segment in stored["segments"]] == [
+        (40.0, 44.0, "有4人被殺 很多人受傷"),
+        (44.0, 48.0, "在坦桑尼亞 警方說"),
+    ]
+    assert "字幕志愿者" not in "".join(segment["text"] for segment in stored["segments"])
+    assert stored["dropped"]["credit_recovered_spans"] == 1
+    assert len(fake.requests) == 5
+    assert [fake.parts(index)["file"].filename for index in range(1, 5)] == [
+        "credit-000-0.000-10.000.wav",
+        "credit-000-9.000-19.000.wav",
+        "credit-000-18.000-28.000.wav",
+        "credit-000-20.000-30.000.wav",
+    ]
+    assert list((files.root / "transcribe").glob("*.wav")) == []
+
+
+async def test_transcribe_recovers_the_bahrain_story_under_the_real_zh_credit(
+    make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    """The measured 93.5 s clip: the 30 s credit hid 20 s of a Bahrain news story."""
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    await _make_wav(files.audio_wav, 93.6)
+    files.chunk(0).parent.mkdir(parents=True, exist_ok=True)
+    files.chunk(0).write_bytes(b"RIFF")
+    _write_output(
+        files,
+        Stage.CHUNK,
+        {
+            "chunks": [
+                {
+                    "index": 0,
+                    "start_s": 0.0,
+                    "end_s": 93.50675201416016,
+                    "path": "chunks/000.wav",
+                }
+            ]
+        },
+    )
+    _normalize_checkpoint(files, duration_s=93.50675201416016)
+
+    redis = RecordingRedis()
+    keys = Keys(PREFIX)
+    fake = FakeWhisper.from_fixtures(
+        "zh_intro_full",
+        "zh_intro_w0-10",
+        "zh_intro_w9-19",
+        "zh_intro_w18-28",
+        "zh_intro_w20-30",
+    )
+    http = httpx.AsyncClient(transport=fake.transport())
+    client = WhisperClient(
+        settings.WHISPER_URL,
+        http,
+        timeout_s=5.0,
+        lock=lambda: whisper_lock(redis, keys),
+    )
+    try:
+        result = await stage_transcribe(
+            _context(
+                settings,
+                repos,
+                files,
+                whisper=client,
+                redis=redis,
+                keys=keys,
+                job_id=job.id,
+            )
+        )
+    finally:
+        await http.aclose()
+
+    assert result.status == "done"
+    stored = json.loads(files.transcript_json.read_text(encoding="utf-8"))
+    segments = stored["segments"]
+    texts = [segment["text"] for segment in segments]
+    joined = "".join(texts)
+    assert "巴林" in joined
+    assert "麦纳麦" in joined
+    assert "珍珠廣場" in joined
+    assert "字幕志愿者" not in joined
+    assert "中文字幕" not in joined
+    assert joined.count("反對派說") == 1
+    assert segments[0]["start"] >= 9.0
+    assert all(segment["start"] < segment["end"] for segment in segments)
+    assert all(left["end"] <= right["start"] for left, right in itertools.pairwise(segments))
+    # Everything after the credit span must be what a plain transcribe of the same fixture
+    # produces — same words, same times; only the hidden first 30 s changed.
+    reference = merge_chunks(
+        [parse_whisper_response(load_fixture("zh_intro_full"))],
+        [Chunk(index=0, start_s=0.0, end_s=93.50675201416016)],
+        duration_s=93.50675201416016,
+    )
+    assert [
+        (segment["start"], segment["end"], segment["text"])
+        for segment in segments
+        if segment["start"] >= 30.0
+    ] == [
+        (segment.start, segment.end, segment.text) for segment in reference.segments if segment.start >= 30.0
+    ]
+    assert stored["dropped"]["credit_recovered_spans"] == 1
+    assert len(fake.requests) == 5
+    assert [fake.parts(index)["file"].filename for index in range(1, 5)] == [
+        "credit-000-0.000-10.000.wav",
+        "credit-000-9.000-19.000.wav",
+        "credit-000-18.000-28.000.wav",
+        "credit-000-20.000-30.000.wav",
+    ]
+    assert list((files.root / "transcribe").glob("*.wav")) == []
+
+
+async def test_transcribe_recovers_at_most_six_credit_spans_per_job(
+    make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path)
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    await _make_wav(files.audio_wav, 620.0)
+    files.chunk(0).parent.mkdir(parents=True, exist_ok=True)
+    files.chunk(0).write_bytes(b"RIFF")
+    _write_output(
+        files,
+        Stage.CHUNK,
+        {"chunks": [{"index": 0, "start_s": 0.0, "end_s": 700.0, "path": "chunks/000.wav"}]},
+    )
+    _normalize_checkpoint(files, duration_s=700.0)
+
+    credits = [
+        (100.0, "中文字幕志愿者 李宗盛"),
+        (180.0, "请不吝点赞"),
+        (260.0, "ご視聴ありがとうございました"),
+        (340.0, "untertitel der amara org community"),
+        (420.0, "sous titres réalisés par"),
+        (500.0, "thanks for watching"),
+        (580.0, "thank you for watching"),
+    ]
+    payload = {
+        "duration": 700.0,
+        "detected_language": "chinese",
+        "detected_language_probability": 0.99,
+        "language_probabilities": {"zh": 0.99},
+        "segments": [
+            {
+                "id": index,
+                "start": start,
+                "end": start + 10.0,
+                "text": text,
+                "avg_logprob": -0.3,
+                "no_speech_prob": 0.35,
+            }
+            for index, (start, text) in enumerate(credits)
+        ],
+    }
+    redis = RecordingRedis()
+    keys = Keys(PREFIX)
+    fake = FakeWhisper(
+        [
+            whisper_json_response(payload),
+            *(
+                whisper_json_response(
+                    {
+                        "duration": 10.0,
+                        "segments": [
+                            {
+                                "id": 0,
+                                "start": 0.0,
+                                "end": 1.0,
+                                "text": f"recovered speech {index}",
+                            }
+                        ],
+                    }
+                )
+                for index in range(6)
+            ),
+        ]
+    )
+    http = httpx.AsyncClient(transport=fake.transport())
+    client = WhisperClient(
+        settings.WHISPER_URL,
+        http,
+        timeout_s=5.0,
+        lock=lambda: whisper_lock(redis, keys),
+    )
+    try:
+        result = await stage_transcribe(
+            _context(
+                settings,
+                repos,
+                files,
+                whisper=client,
+                redis=redis,
+                keys=keys,
+                job_id=job.id,
+            )
+        )
+    finally:
+        await http.aclose()
+
+    assert result.status == "done"
+    stored = json.loads(files.transcript_json.read_text(encoding="utf-8"))
+    texts = [segment["text"] for segment in stored["segments"]]
+    assert stored["dropped"]["credit_recovered_spans"] == 6
+    assert [text for text in texts if text.startswith("recovered speech")] == [
+        f"recovered speech {index}" for index in range(6)
+    ]
+    assert "thank you for watching" in texts  # the seventh span is over budget
+    assert "中文字幕志愿者 李宗盛" not in texts
+    assert len(fake.requests) == 7
+
+
+async def test_stage_translate_counts_a_script_leak_that_survives_the_retry(
+    make_settings: MakeSettings, tmp_path: Path
+) -> None:
+    settings = make_settings(CARACAL_DATA_DIR=tmp_path, CARACAL_DEFAULT_TARGET_LANGS=["de"])
+    repos = make_fake_repos()
+    job = await _create_job(repos)
+    files = JobFiles(tmp_path, job.id)
+    files.ensure()
+    transcript = _transcript(["在坦桑尼亞 警方說"])
+    files.write_json(files.transcript_json, transcript.to_dict())
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        user = next(message for message in body["messages"] if message["role"] == "user")
+        payload = json.loads(user["content"])
+        return json_response(
+            {"cues": [{"i": cue["i"], "text": "In 坦桑尼亞, police said"} for cue in payload["cues"]]}
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    llm = LLMClient(settings, http)
+    try:
+        result = await stage_translate(_context(settings, repos, files, llm=llm, job_id=job.id))
+    finally:
+        await http.aclose()
+
+    assert result.status == "done"
+    langs = result.output["langs"]
+    assert isinstance(langs, dict)
+    entry = langs["de"]
+    assert " ".join(" ".join(cue["lines"]) for cue in entry["cues"]) == "In 坦桑尼亞, police said"
+    assert entry["script_leaks"] == 1
+    assert entry["failed_units"] == 0

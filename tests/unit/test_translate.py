@@ -13,9 +13,12 @@ from tests.fakes.ollama import json_response
 
 from caracal.analysis.translate import (
     TranslationUnit,
+    has_script_leak,
     is_valid_target_lang,
+    name_rule,
     redistribute,
     resolve_target_langs,
+    script_of_text,
     segment_token_starts,
     translate_units,
     units_from_cues,
@@ -525,3 +528,121 @@ async def test_translate_calls_use_the_translate_route(make_settings: MakeSettin
     assert translated == ["Vor ein paar Jahren"]
     assert failed == 0
     assert [body["model"] for body in bodies] == ["tr-model"]
+
+
+# --- names follow the target script (card 48, docs/04 §10) -----------------------------
+
+_LATIN_KEEP = "exactly as written in the source"
+
+
+@pytest.mark.parametrize(
+    ("source_text", "target", "wanted", "unwanted"),
+    [
+        ("在坦桑尼亞 警方說", "en", "standard romanisation", _LATIN_KEEP),
+        ("قبل بضع سنوات", "en", "standard romanisation", _LATIN_KEEP),
+        ("A few years ago", "de", _LATIN_KEEP, "conventional form used in the target script"),
+        ("A few years ago", "ar", "conventional form used in the target script", "exactly as written"),
+        ("Vor ein paar Jahren", "en", _LATIN_KEEP, "standard romanisation"),
+    ],
+)
+def test_name_rule_is_chosen_from_the_source_and_target_script(
+    source_text: str, target: str, wanted: str, unwanted: str
+) -> None:
+    rule = name_rule(target, script_of_text(source_text))
+
+    assert wanted in rule
+    assert unwanted not in rule
+
+
+def test_script_of_text_reads_the_units_not_a_language_code() -> None:
+    assert script_of_text("在坦桑尼亞 警方說") == "han"
+    assert script_of_text("قبل بضع سنوات") == "arabic"
+    assert script_of_text("Vor ein paar Jahren") == "latin"
+    assert script_of_text("12 °C costs 5 euros") == "latin"
+
+
+def test_digits_punctuation_and_symbols_are_never_a_script_leak() -> None:
+    assert not has_script_leak("It is 12 °C; pay €5.")
+    assert not has_script_leak("Tanzania - Dar es Salaam - ISS")
+    assert has_script_leak("In 坦桑尼亞, police said")
+    assert has_script_leak("В Москве")  # noqa: RUF001 - Cyrillic sample
+
+
+async def _translate_result(
+    settings: Settings,
+    units: Sequence[TranslationUnit],
+    handler: Callable[[httpx.Request], httpx.Response],
+    *,
+    lang: str,
+) -> tuple[Any, list[dict[str, Any]]]:
+    bodies: list[dict[str, Any]] = []
+
+    def recording(request: httpx.Request) -> httpx.Response:
+        request.read()
+        bodies.append(json.loads(request.content))
+        return handler(request)
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(recording))
+    llm = LLMClient(settings, http, sleep=_no_sleep)
+    try:
+        result = await translate_units(
+            units,
+            lang,
+            glossary=["李宗盛"],
+            summary="A news bulletin.",
+            llm=llm,
+        )
+    finally:
+        await http.aclose()
+    return result, bodies
+
+
+async def test_a_leaked_name_is_retried_and_the_latin_translation_wins(
+    make_settings: MakeSettings,
+) -> None:
+    settings = make_settings()
+    units = [_unit([_cue(1, "在坦桑尼亞 警方說")])]
+    calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        text = "In 坦桑尼亞, police said" if calls["count"] == 1 else "In Tanzania, police said"
+        return json_response({"cues": [{"i": 0, "text": text}]})
+
+    result, bodies = await _translate_result(settings, units, handler, lang="en")
+
+    assert list(result) == ["In Tanzania, police said"]
+    assert result.script_leaks == 0
+    assert result.failed_units == 0
+    assert len(bodies) == 2
+
+
+async def test_a_unit_that_keeps_leaking_is_kept_and_counted(make_settings: MakeSettings) -> None:
+    """Never the source text, never dropped: the leak is kept and counted, after one retry."""
+    settings = make_settings()
+    units = [_unit([_cue(1, "在坦桑尼亞 警方說")])]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return json_response({"cues": [{"i": 0, "text": "In 坦桑尼亞, police said"}]})
+
+    result, bodies = await _translate_result(settings, units, handler, lang="en")
+
+    assert list(result) == ["In 坦桑尼亞, police said"]
+    assert result.script_leaks == 1
+    assert result.failed_units == 0
+    assert len(bodies) == 4  # batch, batch retry, per-unit, per-unit retry
+    assert "Write every name in the Latin script." in bodies[-1]["messages"][0]["content"]
+
+
+async def test_a_non_latin_target_is_not_checked_for_script_leaks(make_settings: MakeSettings) -> None:
+    settings = make_settings()
+    units = [_unit([_cue(1, "A few years ago")])]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return json_response({"cues": [{"i": 0, "text": "几年以前"}]})
+
+    result, bodies = await _translate_result(settings, units, handler, lang="zh")
+
+    assert list(result) == ["几年以前"]
+    assert result.script_leaks == 0
+    assert len(bodies) == 1
