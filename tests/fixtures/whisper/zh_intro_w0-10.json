@@ -1,0 +1,141 @@
+{
+ "task": "transcribe",
+ "language": "chinese",
+ "duration": 10.0,
+ "text": "中文字幕志愿者 李宗盛\n",
+ "segments": [
+  {
+   "id": 0,
+   "text": "中文字幕志愿者 李宗盛",
+   "start": 0.0,
+   "end": 10.0,
+   "tokens": [
+    5975,
+    17174,
+    22381,
+    40211,
+    44700,
+    4820,
+    123,
+    12444,
+    220,
+    31206,
+    2415,
+    245,
+    5419,
+    249
+   ],
+   "words": [
+    {
+     "word": "中",
+     "start": 0.08,
+     "end": 1.42,
+     "t_dtw": -1,
+     "probability": 0.5008430480957031
+    },
+    {
+     "word": "文",
+     "start": 1.42,
+     "end": 2.64,
+     "t_dtw": -1,
+     "probability": 0.6243033409118652
+    },
+    {
+     "word": "字",
+     "start": 2.81,
+     "end": 4.26,
+     "t_dtw": -1,
+     "probability": 0.996412992477417
+    },
+    {
+     "word": "幕",
+     "start": 4.26,
+     "end": 5.68,
+     "t_dtw": -1,
+     "probability": 0.9998092651367188
+    },
+    {
+     "word": "志",
+     "start": 5.7,
+     "end": 7.1000000000000005,
+     "t_dtw": -1,
+     "probability": 0.2374938577413559
+    },
+    {
+     "word": "�",
+     "start": 7.1000000000000005,
+     "end": 7.97,
+     "t_dtw": -1,
+     "probability": 0.9990143775939941
+    },
+    {
+     "word": "�",
+     "start": 8.06,
+     "end": 8.52,
+     "t_dtw": -1,
+     "probability": 0.9999198913574219
+    },
+    {
+     "word": "者",
+     "start": 8.52,
+     "end": 9.99,
+     "t_dtw": -1,
+     "probability": 0.9995309114456177
+    },
+    {
+     "word": " ",
+     "start": 9.99,
+     "end": 9.99,
+     "t_dtw": -1,
+     "probability": 0.9224563837051392
+    },
+    {
+     "word": "李",
+     "start": 9.99,
+     "end": 9.99,
+     "t_dtw": -1,
+     "probability": 0.5644022226333618
+    },
+    {
+     "word": "�",
+     "start": 9.99,
+     "end": 9.99,
+     "t_dtw": -1,
+     "probability": 0.7805905938148499
+    },
+    {
+     "word": "�",
+     "start": 9.99,
+     "end": 9.99,
+     "t_dtw": -1,
+     "probability": 0.9992602467536926
+    },
+    {
+     "word": "�",
+     "start": 9.99,
+     "end": 9.99,
+     "t_dtw": -1,
+     "probability": 0.9977537393569946
+    },
+    {
+     "word": "�",
+     "start": 9.99,
+     "end": 9.99,
+     "t_dtw": -1,
+     "probability": 0.9983172416687012
+    }
+   ],
+   "temperature": 0.0,
+   "avg_logprob": -0.2194122076034546,
+   "no_speech_prob": 0.05711862072348595
+  }
+ ],
+ "detected_language": "chinese",
+ "detected_language_probability": 0.9885289669036865,
+ "language_probabilities": {
+  "en": 0.004990780260413885,
+  "zh": 0.9885289669036865,
+  "ko": 0.002022977452725172,
+  "ja": 0.0010581610258668661
+ }
+}

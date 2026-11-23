@@ -106,6 +106,13 @@ The LLM call (prompt `plan.md`) receives title, description excerpt, first ~3 mi
   renumber segment ids from 0. Keep per-segment `avg_logprob`, `no_speech_prob`; drop segments with
   `no_speech_prob > 0.8 and avg_logprob < -1.0` (hallucinated silence text) and record the count.
 - Hallucination filter: drop segments whose normalised text repeats the previous segment ≥3 times in a row.
+- **Credit recovery** (measured 2026-11-23, verdict 48): whisper decodes in 30 s windows; a window that *opens* with music
+  (BBC Chinese clip: ~10 s jingle, then a 20 s Bahrain story) comes back as **one** credit segment spanning the whole window
+  (`0.0–30.0 中文字幕志愿者 李宗盛`). Dropping it silently deletes the speech under it. So before merging, every credit segment
+  (`is_hallucinated_credit`) **longer than 8 s** is replaced by re-transcribing its span in **10 s windows with 1 s overlap**
+  (starts `s, s+9, …` while `start + 10 < e`, final window `[max(s, e−10), e]`); the sub-window results are merged with the
+  normal overlap/midpoint rule and filtered like everything else (the pure-music sub-window returns the credit again and is
+  dropped). Budget: ≤ 6 recovered spans per job; counted as `dropped.credit_recovered_spans` / words recovered in the log.
 - `language_spans`: per chunk detected language + per-segment re-check: when a chunk's
   `detected_language_probability < 0.6` and duration > 60 s, re-transcribe 30 s windows to find spans
   (max 6 extra calls per job). Output `languages[]` with shares.
@@ -201,7 +208,14 @@ previous word (`Tag`+`ess`+`chau` = "Tagesschau"; 216 such tokens in a 2-min Ger
   (max 4 cues / 200 chars). Batches of ≈ 25 units per call (`translate.md`, json mode), input `[{i, text}]`, output `[{i, text}]`; the
   set of `i` must match exactly (measured 4/4 index-exact for 35 cues, de and ar, both modes) — on mismatch retry the batch once, then
   per-unit calls. The translated unit is redistributed over its source cues' time spans at word boundaries, proportionally to the source
-  cues' character counts, then re-wrapped (≤ 42 chars × 2 lines). Pass the one-line summary + a glossary of entity names (kept verbatim).
+  cues' character counts, then re-wrapped (≤ 42 chars × 2 lines). Pass the one-line summary + a glossary of entity names.
+- **Names follow the target script** (measured 2026-11-23, verdict 48: zh→en produced "In 坦桑尼亞, police said", "the 国际空间站" —
+  the old Latin rule said "keep exactly as written in the source, in the Latin script", a contradiction for a non-Latin source).
+  Rule by (source script, target script): same script → keep as written; different script → the conventional target-language form
+  (exonym: Tanzania, Dar es Salaam, International Space Station, European Space Agency), else a standard romanisation (pinyin,
+  Hepburn, …). **Script-leak check:** a translated unit for a Latin-script target that still contains Han/Kana/Hangul/Thai/Arabic/
+  Hebrew/Cyrillic/Devanagari letters is invalid → the batch is retried once, then per-unit; a unit still leaking after its per-unit
+  retry is kept (never dropped) and counted as `script_leaks` in the translate stage output.
 - Cue segmentation (`subtitles/segmenter.py`): from word timestamps; break at sentence end, then comma, then speaker
   change (always break on speaker change), max 42 chars/line, 2 lines, 1.0–7.0 s, ≥ 0.08 s gap. Optional speaker
   prefix `"- "` when two speakers share a cue is not allowed — never mix speakers in one cue.
