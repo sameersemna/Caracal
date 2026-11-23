@@ -124,9 +124,9 @@ _LATIN_SAME_SCRIPT_RULE: Final = (
 _SAME_SCRIPT_RULE: Final = "keep every name and place name exactly as written in the source."
 _LOCALISED_LATIN_RULE: Final = (
     "write every name and place name in the conventional form used in {language} when one "
-    "exists (an exonym such as Tanzania for 坦桑尼亞, Dar es Salaam for 达蕾斯萨拉姆, or the "
-    "International Space Station for 国际空间站); otherwise use a standard romanisation such as "
-    "pinyin or Hepburn. Never leave the name in the non-Latin source script."
+    "exists (an exonym such as Moscow for Москва, Tokyo for 東京, or Cairo for القاهرة); "
+    "otherwise use a standard romanisation such as pinyin or Hepburn. Never leave the name "
+    "in the non-Latin source script."
 )
 _LOCALISED_SCRIPT_RULE: Final = (
     "write names and place names in the conventional form used in the target script when one "
@@ -186,8 +186,8 @@ def name_rule(target_lang: str, source_script: Script = "latin") -> str:
     Same script: the name is already in the reader's script, so it stays exactly as written.
     Different script: the conventional target-language form (exonym), else a standard
     romanisation or transliteration, so a zh→en line never mixes Han characters into English
-    (verdict 48: "In 坦桑尼亞" came from the old rule that demanded the Latin script while also
-    demanding the source spelling).
+    (verdict 48: a Han name stayed inside an English sentence because the old rule demanded
+    the Latin script while also demanding the source spelling).
     """
     target = target_script(target_lang)
     if target == source_script:

@@ -47,7 +47,13 @@ from caracal.asr import (
 )
 from caracal.asr.captions import CaptionWord, caption_agreement, parse_vtt
 from caracal.asr.langid import languages_summary, refine_spans
-from caracal.asr.merge import credit_spans, drop_window_credits, merge_chunks, recovery_windows
+from caracal.asr.merge import (
+    credit_spans,
+    drop_window_credits,
+    merge_chunks,
+    recovery_windows,
+    stitch_windows,
+)
 from caracal.asr.whisper import WhisperClient
 from caracal.audio import ffmpeg
 from caracal.audio.chunking import Chunk, plan_chunks
@@ -577,6 +583,23 @@ def _region_result(
     return replace(result, segments=tuple(segments))
 
 
+def _span_local(segment: Segment, *, origin: float, index: int) -> Segment:
+    """Express a stitched (absolute) segment in the credit span's local time.
+
+    The stitched span is merged as one chunk starting at ``origin``; :func:`merge_chunks`
+    shifts it back to absolute time, so the segment and its words must be local to ``origin``.
+    """
+    return replace(
+        segment,
+        id=index,
+        start=segment.start - origin,
+        end=segment.end - origin,
+        words=tuple(
+            replace(word, start=word.start - origin, end=word.end - origin) for word in segment.words
+        ),
+    )
+
+
 def _transcript_text(transcript: Transcript) -> str:
     lines: list[str] = []
     for segment in transcript.segments:
@@ -646,12 +669,15 @@ async def stage_transcribe(ctx: StageContext) -> StageResult:
     )
 
     # ``merged_results``/``expanded`` cover the same timeline as ``chunks``; a chunk whose
-    # credit segment is recovered is split into the pieces around the span plus the windows,
-    # so the unchanged words keep the chunk's own times and the standard merge rule applies.
+    # credit segment is recovered is split into the region before the span, the span itself
+    # and the region after it. The span's windows are stitched at segment level into ONE
+    # piece whose chunk is exactly the span, so the neighbouring regions (which merely touch
+    # it) get no midpoint cut and no seam loses or duplicates a word (docs/04 §4, verdict 48).
     # ``chunk_results`` stays one result per chunk for ``chunk_langs``.
     chunk_results: list[WhisperResult] = []
     merged_results: list[WhisperResult] = []
     expanded: list[Chunk] = []
+    stitched_pieces: set[int] = set()
     recovered_spans = 0
     for position, (spec, chunk) in enumerate(zip(specs, chunks, strict=True), start=1):
         if await ctx.cancelled():
@@ -745,9 +771,18 @@ async def stage_transcribe(ctx: StageContext) -> StageResult:
                         )
                     )
                     expanded.append(Chunk(index=len(expanded), start_s=region_start, end_s=region_end))
-                for window_chunk, _window in per_span[span_index]:
-                    merged_results.append(kept_windows[id(window_chunk)])
-                    expanded.append(replace(window_chunk, index=len(expanded)))
+                span_pieces = per_span[span_index]
+                stitched = stitch_windows(
+                    [kept_windows[id(window_chunk)] for window_chunk, _window in span_pieces],
+                    [window_chunk for window_chunk, _window in span_pieces],
+                )
+                local = tuple(
+                    _span_local(segment, origin=span_start, index=segment_index)
+                    for segment_index, segment in enumerate(stitched)
+                )
+                stitched_pieces.add(len(expanded))
+                merged_results.append(replace(kept_windows[id(span_pieces[0][0])], segments=local))
+                expanded.append(Chunk(index=len(expanded), start_s=span_start, end_s=span_end))
                 cursor = max(cursor, span_end)
             if cursor < chunk.end_s:
                 merged_results.append(
@@ -770,6 +805,7 @@ async def stage_transcribe(ctx: StageContext) -> StageResult:
         expanded,
         duration_s=duration_s,
         silences=silences,
+        preserve_bounds=stitched_pieces,
     )
     transcript = replace(
         transcript,

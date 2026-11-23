@@ -646,3 +646,32 @@ async def test_a_non_latin_target_is_not_checked_for_script_leaks(make_settings:
     assert list(result) == ["几年以前"]
     assert result.script_leaks == 0
     assert len(bodies) == 1
+
+
+async def test_zh_to_en_system_prompt_uses_neutral_name_examples(
+    make_settings: MakeSettings,
+) -> None:
+    """The prompt must not teach the test clip's own answers (docs/04 §10, verdict 48 fix 2)."""
+    settings = make_settings()
+    units = [_unit([_cue(1, "在坦桑尼亞 警方說")])]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return json_response({"cues": [{"i": 0, "text": "Police said."}]})
+
+    _result, bodies = await _translate_result(settings, units, handler, lang="en")
+
+    system = bodies[0]["messages"][0]["content"]
+    forbidden = [
+        "坦桑尼亞",
+        "坦桑尼亚",
+        "达蕾斯萨拉姆",
+        "達蕾斯薩拉姆",
+        "国际空间站",
+        "Tanzania",
+        "Dar es Salaam",
+        "International Space Station",
+    ]
+    assert [token for token in forbidden if token in system] == []
+    assert "Moscow" in system
+    assert "Tokyo" in system
+    assert "Cairo" in system

@@ -2819,9 +2819,25 @@ async def test_transcribe_recovers_the_bahrain_story_under_the_real_zh_credit(
     assert "字幕志愿者" not in joined
     assert "中文字幕" not in joined
     assert joined.count("反對派說") == 1
+    assert "切换了警方的手机" not in joined
     assert segments[0]["start"] >= 9.0
     assert all(segment["start"] < segment["end"] for segment in segments)
     assert all(left["end"] <= right["start"] for left, right in itertools.pairwise(segments))
+    # The recovered span is stitched at segment level: exactly these cues, once each, whole.
+    recovered = [segment for segment in segments if segment["start"] < 30.0]
+    assert [
+        (round(segment["start"], 2), round(segment["end"], 2), segment["text"]) for segment in recovered
+    ] == [
+        (9.0, 11.78, "政府运动浪潮继续在巴林发酵"),
+        (11.8, 15.3, "在首都麦纳麦街头"),
+        (15.31, 18.66, "警方晚上使用催泪气体和橡胶子弹"),
+        (18.66, 20.0, "企圖驅散示威者之後"),
+        (20.0, 22.0, "出現了暴力場面"),
+        (22.0, 24.0, "反對派說"),
+        (24.0, 26.0, "保安部隊開入示威者"),
+        (26.0, 29.0, "在市中心珍珠廣場的營地"),
+        (29.0, 30.0, "企圖拆毀帳篷"),
+    ]
     # Everything after the credit span must be what a plain transcribe of the same fixture
     # produces — same words, same times; only the hidden first 30 s changed.
     reference = merge_chunks(
