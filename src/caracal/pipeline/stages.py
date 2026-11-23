@@ -13,8 +13,8 @@ import os
 import shutil
 import threading
 import time
-from collections.abc import Awaitable, Callable
-from dataclasses import asdict, dataclass, field
+from collections.abc import Awaitable, Callable, Collection
+from dataclasses import asdict, dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, Protocol, cast
@@ -43,10 +43,17 @@ from caracal.asr import (
     Transcript,
     WhisperResult,
     Word,
+    join_words,
 )
 from caracal.asr.captions import CaptionWord, caption_agreement, parse_vtt
 from caracal.asr.langid import languages_summary, refine_spans
-from caracal.asr.merge import merge_chunks
+from caracal.asr.merge import (
+    credit_spans,
+    drop_window_credits,
+    merge_chunks,
+    recovery_windows,
+    stitch_windows,
+)
 from caracal.asr.whisper import WhisperClient
 from caracal.audio import ffmpeg
 from caracal.audio.chunking import Chunk, plan_chunks
@@ -506,6 +513,93 @@ def _spec_chunk(spec: dict[str, object]) -> Chunk:
     )
 
 
+#: Credit recovery is bounded per job: each span costs at least one whisper call (docs/04 §4).
+_CREDIT_RECOVERY_BUDGET_SPANS = 6
+
+
+def _clip_window_result(result: WhisperResult, length: float) -> WhisperResult:
+    """Trim a recovery window's words to ``[0, length]``, the credit span in window-local time.
+
+    Whisper may time a word a hair past the window end; the credit span is what was asked for,
+    so a word is clipped to it and a segment that loses words is rebuilt from the kept ones.
+    """
+    segments: list[Segment] = []
+    for segment in result.segments:
+        words = tuple(
+            replace(word, start=min(word.start, length), end=min(word.end, length))
+            for word in segment.words
+            if word.start < length
+        )
+        if not words:
+            if segment.words:
+                continue
+            segments.append(segment)
+            continue
+        segments.append(
+            replace(
+                segment,
+                start=words[0].start,
+                end=words[-1].end,
+                words=words,
+                text=segment.text if len(words) == len(segment.words) else join_words(words),
+            )
+        )
+    return replace(result, segments=tuple(segments))
+
+
+def _region_result(
+    result: WhisperResult,
+    *,
+    origin: float,
+    start: float,
+    end: float,
+    skip: Collection[int],
+) -> WhisperResult:
+    """One span between credit spans: the chunk's segments whose midpoint falls in it.
+
+    ``result`` times are local to ``origin`` (the original chunk start); the returned result
+    is local to ``start`` so it can be merged as its own chunk. ``skip`` holds the indices of
+    the recovered credit segments, which the windows replace.
+    """
+    segments: list[Segment] = []
+    for index, segment in enumerate(result.segments):
+        if index in skip:
+            continue
+        absolute_start = segment.start + origin
+        absolute_end = segment.end + origin
+        if not start <= (absolute_start + absolute_end) / 2.0 < end:
+            continue
+        segments.append(
+            replace(
+                segment,
+                start=absolute_start - start,
+                end=absolute_end - start,
+                words=tuple(
+                    replace(word, start=word.start + origin - start, end=word.end + origin - start)
+                    for word in segment.words
+                ),
+            )
+        )
+    return replace(result, segments=tuple(segments))
+
+
+def _span_local(segment: Segment, *, origin: float, index: int) -> Segment:
+    """Express a stitched (absolute) segment in the credit span's local time.
+
+    The stitched span is merged as one chunk starting at ``origin``; :func:`merge_chunks`
+    shifts it back to absolute time, so the segment and its words must be local to ``origin``.
+    """
+    return replace(
+        segment,
+        id=index,
+        start=segment.start - origin,
+        end=segment.end - origin,
+        words=tuple(
+            replace(word, start=word.start - origin, end=word.end - origin) for word in segment.words
+        ),
+    )
+
+
 def _transcript_text(transcript: Transcript) -> str:
     lines: list[str] = []
     for segment in transcript.segments:
@@ -570,26 +664,152 @@ async def stage_transcribe(ctx: StageContext) -> StageResult:
                 raise _malformed("normalize")
             silences.append((_as_number(pair[0], "normalize"), _as_number(pair[1], "normalize")))
     whisper = _require_whisper(ctx)
+    audio_duration = (
+        duration_s if duration_s is not None else max((chunk.end_s for chunk in chunks), default=0.0)
+    )
 
-    results: list[WhisperResult] = []
+    # ``merged_results``/``expanded`` cover the same timeline as ``chunks``; a chunk whose
+    # credit segment is recovered is split into the region before the span, the span itself
+    # and the region after it. The span's windows are stitched at segment level into ONE
+    # piece whose chunk is exactly the span, so the neighbouring regions (which merely touch
+    # it) get no midpoint cut and no seam loses or duplicates a word (docs/04 §4, verdict 48).
+    # ``chunk_results`` stays one result per chunk for ``chunk_langs``.
+    chunk_results: list[WhisperResult] = []
+    merged_results: list[WhisperResult] = []
+    expanded: list[Chunk] = []
+    stitched_pieces: set[int] = set()
+    recovered_spans = 0
     for position, (spec, chunk) in enumerate(zip(specs, chunks, strict=True), start=1):
         if await ctx.cancelled():
             # The runner sees the cancel flag at the next stage boundary and settles the job
             # as ``cancelled``; no partial transcript is written (docs/05 §2).
             return StageResult(status="skipped", reason="cancelled")
         chunk_path = _job_path(ctx, _as_str(spec.get("path"), "chunk"))
-        results.append(await whisper.transcribe(chunk_path, language=ctx.options.language))
+        result = await whisper.transcribe(chunk_path, language=ctx.options.language)
+        chunk_results.append(result)
         await _record_whisper_seconds(ctx, chunk)
+
+        budget = max(0, _CREDIT_RECOVERY_BUDGET_SPANS - recovered_spans)
+        spans = credit_spans(result, chunk)[:budget]
+        if not spans:
+            merged_results.append(result)
+            expanded.append(chunk)
+        else:
+            recovered_spans += len(spans)
+            window_results: list[WhisperResult] = []
+            window_chunks: list[Chunk] = []
+            per_span: list[list[tuple[Chunk, WhisperResult]]] = []
+            for span_start, span_end in spans:
+                pieces: list[tuple[Chunk, WhisperResult]] = []
+                for window_start, window_end in recovery_windows(span_start, span_end):
+                    if await ctx.cancelled():
+                        return StageResult(status="skipped", reason="cancelled")
+                    window_path = (
+                        ctx.files.root
+                        / "transcribe"
+                        / (f"credit-{chunk.index:03d}-{window_start:.3f}-{window_end:.3f}.wav")
+                    )
+                    await ffmpeg.cut(ctx.files.audio_wav, window_path, window_start, window_end)
+                    try:
+                        window = await whisper.transcribe(window_path, language=ctx.options.language)
+                    finally:
+                        window_path.unlink(missing_ok=True)
+                    window_chunk = Chunk(
+                        index=0,
+                        start_s=window_start,
+                        end_s=window_end,
+                    )
+                    await _record_whisper_seconds(ctx, window_chunk)
+                    window = _clip_window_result(window, window_end - window_start)
+                    window_chunks.append(window_chunk)
+                    window_results.append(window)
+                    pieces.append((window_chunk, window))
+                per_span.append(pieces)
+                logger.info(
+                    "transcribe.credit_recovered",
+                    extra={
+                        "job_id": str(ctx.job_id),
+                        "span": {"start_s": span_start, "end_s": span_end},
+                        "segments": sum(len(window.segments) for _chunk, window in pieces),
+                    },
+                )
+
+            # Judge the windows' credits whole, spanning all windows of this chunk, so a
+            # pure-music window is dropped before the overlap rule can trim its text.
+            filtered = drop_window_credits(
+                window_results,
+                window_chunks,
+                duration_s=audio_duration,
+                silences=silences,
+            )
+            kept_windows = {
+                id(window_chunk): window for window_chunk, window in zip(window_chunks, filtered, strict=True)
+            }
+            # ``credit_spans`` snaps to 0.1 s, so the same expression finds the recovered
+            # segments again; only those are removed — the windows take their place.
+            span_set = set(spans)
+            skip = {
+                index
+                for index, segment in enumerate(result.segments)
+                if (
+                    round(chunk.start_s + segment.start, 1),
+                    round(chunk.start_s + segment.end, 1),
+                )
+                in span_set
+            }
+            cursor = chunk.start_s
+            for span_index, (span_start, span_end) in enumerate(spans):
+                if span_start > cursor:
+                    region_start, region_end = cursor, span_start
+                    merged_results.append(
+                        _region_result(
+                            result,
+                            origin=chunk.start_s,
+                            start=region_start,
+                            end=region_end,
+                            skip=skip,
+                        )
+                    )
+                    expanded.append(Chunk(index=len(expanded), start_s=region_start, end_s=region_end))
+                span_pieces = per_span[span_index]
+                stitched = stitch_windows(
+                    [kept_windows[id(window_chunk)] for window_chunk, _window in span_pieces],
+                    [window_chunk for window_chunk, _window in span_pieces],
+                )
+                local = tuple(
+                    _span_local(segment, origin=span_start, index=segment_index)
+                    for segment_index, segment in enumerate(stitched)
+                )
+                stitched_pieces.add(len(expanded))
+                merged_results.append(replace(kept_windows[id(span_pieces[0][0])], segments=local))
+                expanded.append(Chunk(index=len(expanded), start_s=span_start, end_s=span_end))
+                cursor = max(cursor, span_end)
+            if cursor < chunk.end_s:
+                merged_results.append(
+                    _region_result(
+                        result,
+                        origin=chunk.start_s,
+                        start=cursor,
+                        end=chunk.end_s,
+                        skip=skip,
+                    )
+                )
+                expanded.append(Chunk(index=len(expanded), start_s=cursor, end_s=chunk.end_s))
         await ctx.progress(
             round(position / len(chunks) * 100, 1),
             f"transcribed chunk {position}/{len(chunks)}",
         )
 
     transcript = merge_chunks(
-        results,
-        chunks,
+        merged_results,
+        expanded,
         duration_s=duration_s,
         silences=silences,
+        preserve_bounds=stitched_pieces,
+    )
+    transcript = replace(
+        transcript,
+        dropped={**transcript.dropped, "credit_recovered_spans": recovered_spans},
     )
     _write_transcript(ctx, transcript)
     await ctx.repos.segments.replace_for_job(ctx.job_id, _segment_rows(ctx, transcript))
@@ -616,7 +836,7 @@ async def stage_transcribe(ctx: StageContext) -> StageResult:
                     "code": result.language_code,
                     "prob": result.language_prob,
                 }
-                for chunk, result in zip(chunks, results, strict=True)
+                for chunk, result in zip(chunks, chunk_results, strict=True)
             ],
         },
     )
@@ -1309,6 +1529,7 @@ async def stage_translate(ctx: StageContext) -> StageResult:
                 llm=ctx.llm,
             )
             failed_units = translated.failed_units if isinstance(translated, TranslatedUnits) else 0
+            script_leaks = translated.script_leaks if isinstance(translated, TranslatedUnits) else 0
             translated_cues: list[Cue] = []
             overlong_cues = 0
             for unit, text in zip(units, translated, strict=True):
@@ -1323,6 +1544,7 @@ async def stage_translate(ctx: StageContext) -> StageResult:
                 extra={"job_id": str(ctx.job_id), "lang": target, "code": exc.code.value},
             )
             failed_units = len(units)
+            script_leaks = 0
             overlong_cues = 0
             translated_cues = []
             for unit in units:
@@ -1333,6 +1555,7 @@ async def stage_translate(ctx: StageContext) -> StageResult:
         languages[target] = {
             "units": len(units),
             "failed_units": failed_units,
+            "script_leaks": script_leaks,
             "overlong_cues": overlong_cues,
             "duration_s": duration_s,
             "cues": _translated_cue_payload(translated_cues),
@@ -1344,6 +1567,7 @@ async def stage_translate(ctx: StageContext) -> StageResult:
                 "lang": target,
                 "units": len(units),
                 "failed_units": failed_units,
+                "script_leaks": script_leaks,
                 "overlong_cues": overlong_cues,
                 "duration_s": duration_s,
             },

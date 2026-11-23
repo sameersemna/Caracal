@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 import re
 from collections import Counter
@@ -11,7 +12,13 @@ import pytest
 from tests.fakes.whisper import load_fixture
 
 from caracal.asr import Segment, Transcript, WhisperResult, Word, join_words
-from caracal.asr.merge import merge_chunks
+from caracal.asr.merge import (
+    credit_spans,
+    drop_window_credits,
+    merge_chunks,
+    recovery_windows,
+    stitch_windows,
+)
 from caracal.asr.whisper import parse_whisper_response
 from caracal.audio.chunking import Chunk
 from caracal.errors import CaracalError, ErrorCode
@@ -517,3 +524,185 @@ def test_join_words_attaches_a_closing_quote_after_punctuation() -> None:
     ]
 
     assert join_words(words) == 'He said." Then'
+
+
+# --- credit recovery (card 48, docs/04 §4) ---------------------------------------------
+
+
+def test_credit_spans_of_the_real_zh_intro_is_the_whole_first_window() -> None:
+    """The measured clip: segment 0 is one credit spanning whisper's whole 30 s window."""
+    result = _real("zh_intro_full")
+
+    spans = credit_spans(result, Chunk(index=0, start_s=0.0, end_s=result.duration))
+
+    assert spans == [(0.0, 30.0)]
+
+
+def test_credit_spans_ignores_a_credit_shorter_than_eight_seconds() -> None:
+    result = _result((_segment(0, 10.0, 13.0, "中文字幕志愿者 李宗盛"),))
+
+    assert credit_spans(result, Chunk(index=0, start_s=0.0, end_s=20.0)) == []
+
+
+def test_credit_spans_shift_to_absolute_time_for_a_later_chunk() -> None:
+    result = _result((_segment(0, 0.0, 12.0, "Subtitles by the Amara.org community"),))
+
+    assert credit_spans(result, Chunk(index=1, start_s=60.0, end_s=72.0)) == [(60.0, 72.0)]
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "expected"),
+    [
+        (0.0, 30.0, [(0.0, 10.0), (9.0, 19.0), (18.0, 28.0), (20.0, 30.0)]),
+        (5.0, 12.0, [(5.0, 12.0)]),
+        (0.0, 10.0, [(0.0, 10.0)]),
+        (0.0, 19.0, [(0.0, 10.0), (9.0, 19.0)]),
+    ],
+)
+def test_recovery_windows_cover_the_span_with_ten_second_windows(
+    start: float, end: float, expected: list[tuple[float, float]]
+) -> None:
+    assert recovery_windows(start, end) == expected
+
+
+def test_drop_window_credits_drops_a_pure_music_window_whole() -> None:
+    """The credit is judged before the overlap rule can trim it to text that is no credit."""
+    credit = _segment(0, 0.0, 10.0, "中文字幕志愿者 李宗盛")
+    speech = _segment(0, 0.0, 2.0, "在首都麦纳麦街头")
+    chunks = [Chunk(index=0, start_s=0.0, end_s=10.0), Chunk(index=1, start_s=9.0, end_s=19.0)]
+
+    filtered = drop_window_credits(
+        [_result((credit,)), _result((speech,))],
+        chunks,
+        duration_s=93.5,
+    )
+
+    assert [segment.text for segment in filtered[0].segments] == []
+    assert [segment.text for segment in filtered[1].segments] == ["在首都麦纳麦街头"]
+
+
+def test_drop_window_credits_drops_a_credit_that_repeats_mid_file() -> None:
+    """Two windows returning the same credit are a decoding loop, wherever they sit."""
+    chunks = [Chunk(index=0, start_s=100.0, end_s=110.0), Chunk(index=1, start_s=109.0, end_s=119.0)]
+    results = [
+        _result((_segment(0, 0.0, 10.0, "中文字幕志愿者"),)),
+        _result((_segment(0, 0.0, 10.0, "中文字幕志愿者"),)),
+    ]
+
+    filtered = drop_window_credits(results, chunks, duration_s=600.0)
+
+    assert [segment for result in filtered for segment in result.segments] == []
+
+
+# --- segment-level stitching of recovery windows (card 49, docs/04 §4) ----------------
+
+_ZH_INTRO_WINDOWS: tuple[tuple[str, float, float], ...] = (
+    ("zh_intro_w0-10", 0.0, 10.0),
+    ("zh_intro_w9-19", 9.0, 19.0),
+    ("zh_intro_w18-28", 18.0, 28.0),
+    ("zh_intro_w20-30", 20.0, 30.0),
+)
+_ZH_INTRO_STITCHED_TEXTS = [
+    "政府运动浪潮继续在巴林发酵",
+    "在首都麦纳麦街头",
+    "警方晚上使用催泪气体和橡胶子弹",
+    "企圖驅散示威者之後",
+    "出現了暴力場面",
+    "反對派說",
+    "保安部隊開入示威者",
+    "在市中心珍珠廣場的營地",
+    "企圖拆毀帳篷",
+]
+
+
+def test_stitch_windows_keeps_the_real_recovered_story_once_in_order() -> None:
+    """Real windows: every word appears once; no midpoint cut loses 政府/弹/企圖 or repeats 說."""
+    results = [_real(name) for name, _start, _end in _ZH_INTRO_WINDOWS]
+    chunks = [
+        Chunk(index=index, start_s=start, end_s=end)
+        for index, (_name, start, end) in enumerate(_ZH_INTRO_WINDOWS)
+    ]
+    filtered = drop_window_credits(results, chunks, duration_s=93.50675201416016)
+
+    stitched = stitch_windows(filtered, chunks)
+
+    assert [segment.text for segment in stitched] == _ZH_INTRO_STITCHED_TEXTS
+    assert [round(segment.start, 2) for segment in stitched] == [
+        9.0,
+        11.8,
+        15.3,
+        18.66,
+        20.0,
+        22.0,
+        24.0,
+        26.0,
+        29.0,
+    ]
+    assert [round(segment.end, 2) for segment in stitched] == [
+        11.8,
+        15.3,
+        18.66,
+        20.0,
+        22.0,
+        24.0,
+        26.0,
+        29.0,
+        30.0,
+    ]
+    assert all(left.start < right.start for left, right in itertools.pairwise(stitched))
+    assert all(left.end <= right.start for left, right in itertools.pairwise(stitched))
+    assert [segment.id for segment in stitched] == list(range(len(stitched)))
+    # Window-local times are shifted to the source timeline for the words too.
+    assert stitched[0].words[0].start == 9.0
+    assert stitched[-1].words[-1].end == 30.0
+
+
+def test_stitch_windows_keeps_b_whole_from_its_start_when_a_is_empty() -> None:
+    """The pure-music window contributed nothing, so the seam is exactly B's start."""
+    chunks = [Chunk(index=0, start_s=0.0, end_s=10.0), Chunk(index=1, start_s=9.0, end_s=19.0)]
+
+    stitched = stitch_windows(
+        [_result(()), _result((_segment(0, 0.0, 2.0, "second window"),))],
+        chunks,
+    )
+
+    assert [(segment.start, segment.end, segment.text) for segment in stitched] == [
+        (9.0, 11.0, "second window")
+    ]
+
+
+def test_stitch_windows_seam_falls_back_to_b_start_when_a_touches_its_end() -> None:
+    """A window-tail segment is invented/truncated, so it neither sets the seam nor survives."""
+    chunks = [Chunk(index=0, start_s=0.0, end_s=10.0), Chunk(index=1, start_s=9.0, end_s=19.0)]
+
+    stitched = stitch_windows(
+        [
+            _result((_segment(0, 8.0, 10.0, "invented tail"),)),
+            _result((_segment(0, 0.0, 1.0, "real head"),)),
+        ],
+        chunks,
+    )
+
+    assert [(segment.start, segment.end, segment.text) for segment in stitched] == [(9.0, 10.0, "real head")]
+
+
+def test_stitch_windows_pulls_a_late_start_forward_without_trimming_words() -> None:
+    """Whisper times the same seam differently in A and B; B keeps its words, only its start moves."""
+    chunks = [Chunk(index=0, start_s=0.0, end_s=10.0), Chunk(index=1, start_s=9.0, end_s=19.0)]
+    first = _segment(0, 6.0, 9.5, "alpha", words=(_word("alpha", 6.0, 9.5),))
+    second = _segment(
+        0,
+        0.0,
+        2.0,
+        "be ta",
+        words=(_word("be", 0.0, 1.0), _word("ta", 1.0, 2.0)),
+    )
+
+    stitched = stitch_windows([_result((first,)), _result((second,))], chunks)
+
+    assert [(round(segment.start, 3), round(segment.end, 3), segment.text) for segment in stitched] == [
+        (6.0, 9.5, "alpha"),
+        (9.5, 11.0, "be ta"),
+    ]
+    assert [word.text for word in stitched[1].words] == ["be", "ta"]
+    assert [word.start for word in stitched[1].words] == [9.0, 10.0]

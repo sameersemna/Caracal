@@ -22,9 +22,10 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import unicodedata
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -54,60 +55,146 @@ _MAX_LINES: Final = 2
 #: Thai is included because its words run together just like Han/Kana/Hangul.
 _CHAR_BREAK_LANGS: Final = frozenset({"zh", "ja", "ko", "yue", "th"})
 
-#: Targets whose conventional written form is not the Latin script. Names stay verbatim for
-#: every other target; for these the prompt asks for the conventional target-script form
-#: ("Montreal" -> "مونتريال") when one exists.
-_NON_LATIN_SCRIPT_LANGS: Final = frozenset(
-    {
-        "am",
-        "ar",
-        "bg",
-        "bn",
-        "el",
-        "fa",
-        "gu",
-        "he",
-        "hi",
-        "hy",
-        "ja",
-        "ka",
-        "kk",
-        "km",
-        "kn",
-        "ko",
-        "lo",
-        "mk",
-        "ml",
-        "mn",
-        "mr",
-        "my",
-        "ne",
-        "pa",
-        "ru",
-        "si",
-        "sr",
-        "ta",
-        "te",
-        "th",
-        "uk",
-        "ur",
-        "yi",
-        "zh",
-    }
+#: Scripts the name rule and the leak check distinguish (docs/04 §10). Everything alphabetic
+#: outside the ranges below is Latin or, when it is a script we do not know, ``"other"``.
+Script = Literal[
+    "latin",
+    "han",
+    "kana",
+    "hangul",
+    "thai",
+    "arabic",
+    "hebrew",
+    "cyrillic",
+    "devanagari",
+    "other",
+]
+
+#: Inclusive code-point ranges per non-Latin script. Digits, punctuation and symbols are never
+#: letters, so only ``str.isalpha()`` characters are ever counted (Arabic-Indic digits such as
+#: ``٣`` live inside the Arabic block but are not letters).
+_SCRIPT_RANGES: Final[tuple[tuple[Script, tuple[tuple[int, int], ...]], ...]] = (
+    ("han", ((0x3005, 0x3007), (0x3400, 0x4DBF), (0x4E00, 0x9FFF), (0xF900, 0xFAFF))),
+    ("kana", ((0x3040, 0x309F), (0x30A0, 0x30FF), (0xFF66, 0xFF9D))),
+    ("hangul", ((0x1100, 0x11FF), (0x3130, 0x318F), (0xAC00, 0xD7AF))),
+    ("thai", ((0x0E00, 0x0E7F),)),
+    ("arabic", ((0x0600, 0x06FF), (0x0750, 0x077F), (0xFB50, 0xFDFF), (0xFE70, 0xFEFF))),
+    ("hebrew", ((0x0590, 0x05FF), (0xFB1D, 0xFB4F))),
+    ("cyrillic", ((0x0400, 0x04FF), (0x0500, 0x052F))),
+    ("devanagari", ((0x0900, 0x097F),)),
 )
 
-_LATIN_NAME_RULE: Final = (
+_NON_LATIN_SCRIPTS: Final = frozenset(
+    {"han", "kana", "hangul", "thai", "arabic", "hebrew", "cyrillic", "devanagari"}
+)
+
+#: The script a language is conventionally written in. Languages whose script is non-Latin but
+#: outside the eight above (Greek, Georgian, Khmer, the Indic scripts ...) are ``"other"``: not
+#: Latin, so a name still cannot stay in the source script.
+_TARGET_SCRIPTS: Final[dict[str, Script]] = {
+    "zh": "han",
+    "yue": "han",
+    "ja": "kana",
+    "ko": "hangul",
+    "th": "thai",
+    "ar": "arabic",
+    "fa": "arabic",
+    "ur": "arabic",
+    "he": "hebrew",
+    "yi": "hebrew",
+    "ru": "cyrillic",
+    "bg": "cyrillic",
+    "uk": "cyrillic",
+    "sr": "cyrillic",
+    "mk": "cyrillic",
+    "be": "cyrillic",
+    "kk": "cyrillic",
+    "mn": "cyrillic",
+    "hi": "devanagari",
+    "mr": "devanagari",
+    "ne": "devanagari",
+}
+_OTHER_SCRIPT_LANGS: Final = frozenset(
+    {"am", "bn", "el", "gu", "hy", "ka", "km", "kn", "lo", "ml", "my", "pa", "si", "ta", "te"}
+)
+
+_LATIN_SAME_SCRIPT_RULE: Final = (
     "keep every name and place name exactly as written in the source, in the Latin script."
 )
-_NON_LATIN_NAME_RULE: Final = (
-    "write names and place names in the conventional form used in the target script when one "
-    "exists (for example Montreal becomes مونتريال in Arabic); otherwise keep the source form."
+_SAME_SCRIPT_RULE: Final = "keep every name and place name exactly as written in the source."
+_LOCALISED_LATIN_RULE: Final = (
+    "write every name and place name in the conventional form used in {language} when one "
+    "exists (an exonym such as Moscow for Москва, Tokyo for 東京, or Cairo for القاهرة); "
+    "otherwise use a standard romanisation such as pinyin or Hepburn. Never leave the name "
+    "in the non-Latin source script."
 )
+_LOCALISED_SCRIPT_RULE: Final = (
+    "write names and place names in the conventional form used in the target script when one "
+    "exists (for example Montreal becomes مونتريال in Arabic); otherwise use a standard "
+    "transliteration."
+)
+#: Extra system line for a per-unit retry after a translation leaked source-script letters
+#: into a Latin-script target (docs/04 §10, verdict 48).
+_LATIN_NAMES_LINE: Final = "Write every name in the Latin script."
 
 
-def name_rule(target_lang: str) -> str:
-    """The prompt rule for proper names in ``target_lang`` (verdict 35 fix 3)."""
-    return _NON_LATIN_NAME_RULE if target_lang in _NON_LATIN_SCRIPT_LANGS else _LATIN_NAME_RULE
+def _script_of_char(char: str) -> Script:
+    """The script of one alphabetic character (``"other"`` when it is none of the known ones)."""
+    code = ord(char)
+    for script, ranges in _SCRIPT_RANGES:
+        if any(low <= code <= high for low, high in ranges):
+            return script
+    if "LATIN" in unicodedata.name(char, ""):
+        return "latin"
+    return "other"
+
+
+def script_of_text(text: str) -> Script:
+    """The script most of ``text``'s letters are written in (``"latin"`` when it has none).
+
+    Detected from the units being translated, not from a language code: a zh job's text is
+    Han whatever the chunk-level language guess was.
+    """
+    counts: dict[Script, int] = {}
+    for char in text:
+        if not char.isalpha():
+            continue
+        script = _script_of_char(char)
+        counts[script] = counts.get(script, 0) + 1
+    if not counts:
+        return "latin"
+    return max(counts, key=counts.__getitem__)
+
+
+def target_script(target_lang: str) -> Script:
+    """The script ``target_lang`` is conventionally written in (Latin unless mapped)."""
+    return _TARGET_SCRIPTS.get(target_lang, "other" if target_lang in _OTHER_SCRIPT_LANGS else "latin")
+
+
+def has_script_leak(text: str) -> bool:
+    """True when ``text`` still holds letters of a non-Latin script (docs/04 §10).
+
+    Used for Latin-script targets: digits, punctuation, ``°``, ``€`` and every symbol are not
+    letters and never count, so ``12 °C`` and ``€5`` are clean.
+    """
+    return any(char.isalpha() and _script_of_char(char) in _NON_LATIN_SCRIPTS for char in text)
+
+
+def name_rule(target_lang: str, source_script: Script = "latin") -> str:
+    """The prompt rule for proper names, chosen from the source and target script.
+
+    Same script: the name is already in the reader's script, so it stays exactly as written.
+    Different script: the conventional target-language form (exonym), else a standard
+    romanisation or transliteration, so a zh→en line never mixes Han characters into English
+    (verdict 48: a Han name stayed inside an English sentence because the old rule demanded
+    the Latin script while also demanding the source spelling).
+    """
+    target = target_script(target_lang)
+    if target == source_script:
+        return _LATIN_SAME_SCRIPT_RULE if source_script == "latin" else _SAME_SCRIPT_RULE
+    if target == "latin":
+        return _LOCALISED_LATIN_RULE.format(language=LANGUAGE_NAMES.get(target_lang, target_lang))
+    return _LOCALISED_SCRIPT_RULE
 
 
 #: Native names make the target unambiguous for the model ("German (Deutsch)").
@@ -205,11 +292,19 @@ class _TranslationBatch(BaseModel):
 
 
 class TranslatedUnits(list[str]):
-    """Translated texts in unit order (a ``list[str]``) plus the fallback indices."""
+    """Translated texts in unit order (a ``list[str]``), fallbacks and script leaks."""
 
-    def __init__(self, values: Iterable[str], *, failed_indices: Iterable[int] = ()) -> None:
+    def __init__(
+        self,
+        values: Iterable[str],
+        *,
+        failed_indices: Iterable[int] = (),
+        script_leaks: int = 0,
+    ) -> None:
         super().__init__(values)
         self.failed_indices: frozenset[int] = frozenset(failed_indices)
+        #: Units kept as returned although they still hold non-Latin letters for a Latin target.
+        self.script_leaks = script_leaks
 
     @property
     def failed_units(self) -> int:
@@ -465,6 +560,7 @@ def _payload(texts: Sequence[str]) -> str:
 
 
 def _validate_batch(cues: Sequence[_TranslatedCue], size: int) -> dict[int, str] | None:
+    """Index-exact mapping of one batch, or ``None`` when the index set is wrong."""
     mapping: dict[int, str] = {}
     for cue in cues:
         if cue.i in mapping or not 0 <= cue.i < size:
@@ -476,6 +572,11 @@ def _validate_batch(cues: Sequence[_TranslatedCue], size: int) -> dict[int, str]
     if set(mapping) != set(range(size)):
         return None
     return mapping
+
+
+def _batch_leaks(mapping: Mapping[int, str], latin_target: bool) -> bool:
+    """True when a Latin-script target's batch still holds non-Latin letters (docs/04 §10)."""
+    return latin_target and any(has_script_leak(text) for text in mapping.values())
 
 
 async def _call(
@@ -503,13 +604,37 @@ async def _translate_one(
     *,
     system: str,
     text: str,
-) -> str | None:
+    latin_target: bool,
+) -> tuple[str | None, bool]:
+    """One unit on its own; returns ``(text or None, still_leaking)``.
+
+    A leaked non-Latin name gets one retry with an explicit Latin-script system line. If it
+    leaks again the translation is kept (never the source text) and reported as a leak.
+    """
     try:
         mapping = await _call(llm, system=system, texts=[text])
     except CaracalError as exc:
         logger.warning("translate.unit_failed", extra={"code": exc.code.value})
-        return None
-    return mapping.get(0) if mapping is not None else None
+        return None, False
+    if mapping is None:
+        return None, False
+    value = mapping[0]
+    if not latin_target or not has_script_leak(value):
+        return value, False
+    try:
+        retry = await _call(
+            llm,
+            system=f"{system}\n{_LATIN_NAMES_LINE}",
+            texts=[text],
+        )
+    except CaracalError as exc:
+        logger.warning("translate.unit_retry_failed", extra={"code": exc.code.value})
+        return value, True
+    if retry is not None:
+        value = retry[0]
+        if not has_script_leak(value):
+            return value, False
+    return value, True
 
 
 async def _translate_batch(
@@ -518,7 +643,9 @@ async def _translate_batch(
     system: str,
     llm: LLMClient,
     offset: int,
-) -> tuple[list[str], set[int]]:
+    latin_target: bool,
+) -> tuple[list[str], set[int], int]:
+    """Translate one batch; returns ``(texts, failed indices, script leaks)``."""
     texts = [unit.text for unit in units]
     for _attempt in range(2):
         try:
@@ -527,19 +654,24 @@ async def _translate_batch(
             logger.warning("translate.batch_failed", extra={"code": exc.code.value, "units": len(units)})
             mapping = None
             break
-        if mapping is not None:
-            return [mapping[index] for index in range(len(units))], set()
+        if mapping is not None and not _batch_leaks(mapping, latin_target):
+            return [mapping[index] for index in range(len(units))], set(), 0
 
-    fallbacks = await asyncio.gather(*(_translate_one(llm, system=system, text=unit.text) for unit in units))
+    fallbacks = await asyncio.gather(
+        *(_translate_one(llm, system=system, text=unit.text, latin_target=latin_target) for unit in units)
+    )
     translated: list[str] = []
     failed: set[int] = set()
-    for local, (unit, value) in enumerate(zip(units, fallbacks, strict=True)):
+    leaks = 0
+    for local, (unit, (value, leaking)) in enumerate(zip(units, fallbacks, strict=True)):
         if value is None:
             translated.append(unit.text)
             failed.add(offset + local)
         else:
             translated.append(value)
-    return translated, failed
+            if leaking:
+                leaks += 1
+    return translated, failed, leaks
 
 
 async def translate_units(
@@ -552,9 +684,11 @@ async def translate_units(
 ) -> list[str]:
     """Translate sentence units into ``target_lang`` (docs/04 §10).
 
-    Units are sent in batches of 25; a batch whose index set does not match is retried once
-    and then re-sent one unit at a time. Unrecoverable units keep their source text and are
-    reported in :attr:`TranslatedUnits.failed_indices`.
+    Units are sent in batches of 25; a batch whose index set does not match, or (for a
+    Latin-script target) whose text still holds non-Latin letters, is retried once and then
+    re-sent one unit at a time. Unrecoverable units keep their source text and are reported in
+    :attr:`TranslatedUnits.failed_indices`; a leaked unit that survives its retry keeps its
+    translation and is counted in :attr:`TranslatedUnits.script_leaks`.
     """
     if not units:
         return TranslatedUnits([], failed_indices=set())
@@ -562,40 +696,53 @@ async def translate_units(
     english = LANGUAGE_NAMES.get(target_lang, target_lang)
     native = _NATIVE_NAMES.get(target_lang, english)
     names = normalise_target_langs([name.strip() for name in glossary if name.strip()])
+    source_script = script_of_text(" ".join(unit.text for unit in units))
+    latin_target = target_script(target_lang) == "latin"
     system = load_prompt(
         "translate",
         target_language=english,
         target_native=native,
         glossary=", ".join(names[:_MAX_GLOSSARY]) or "none",
-        name_rule=name_rule(target_lang),
+        name_rule=name_rule(target_lang, source_script),
         summary=summary.strip() or "none",
     )
 
     batches = [units[start : start + _BATCH_SIZE] for start in range(0, len(units), _BATCH_SIZE)]
     results = await asyncio.gather(
         *(
-            _translate_batch(batch, system=system, llm=llm, offset=start)
+            _translate_batch(
+                batch,
+                system=system,
+                llm=llm,
+                offset=start,
+                latin_target=latin_target,
+            )
             for start, batch in zip(range(0, len(units), _BATCH_SIZE), batches, strict=True)
         )
     )
     translated: list[str] = []
     failed: set[int] = set()
-    for values, failures in results:
+    leaks = 0
+    for values, failures, batch_leaks in results:
         translated.extend(values)
         failed |= failures
-    return TranslatedUnits(translated, failed_indices=failed)
+        leaks += batch_leaks
+    return TranslatedUnits(translated, failed_indices=failed, script_leaks=leaks)
 
 
 __all__ = [
     "TranslatedUnits",
     "TranslationUnit",
     "cue_text",
+    "has_script_leak",
     "is_valid_target_lang",
     "name_rule",
     "normalise_target_langs",
     "redistribute",
     "resolve_target_langs",
+    "script_of_text",
     "segment_token_starts",
+    "target_script",
     "translate_units",
     "units_from_cues",
 ]

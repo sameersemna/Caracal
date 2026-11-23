@@ -11,7 +11,7 @@ sits; a lone occurrence is judged by position and silence.
 from __future__ import annotations
 
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import replace
 
 from caracal.asr import Segment, Transcript, WhisperResult, join_words
@@ -50,8 +50,14 @@ def _midpoint(start: float, end: float) -> float:
 
 
 def _cut(earlier: Chunk, later: Chunk) -> float | None:
-    """Midpoint of the overlap of two adjacent chunks, or ``None`` when they do not overlap."""
-    if later.start_s > earlier.end_s:
+    """Midpoint of the overlap of two adjacent chunks, or ``None`` when they do not overlap.
+
+    Two chunks that merely touch (``later.start_s == earlier.end_s``) do not overlap: there
+    is nothing for a midpoint rule to arbitrate, so the whole of both is kept. This is how a
+    stitched recovery span (one chunk exactly over the credit span) sits between the region
+    pieces before and after it without a midpoint cut eating its first or last words.
+    """
+    if later.start_s >= earlier.end_s:
         return None
     return (later.start_s + earlier.end_s) / 2.0
 
@@ -96,11 +102,16 @@ def _kept_segment(
     shift: float,
     lower_cut: float | None,
     upper_cut: float | None,
+    *,
+    preserve_bounds: bool = False,
 ) -> Segment | None:
     """Shift a segment, keep the words owned by this chunk and preserve its text.
 
     A segment that loses no words keeps whisper's own ``text`` verbatim; only a trimmed
-    segment is rebuilt from its words with :func:`join_words`.
+    segment is rebuilt from its words with :func:`join_words`. ``preserve_bounds`` keeps the
+    segment's own start/end when nothing is trimmed: a stitched recovery span already clamped
+    them at the window seams, and recomputing from coarse CJK word times would reintroduce
+    the overlap the stitch removed (docs/04 §4, card 49).
     """
     shifted = tuple(replace(word, start=word.start + shift, end=word.end + shift) for word in segment.words)
     if not shifted:
@@ -125,6 +136,14 @@ def _kept_segment(
     if not kept:
         return None
     text = segment.text.strip() if len(kept) == len(shifted) else join_words(kept)
+    if preserve_bounds and len(kept) == len(shifted):
+        return replace(
+            segment,
+            start=segment.start + shift,
+            end=segment.end + shift,
+            text=text,
+            words=kept,
+        )
     return replace(
         segment,
         start=min(word.start for word in kept),
@@ -203,12 +222,201 @@ def _apply_filters(
     return kept, dropped
 
 
+#: Credit recovery re-transcribes a credit span in windows of this length, overlapping by
+#: ``_RECOVERY_OVERLAP_S`` (docs/04 §4). The measured 30 s decode window opens with ~10 s of
+#: music, then speech; 10 s windows catch that speech without re-entering the music.
+_RECOVERY_SIZE_S = 10.0
+_RECOVERY_OVERLAP_S = 1.0
+
+
+def credit_spans(
+    result: WhisperResult,
+    chunk: Chunk,
+    *,
+    min_s: float = 8.0,
+) -> list[tuple[float, float]]:
+    """Absolute ``(start, end)`` of each credit segment of one chunk longer than ``min_s``.
+
+    A credit that lasts longer than ``min_s`` cannot be an intro/outro card (the measured one
+    spans whisper's whole 30 s decode window): it was hallucinated over music, the speech under
+    it may still be there and :func:`recovery_windows` says how to get it back. Bounds are
+    snapped to 0.1 s: whisper
+    reports the measured 30 s window's credit as ``0.0-29.98`` and the recovery windows are
+    derived from the window, not from that float noise.
+    """
+    spans: list[tuple[float, float]] = []
+    for segment in result.segments:
+        if segment.end - segment.start <= min_s:
+            continue
+        if not is_hallucinated_credit(normalise_text(segment.text)):
+            continue
+        spans.append(
+            (
+                round(chunk.start_s + segment.start, 1),
+                round(chunk.start_s + segment.end, 1),
+            )
+        )
+    return spans
+
+
+def recovery_windows(
+    start: float,
+    end: float,
+    *,
+    size: float = _RECOVERY_SIZE_S,
+    overlap: float = _RECOVERY_OVERLAP_S,
+) -> list[tuple[float, float]]:
+    """The ``size``-long windows that cover ``[start, end]`` with ``overlap`` (docs/04 §4).
+
+    The first windows start at ``start, start + (size - overlap), …`` while the *next* window
+    still fits; the last window ends at ``end`` and starts at ``max(last_start, end - size)``,
+    so ``(0, 30)`` yields ``[(0, 10), (9, 19), (18, 28), (20, 30)]`` and no audio at the tail is
+    lost. A span no longer than ``size`` is one window.
+    """
+    if end - start <= size:
+        return [(start, end)]
+    windows: list[tuple[float, float]] = []
+    cursor = start
+    while cursor + size < end:
+        windows.append((cursor, cursor + size))
+        cursor += size - overlap
+    final_start = max(windows[-1][0] if windows else start, end - size)
+    windows.append((final_start, end))
+    return windows
+
+
+def drop_window_credits(
+    results: Sequence[WhisperResult],
+    chunks: Sequence[Chunk],
+    *,
+    duration_s: float,
+    silences: Sequence[tuple[float, float]] = (),
+) -> list[WhisperResult]:
+    """Drop whole credit segments from recovery-window results, before they are merged.
+
+    A recovery window that holds only music comes back as the credit again. The overlap rule
+    trims a segment to the words the neighbouring window did not take, which can cut
+    ``中文字幕志愿者`` down to ``中文`` — text that no longer matches a credit and would then
+    survive into the transcript. So each window segment is judged *whole* at absolute time by
+    the same rule as :func:`_apply_filters` (a recurring credit anywhere, or a one-off at an
+    edge or inside measured silence) and the rejected segments are removed here. The surviving
+    results are merged normally afterwards.
+    """
+    if len(results) != len(chunks):
+        raise CaracalError(
+            ErrorCode.INTERNAL,
+            "whisper results and chunks do not line up",
+            {"results": len(results), "chunks": len(chunks)},
+        )
+    absolute: list[tuple[int, int, Segment]] = []
+    for result_index, (result, chunk) in enumerate(zip(results, chunks, strict=True)):
+        for segment_index, segment in enumerate(result.segments):
+            absolute.append(
+                (
+                    result_index,
+                    segment_index,
+                    replace(
+                        segment,
+                        start=segment.start + chunk.start_s,
+                        end=segment.end + chunk.start_s,
+                    ),
+                )
+            )
+    segments = [segment for _result, _position, segment in absolute]
+    looped_credit = _is_looped_credit([segment for segment in segments if _survives_speech_filter(segment)])
+    dropped = {
+        (result_index, segment_index)
+        for result_index, segment_index, segment in absolute
+        if is_hallucinated_credit(normalise_text(segment.text))
+        and (looped_credit or _at_edge(segment, duration_s) or _in_non_speech(segment, silences))
+    }
+    return [
+        replace(
+            result,
+            segments=tuple(
+                segment
+                for segment_index, segment in enumerate(result.segments)
+                if (result_index, segment_index) not in dropped
+            ),
+        )
+        for result_index, result in enumerate(results)
+    ]
+
+
+#: A segment that ends within this distance of a window's end is truncated or invented
+#: (``切换了警方的手机`` at 18.66-19.00), so it never sets the seam (docs/04 §4).
+_SEAM_EPSILON_S = 0.2
+
+
+def _absolute_segment(segment: Segment, shift: float, index: int) -> Segment:
+    """One window segment on the source timeline, words shifted with it."""
+    return replace(
+        segment,
+        id=index,
+        start=segment.start + shift,
+        end=segment.end + shift,
+        words=tuple(replace(word, start=word.start + shift, end=word.end + shift) for word in segment.words),
+    )
+
+
+def stitch_windows(
+    results: Sequence[WhisperResult],
+    chunks: Sequence[Chunk],
+) -> list[Segment]:
+    """Stitch the recovery windows of one credit span at segment level (docs/04 §4).
+
+    ``results`` are the windows in chronological order, already passed through
+    :func:`drop_window_credits`, with window-local times; ``chunks`` are their source spans.
+    For consecutive windows A, B the seam ``t`` is the end of A's last segment that ends more
+    than :data:`_SEAM_EPSILON_S` before A's end (a segment touching the window end is
+    truncated or invented), or ``B.start`` when A has no such segment. A keeps the segments
+    ending at or before ``t``; B keeps those whose midpoint is at or after ``t``. Every kept
+    segment is whole -- no words are trimmed -- and the last window's segments are all kept,
+    because the audio after the credit span continues from there.
+
+    Whisper times the same word differently in two windows, so a kept B segment can start a
+    little before the seam (or before A's last kept segment ends). Only its reported
+    start/end are pulled up to the previous segment's end; its words and text stay whole.
+    The returned segments are absolute, ordered and non-overlapping.
+    """
+    if len(results) != len(chunks):
+        raise CaracalError(
+            ErrorCode.INTERNAL,
+            "whisper results and chunks do not line up",
+            {"results": len(results), "chunks": len(chunks)},
+        )
+    stitched: list[Segment] = []
+    previous_end: float | None = None
+    lower_bound: float | None = None
+    for index, (result, chunk) in enumerate(zip(results, chunks, strict=True)):
+        segments = [
+            _absolute_segment(segment, chunk.start_s, position)
+            for position, segment in enumerate(result.segments)
+        ]
+        if lower_bound is not None:
+            segments = [
+                segment for segment in segments if _midpoint(segment.start, segment.end) >= lower_bound
+            ]
+        if index + 1 < len(chunks):
+            reliable = [segment for segment in segments if segment.end < chunk.end_s - _SEAM_EPSILON_S]
+            seam = max(segment.end for segment in reliable) if reliable else chunks[index + 1].start_s
+            segments = [segment for segment in segments if segment.end <= seam]
+            lower_bound = seam
+        for segment in segments:
+            if previous_end is not None and segment.start < previous_end:
+                segment = replace(segment, start=previous_end)
+            stitched.append(replace(segment, id=len(stitched)))
+            previous_end = segment.end
+    return stitched
+
+
 def merge_chunks(
     results: Sequence[WhisperResult],
     chunks: Sequence[Chunk],
     *,
     duration_s: float | None = None,
     silences: Sequence[tuple[float, float]] = (),
+    preserve_bounds: Collection[int] = (),
 ) -> Transcript:
     """Merge chunk-local results into one absolute-timeline :class:`Transcript`.
 
@@ -216,7 +424,9 @@ def merge_chunks(
     the intro/outro window in which hallucinated credits are dropped. ``silences`` are the
     non-speech spans measured by ``normalize``; a credit inside one is dropped wherever it
     sits. A caller that does not know them (the transcribe stage) passes none, and only the
-    intro/outro rule applies.
+    intro/outro rule applies. ``preserve_bounds`` lists chunk indices whose segments already
+    carry deliberate start/end times (a stitched recovery span) and must not have them
+    recomputed from whisper's coarse word times.
     """
     if len(results) != len(chunks):
         raise CaracalError(
@@ -233,7 +443,13 @@ def merge_chunks(
         lower_cut = _cut(chunks[index - 1], chunk) if index > 0 else None
         upper_cut = _cut(chunk, chunks[index + 1]) if index + 1 < len(chunks) else None
         for raw_segment in result.segments:
-            trimmed = _kept_segment(raw_segment, chunk.start_s, lower_cut, upper_cut)
+            trimmed = _kept_segment(
+                raw_segment,
+                chunk.start_s,
+                lower_cut,
+                upper_cut,
+                preserve_bounds=index in preserve_bounds,
+            )
             if trimmed is None:
                 continue
             combined.append(
