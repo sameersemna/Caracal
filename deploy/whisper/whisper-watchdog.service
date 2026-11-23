@@ -1,0 +1,7 @@
+[Unit]
+Description=Health check for whisper-server (restart if down or unresponsive)
+After=whisper-server.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/whisper-watchdog

@@ -1,4 +1,5 @@
 [Unit]
+StartLimitIntervalSec=0
 Description=Caracal API (REST /v1, MCP HTTP /mcp, Prometheus /metrics)
 Documentation=file:///home/sameer/Public/Shared/Work/Services/MCP/Caracal/README.md
 After=network-online.target
@@ -11,7 +12,7 @@ Group=sameer
 WorkingDirectory=/home/sameer/Public/Shared/Work/Services/MCP/Caracal
 EnvironmentFile=/home/sameer/Public/Shared/Work/Services/MCP/Caracal/.env
 ExecStart=/home/sameer/Public/Shared/Work/Services/MCP/Caracal/.venv/bin/caracal serve
-Restart=on-failure
+Restart=always
 RestartSec=5
 TimeoutStopSec=60
 NoNewPrivileges=true
