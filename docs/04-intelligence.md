@@ -110,9 +110,13 @@ The LLM call (prompt `plan.md`) receives title, description excerpt, first ~3 mi
   (BBC Chinese clip: ~10 s jingle, then a 20 s Bahrain story) comes back as **one** credit segment spanning the whole window
   (`0.0–30.0 中文字幕志愿者 李宗盛`). Dropping it silently deletes the speech under it. So before merging, every credit segment
   (`is_hallucinated_credit`) **longer than 8 s** is replaced by re-transcribing its span in **10 s windows with 1 s overlap**
-  (starts `s, s+9, …` while `start + 10 < e`, final window `[max(s, e−10), e]`); the sub-window results are merged with the
-  normal overlap/midpoint rule and filtered like everything else (the pure-music sub-window returns the credit again and is
-  dropped). Budget: ≤ 6 recovered spans per job; counted as `dropped.credit_recovered_spans` / words recovered in the log.
+  (starts `s, s+9, …` while `start + 10 < e`, final window `[max(s, e−10), e]`). Credits inside the windows are judged whole
+  first (the pure-music sub-window returns the credit again and is dropped). Windows are then **stitched at segment level**, not
+  by the word midpoint (verdict 48, measured: midpoint cuts through whisper's coarse CJK token times lost `政府`, `弹`, `企圖` and
+  duplicated `說`): for consecutive windows A, B the seam `t` = end of A's last segment that ends **< A.end − 0.2 s** (segments
+  touching a window's end are truncated or invented — `切换了警方的手机` at 18.66–19.00); if A has no such segment, `t = B.start`.
+  Keep A's segments with `end ≤ t` and B's with midpoint `≥ t`, whole. The last window's segments are all kept (the chunk's own
+  segments continue after the span). Budget: ≤ 6 recovered spans per job; `dropped.credit_recovered_spans`.
 - `language_spans`: per chunk detected language + per-segment re-check: when a chunk's
   `detected_language_probability < 0.6` and duration > 60 s, re-transcribe 30 s windows to find spans
   (max 6 extra calls per job). Output `languages[]` with shares.
